@@ -419,72 +419,90 @@ async def index_handler(client: Client, message: Message):
     if message.from_user:
         await db.add_user(message.from_user.id)
 
-    status_msg = await message.reply_text("⏳ **Starting Fast Indexing... Scanning DB Channel.**")
-    peer = await resolve_channel_peer(client)
+    status_msg = await message.reply_text("⏳ **Discovering all Groups & Channels from Dialogs...**")
     
-    current_id = 1
-    empty_streak = 0
-    new_added = 0
+    total_new = 0
+    scanned_chats = 0
     last_update = time.time()
 
     try:
-        while empty_streak < 25:
-            msg_ids = list(range(current_id, current_id + 200))
-            batch = await client.get_messages(chat_id=peer, message_ids=msg_ids)
-            found_count = 0
-            to_insert = []
+        dialog_chats = []
+        async for dialog in client.get_dialogs():
+            if dialog.chat and dialog.chat.type in [
+                enums.ChatType.GROUP,
+                enums.ChatType.SUPERGROUP,
+                enums.ChatType.CHANNEL
+            ]:
+                dialog_chats.append((dialog.chat.id, dialog.chat.title or "Chat"))
 
-            if batch:
-                if not isinstance(batch, list):
-                    batch = [batch]
-                for msg in batch:
-                    if msg and not getattr(msg, "empty", False):
-                        found_count += 1
-                        media = msg.video or msg.document or msg.audio or msg.animation
-                        if media:
-                            title = (
-                                msg.caption.strip().split("\n")[0].strip() if msg.caption and msg.caption.strip()
-                                else (getattr(media, "file_name", None) or f"Movie_{msg.id}")
-                            )
-                            file_id = getattr(media, "file_id", None)
-                            file_size = getattr(media, "file_size", 0)
-                            if file_id:
-                                to_insert.append((file_id, title, file_size, msg.id))
+        if not dialog_chats:
+            await status_msg.edit_text("❌ No groups, supergroups, or channels found in bot dialogs. Add the bot to your group/channel as Admin first!")
+            return
 
-            if to_insert:
-                added = await db.add_movies_batch(to_insert)
-                new_added += added
+        for chat_id, chat_title in dialog_chats:
+            scanned_chats += 1
+            current_id = 1
+            empty_streak = 0
 
-            empty_streak = empty_streak + 1 if found_count == 0 else 0
-            current_id += 200
-
-            if time.time() - last_update > 3:
-                stats = await db.get_stats()
+            while empty_streak < 25:
+                msg_ids = list(range(current_id, current_id + 200))
                 try:
-                    await status_msg.edit_text(
-                        f"⏳ **Indexing in Progress...**\n\n"
-                        f"• **Scanned up to ID:** `{current_id}`\n"
-                        f"• **Newly Added:** `{new_added}`\n"
-                        f"• **Total Movies in DB:** `{stats['movies']}`"
-                    )
-                except MessageNotModified:
-                    pass
-                last_update = time.time()
+                    batch = await client.get_messages(chat_id=chat_id, message_ids=msg_ids)
+                except Exception:
+                    break
+
+                found_count = 0
+                to_insert = []
+
+                if batch:
+                    if not isinstance(batch, list):
+                        batch = [batch]
+                    for msg in batch:
+                        if msg and not getattr(msg, "empty", False):
+                            found_count += 1
+                            media = msg.video or msg.document or msg.audio or msg.animation
+                            if media:
+                                title = (
+                                    msg.caption.strip().split("\n")[0].strip() if msg.caption and msg.caption.strip()
+                                    else (getattr(media, "file_name", None) or f"Movie_{msg.id}")
+                                )
+                                file_id = getattr(media, "file_id", None)
+                                file_size = getattr(media, "file_size", 0)
+                                if file_id:
+                                    to_insert.append((file_id, title, file_size, msg.id))
+
+                if to_insert:
+                    added = await db.add_movies_batch(to_insert)
+                    total_new += added
+
+                empty_streak = empty_streak + 1 if found_count == 0 else 0
+                current_id += 200
+
+                if time.time() - last_update > 3:
+                    stats = await db.get_stats()
+                    try:
+                        await status_msg.edit_text(
+                            f"⏳ **Indexing in Progress...**\n\n"
+                            f"• **Scanning Chat ({scanned_chats}/{len(dialog_chats)}):** `{chat_title}`\n"
+                            f"• **Scanned up to ID:** `{current_id}`\n"
+                            f"• **Newly Added:** `{total_new}`\n"
+                            f"• **Total Movies in DB:** `{stats['movies']}`"
+                        )
+                    except MessageNotModified:
+                        pass
+                    last_update = time.time()
 
         stats = await db.get_stats()
-        await status_msg.edit_text(f"✅ **Indexing Complete!**\n\n🎬 **Total Movies in Database:** `{stats['movies']}`")
+        await status_msg.edit_text(
+            f"✅ **Indexing Complete!**\n\n"
+            f"• **Total Chats Scanned:** `{scanned_chats}`\n"
+            f"• **New Files Added:** `{total_new}`\n"
+            f"🎬 **Total Movies in Database:** `{stats['movies']}`"
+        )
     except FloodWait as e:
         await asyncio.sleep(e.value)
         stats = await db.get_stats()
         await status_msg.edit_text(f"✅ **Indexing Complete!**\n\n🎬 **Total Movies in Database:** `{stats['movies']}`")
-    except PeerIdInvalid as e:
-        logger.warning(f"PeerIdInvalid during indexing: {e}")
-        stats = await db.get_stats()
-        await status_msg.edit_text(
-            f"⚠️ **DB Channel Peer Notice:**\n"
-            f"Please make sure the bot is added as an Admin in the DB Channel (`{DB_CHANNEL_ID}`).\n\n"
-            f"🎬 **Total Movies in Database:** `{stats['movies']}`"
-        )
     except Exception as e:
         logger.error(f"Indexing error: {e}")
         stats = await db.get_stats()
@@ -663,13 +681,25 @@ async def callback_router(client: Client, query: CallbackQuery):
                 "⚠️ *This movie file will auto-delete in 60 seconds (1 minute) due to copyright! Forward/save it now!*"
             )
 
-            peer = await resolve_channel_peer(client)
-            sent_file = await client.copy_message(
-                chat_id=query.from_user.id,
-                from_chat_id=peer,
-                message_id=msg_id,
-                caption=caption
-            )
+            sent_file = None
+            if file_info and file_info.get("file_id"):
+                try:
+                    sent_file = await client.send_cached_media(
+                        chat_id=query.from_user.id,
+                        file_id=file_info["file_id"],
+                        caption=caption
+                    )
+                except Exception:
+                    sent_file = None
+
+            if not sent_file:
+                peer = await resolve_channel_peer(client)
+                sent_file = await client.copy_message(
+                    chat_id=query.from_user.id,
+                    from_chat_id=peer,
+                    message_id=msg_id,
+                    caption=caption
+                )
             if sent_file:
                 asyncio.create_task(auto_delete(sent_file, 60))
 

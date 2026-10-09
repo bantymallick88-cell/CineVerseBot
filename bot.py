@@ -38,19 +38,32 @@ logging.basicConfig(
 )
 logger = logging.getLogger("CineVerseBot")
 
-API_ID = int(os.getenv("API_ID", 36971153))
-API_HASH = os.getenv("API_HASH", "e5e4c9c88d0c5c2654d8fbe985523c9c")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8994566569:AAG8pdApyO7ut1BrG6xdstrkdWL1ZUProfY")
+def get_env_int(key: str, default: int) -> int:
+    val = os.getenv(key)
+    if val and str(val).strip():
+        try:
+            return int(str(val).strip())
+        except (ValueError, TypeError):
+            pass
+    return default
 
-raw_db_channel = os.getenv("DB_CHANNEL_ID", "-1004312780149")
+def get_env_str(key: str, default: str) -> str:
+    val = os.getenv(key)
+    return str(val).strip() if val and str(val).strip() else default
+
+API_ID = get_env_int("API_ID", 36971153)
+API_HASH = get_env_str("API_HASH", "e5e4c9c88d0c5c2654d8fbe985523c9c")
+BOT_TOKEN = get_env_str("BOT_TOKEN", "8994566569:AAG8pdApyO7ut1BrG6xdstrkdWL1ZUProfY")
+
+raw_db_channel = get_env_str("DB_CHANNEL_ID", "-1004312780149")
 try:
     DB_CHANNEL_ID = int(raw_db_channel)
 except (ValueError, TypeError):
     DB_CHANNEL_ID = str(raw_db_channel).lstrip("@")
 
-ADMIN_ID = int(os.getenv("ADMIN_ID", 7831101047))
-CHANNEL_LINK = os.getenv("CHANNEL_LINK", "https://t.me/cenahub01")
-WELCOME_IMAGE_URL = os.getenv(
+ADMIN_ID = get_env_int("ADMIN_ID", 7831101047)
+CHANNEL_LINK = get_env_str("CHANNEL_LINK", "https://t.me/cenahub01")
+WELCOME_IMAGE_URL = get_env_str(
     "WELCOME_IMAGE_URL",
     "https://images.unsplash.com/photo-1536440136628-849c177e76a1?q=80&w=1200&auto=format&fit=crop"
 )

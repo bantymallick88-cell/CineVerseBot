@@ -288,7 +288,20 @@ async def resolve_channel_peer(client: Client) -> Any:
     if TARGET_RESOLVED_CHAT_ID:
         return TARGET_RESOLVED_CHAT_ID
 
-    # Prioritize int(DB_CHANNEL_ID) for dynamic get_chat peer caching
+    # 1. Force Pyrogram to load all dialogs to populate internal peer cache
+    try:
+        async for dialog in client.get_dialogs():
+            if dialog.chat:
+                cid = dialog.chat.id
+                cuser = (dialog.chat.username or "").lower().lstrip("@")
+                if cid == DB_CHANNEL_ID or cid == -1004312780149 or cuser in ["cenahub01"]:
+                    TARGET_RESOLVED_CHAT_ID = cid
+                    logger.info(f"✅ DB Channel Peer found in dialogs: {TARGET_RESOLVED_CHAT_ID}")
+                    return TARGET_RESOLVED_CHAT_ID
+    except Exception as e:
+        logger.debug(f"Pre-caching dialogs notice: {e}")
+
+    # 2. Try direct get_chat on all candidates
     candidates = []
     try:
         if isinstance(DB_CHANNEL_ID, int):

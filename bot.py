@@ -25,7 +25,8 @@ from pyrogram.types import (
 from pyrogram.errors import (
     FloodWait,
     UserIsBlocked,
-    MessageNotModified
+    MessageNotModified,
+    PeerIdInvalid
 )
 
 # ---------------------------------------------------------------------------
@@ -287,13 +288,29 @@ async def resolve_channel_peer(client: Client) -> Any:
     if TARGET_RESOLVED_CHAT_ID:
         return TARGET_RESOLVED_CHAT_ID
 
-    for candidate in ["cenahub01", "@cenahub01", DB_CHANNEL_ID, -1004312780149]:
+    # Prioritize int(DB_CHANNEL_ID) for dynamic get_chat peer caching
+    candidates = []
+    try:
+        if isinstance(DB_CHANNEL_ID, int):
+            candidates.append(DB_CHANNEL_ID)
+        elif str(DB_CHANNEL_ID).lstrip("-").isdigit():
+            candidates.append(int(DB_CHANNEL_ID))
+    except Exception:
+        pass
+
+    candidates.extend(["cenahub01", "@cenahub01", -1004312780149, DB_CHANNEL_ID])
+
+    for candidate in candidates:
+        if candidate is None:
+            continue
         try:
             chat = await client.get_chat(candidate)
             if chat and chat.id:
                 TARGET_RESOLVED_CHAT_ID = chat.id
+                logger.info(f"✅ DB Channel Peer resolved and cached: {TARGET_RESOLVED_CHAT_ID} (@{chat.username or 'private'})")
                 return TARGET_RESOLVED_CHAT_ID
-        except Exception:
+        except (PeerIdInvalid, Exception) as e:
+            logger.debug(f"Candidate {candidate} could not be resolved: {e}")
             continue
 
     TARGET_RESOLVED_CHAT_ID = DB_CHANNEL_ID
@@ -447,6 +464,14 @@ async def index_handler(client: Client, message: Message):
         await asyncio.sleep(e.value)
         stats = await db.get_stats()
         await status_msg.edit_text(f"✅ **Indexing Complete!**\n\n🎬 **Total Movies in Database:** `{stats['movies']}`")
+    except PeerIdInvalid as e:
+        logger.warning(f"PeerIdInvalid during indexing: {e}")
+        stats = await db.get_stats()
+        await status_msg.edit_text(
+            f"⚠️ **DB Channel Peer Notice:**\n"
+            f"Please make sure the bot is added as an Admin in the DB Channel (`{DB_CHANNEL_ID}`).\n\n"
+            f"🎬 **Total Movies in Database:** `{stats['movies']}`"
+        )
     except Exception as e:
         logger.error(f"Indexing error: {e}")
         stats = await db.get_stats()

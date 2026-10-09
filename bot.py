@@ -289,8 +289,7 @@ async def resolve_channel_peer(client: Client) -> Any:
         return TARGET_RESOLVED_CHAT_ID
 
     try:
-        channel_target = int(DB_CHANNEL_ID)
-        chat = await client.get_chat(channel_target)
+        chat = await client.get_chat(int(DB_CHANNEL_ID))
         if chat and chat.id:
             TARGET_RESOLVED_CHAT_ID = chat.id
             return TARGET_RESOLVED_CHAT_ID

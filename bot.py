@@ -289,7 +289,13 @@ async def resolve_channel_peer(client: Client) -> Any:
         return TARGET_RESOLVED_CHAT_ID
 
     try:
-        chat = await client.get_chat(int(DB_CHANNEL_ID))
+        channel_id = str(DB_CHANNEL_ID).strip()
+        if not channel_id.startswith("-100"):
+            if channel_id.startswith("-"):
+                channel_id = "-100" + channel_id[1:]
+            else:
+                channel_id = "-100" + channel_id
+        chat = await client.get_chat(int(channel_id))
         if chat and chat.id:
             TARGET_RESOLVED_CHAT_ID = chat.id
             return TARGET_RESOLVED_CHAT_ID

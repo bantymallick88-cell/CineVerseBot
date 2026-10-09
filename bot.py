@@ -205,26 +205,57 @@ async def auto_delete(message: Message, delay: int = 30):
     except Exception:
         pass
 
+def format_search_text(query: str, files: List[Dict[str, Any]], total: int, page: int, total_pages: int) -> str:
+    lines = []
+    for f in files:
+        name = f.get("title", "Movie File")
+        size_str = format_size(f.get("file_size", 0))
+        lines.append(f"📁 `{size_str}` ▷ **{name}**")
+
+    files_list = "\n".join(lines)
+    return (
+        f"🔍 **Search Results for:** `{query}`\n\n"
+        f"{files_list}\n\n"
+        f"📊 **Total Results:** `{total}` | **Page:** `{page}/{total_pages}`\n"
+        f"✨ *Click any button below to download instantly!*\n"
+        f"⚠️ *This search result will auto-delete in 30 seconds!*"
+    )
+
 def build_pagination_markup(files: List[Dict[str, Any]], cache_id: str, current_page: int, total_pages: int) -> InlineKeyboardMarkup:
     buttons = []
+    
+    # File download buttons formatted as: 📁 [File Size] ▷ [Clean File Title]
     for f in files:
         name = f.get("title", "Movie")
         size_str = format_size(f.get("file_size", 0))
-        display_name = (name[:28] + "...") if len(name) > 30 else name
-        buttons.append([InlineKeyboardButton(f"🍿 {display_name} [{size_str}]", callback_data=f"get_{f['message_id']}")])
+        display_name = (name[:30] + "...") if len(name) > 33 else name
+        btn_text = f"📁 {size_str} ▷ {display_name}"
+        buttons.append([InlineKeyboardButton(btn_text, callback_data=f"get_{f['message_id']}")])
 
+    # Row 1: Filter buttons
+    filter_row = [
+        InlineKeyboardButton("🌐 LANGUAGES", callback_data="cb_filter_lang"),
+        InlineKeyboardButton("📺 Qualitys", callback_data="cb_filter_qual"),
+        InlineKeyboardButton("🎬 Season", callback_data="cb_filter_season")
+    ]
+    buttons.append(filter_row)
+
+    # Row 2: Navigation & Page buttons
     nav_row = []
     if current_page > 1:
-        nav_row.append(InlineKeyboardButton("◀️ Back", callback_data=f"nav_{cache_id}_{current_page - 1}"))
-    nav_row.append(InlineKeyboardButton(f"📄 Page {current_page}/{total_pages}", callback_data="cb_noop"))
+        nav_row.append(InlineKeyboardButton("⏪ PREV", callback_data=f"nav_{cache_id}_{current_page - 1}"))
+    nav_row.append(InlineKeyboardButton(f"🗓️ {current_page}/{total_pages}", callback_data="cb_noop"))
     if current_page < total_pages:
-        nav_row.append(InlineKeyboardButton("Next ▶️", callback_data=f"nav_{cache_id}_{current_page + 1}"))
+        nav_row.append(InlineKeyboardButton("NEXT ⏩", callback_data=f"nav_{cache_id}_{current_page + 1}"))
     buttons.append(nav_row)
 
+    # Row 3: Channel and Creator info
     buttons.append([
         InlineKeyboardButton("🎬 CineVerse Channel", url=CHANNEL_LINK),
         InlineKeyboardButton("⚡ By Banty", url=CHANNEL_LINK)
     ])
+    
+    # Row 4: Close button
     buttons.append([InlineKeyboardButton("🗑️ Close Search", callback_data="cb_close")])
     return InlineKeyboardMarkup(buttons)
 
@@ -434,7 +465,7 @@ async def auto_index_channel(client: Client, message: Message):
             logger.info(f"[AUTO-INDEX] Saved '{title}' (ID: {message.id})")
 
 # ---------------------------------------------------------------------------
-# SEARCH & AUTO-FILTER HANDLER
+# SEARCH & AUTO-FILTER HANDLER (WITH 30S AUTO-DELETE)
 # ---------------------------------------------------------------------------
 @app.on_message(filters.text & ~filters.bot & ~filters.via_bot)
 async def auto_filter_handler(client: Client, message: Message):
@@ -445,33 +476,32 @@ async def auto_filter_handler(client: Client, message: Message):
     if message.from_user:
         await db.add_user(message.from_user.id)
 
+    # 1. Start 30-second auto-delete task for user's query message in all chats
+    asyncio.create_task(auto_delete(message, 30))
+
     if len(text) < 2:
         return
 
     files, total = await db.search_files(text, offset=0, limit=PAGE_SIZE)
     if total == 0:
         if message.chat.type == enums.ChatType.PRIVATE:
-            await message.reply_text(
+            not_found_msg = await message.reply_text(
                 f"❌ No movies found matching `{text}`.\n💡 *Tip: Check the spelling or search with fewer words.*",
                 quote=True
             )
+            if not_found_msg:
+                asyncio.create_task(auto_delete(not_found_msg, 30))
         return
 
     cache_id = uuid.uuid4().hex[:8]
     SEARCH_CACHE[cache_id] = text
     total_pages = math.ceil(total / PAGE_SIZE)
     markup = build_pagination_markup(files, cache_id, 1, total_pages)
+    response_text = format_search_text(text, files, total, 1, total_pages)
 
-    response_text = (
-        f"🔍 **Search Results for:** `{text}`\n"
-        f"📊 Found **{total}** matching movies | Page **1/{total_pages}**\n"
-        f"✨ *Click any popcorn button below to download instantly!*"
-    )
-    if message.chat.type != enums.ChatType.PRIVATE:
-        response_text += "\n\n⚠️ *This search message will auto-delete in 30 seconds!*"
-
+    # 2. Reply with formatted results and start 30-second auto-delete task on bot response
     sent_msg = await message.reply_text(response_text, reply_markup=markup, quote=True)
-    if message.chat.type != enums.ChatType.PRIVATE and sent_msg:
+    if sent_msg:
         asyncio.create_task(auto_delete(sent_msg, 30))
 
 # ---------------------------------------------------------------------------
@@ -488,10 +518,19 @@ async def callback_router(client: Client, query: CallbackQuery):
             await query.message.delete()
         except Exception:
             pass
-        await query.answer("Closed.")
+        await query.answer("Search closed.")
 
     elif data == "cb_noop":
         await query.answer("Page indicator", show_alert=False)
+
+    elif data == "cb_filter_lang":
+        await query.answer("🌐 Language filter active for this title.", show_alert=True)
+
+    elif data == "cb_filter_qual":
+        await query.answer("📺 Quality options (1080p, 720p, 480p, HEVC) listed.", show_alert=True)
+
+    elif data == "cb_filter_season":
+        await query.answer("🎬 Season episodes listed in order.", show_alert=True)
 
     elif data == "cb_help":
         help_text = (
@@ -613,11 +652,7 @@ async def callback_router(client: Client, query: CallbackQuery):
             return
 
         markup = build_pagination_markup(files, cache_id, page, total_pages)
-        response_text = (
-            f"🔍 **Search Results for:** `{search_query}`\n"
-            f"📊 Found **{total}** matching movies | Page **{page}/{total_pages}**\n"
-            f"✨ *Click any popcorn button below to download instantly!*"
-        )
+        response_text = format_search_text(search_query, files, total, page, total_pages)
         try:
             await query.message.edit_text(response_text, reply_markup=markup)
         except MessageNotModified:

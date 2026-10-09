@@ -211,7 +211,7 @@ def format_size(size_bytes: int) -> str:
     s = round(size_bytes / p, 2)
     return f"{s} {units[i]}"
 
-async def auto_delete(message: Message, delay: int = 30):
+async def auto_delete(message: Message, delay: int = 60):
     try:
         await asyncio.sleep(delay)
         await message.delete()
@@ -231,7 +231,7 @@ def format_search_text(query: str, files: List[Dict[str, Any]], total: int, page
         f"{files_list}\n\n"
         f"📊 **Total Results:** `{total}` | **Page:** `{page}/{total_pages}`\n"
         f"✨ *Click any button below to download instantly!*\n"
-        f"⚠️ *This search result will auto-delete in 30 seconds!*"
+        f"⚠️ *This search result will auto-delete in 60 seconds (1 minute)!*"
     )
 
 def build_pagination_markup(files: List[Dict[str, Any]], cache_id: str, current_page: int, total_pages: int) -> InlineKeyboardMarkup:
@@ -478,7 +478,7 @@ async def auto_index_channel(client: Client, message: Message):
             logger.info(f"[AUTO-INDEX] Saved '{title}' (ID: {message.id})")
 
 # ---------------------------------------------------------------------------
-# SEARCH & AUTO-FILTER HANDLER (WITH 30S AUTO-DELETE)
+# SEARCH & AUTO-FILTER HANDLER (WITH 60S AUTO-DELETE)
 # ---------------------------------------------------------------------------
 @app.on_message(filters.text & ~filters.bot & ~filters.via_bot)
 async def auto_filter_handler(client: Client, message: Message):
@@ -489,21 +489,20 @@ async def auto_filter_handler(client: Client, message: Message):
     if message.from_user:
         await db.add_user(message.from_user.id)
 
-    # 1. Start 30-second auto-delete task for user's query message in all chats
-    asyncio.create_task(auto_delete(message, 30))
+    # 1. Start 60-second auto-delete task for user's query message in all chats
+    asyncio.create_task(auto_delete(message, 60))
 
     if len(text) < 2:
         return
 
     files, total = await db.search_files(text, offset=0, limit=PAGE_SIZE)
     if total == 0:
-        if message.chat.type == enums.ChatType.PRIVATE:
-            not_found_msg = await message.reply_text(
-                f"❌ No movies found matching `{text}`.\n💡 *Tip: Check the spelling or search with fewer words.*",
-                quote=True
-            )
-            if not_found_msg:
-                asyncio.create_task(auto_delete(not_found_msg, 30))
+        not_found_msg = await message.reply_text(
+            "❌ Movie / File Not Available in Database.",
+            quote=True
+        )
+        if not_found_msg:
+            asyncio.create_task(auto_delete(not_found_msg, 60))
         return
 
     cache_id = uuid.uuid4().hex[:8]
@@ -512,10 +511,10 @@ async def auto_filter_handler(client: Client, message: Message):
     markup = build_pagination_markup(files, cache_id, 1, total_pages)
     response_text = format_search_text(text, files, total, 1, total_pages)
 
-    # 2. Reply with formatted results and start 30-second auto-delete task on bot response
+    # 2. Reply with formatted results and start 60-second auto-delete task on bot response
     sent_msg = await message.reply_text(response_text, reply_markup=markup, quote=True)
     if sent_msg:
-        asyncio.create_task(auto_delete(sent_msg, 30))
+        asyncio.create_task(auto_delete(sent_msg, 60))
 
 # ---------------------------------------------------------------------------
 # CALLBACK QUERY ROUTER
@@ -622,8 +621,8 @@ async def callback_router(client: Client, query: CallbackQuery):
                 f"📦 𝚂𝚒𝚣𝚎: `{size_str}`\n"
                 "⚡ 𝙲𝚛𝚎𝚊𝚝𝚎𝚍 𝙱𝚢: `Banty`\n"
                 "✨ 𝙿𝚘𝚠𝚎𝚛𝚎𝚍 𝙱𝚢: **CineVerse Network**\n\n"
-                "───﹝ ⚠️ 𝙰𝚄𝚃𝙾-𝙳𝙴𝙻𝙴𝚃𝙴: 𝟹𝟶𝚜 ﹞───\n"
-                "⚠️ *This movie file will auto-delete in 30 seconds due to copyright! Forward/save it now!*"
+                "───﹝ ⚠️ 𝙰𝚄𝚃𝙾-𝙳𝙴𝙻𝙴𝚃𝙴: 𝟼𝟶𝚜 ﹞───\n"
+                "⚠️ *This movie file will auto-delete in 60 seconds (1 minute) due to copyright! Forward/save it now!*"
             )
 
             peer = await resolve_channel_peer(client)
@@ -634,12 +633,12 @@ async def callback_router(client: Client, query: CallbackQuery):
                 caption=caption
             )
             if sent_file:
-                asyncio.create_task(auto_delete(sent_file, 30))
+                asyncio.create_task(auto_delete(sent_file, 60))
 
             if query.message.chat.type != enums.ChatType.PRIVATE:
-                await query.answer("✅ File sent to your PM! (Auto-deletes in 30s)", show_alert=True)
+                await query.answer("✅ File sent to your PM! (Auto-deletes in 60s)", show_alert=True)
             else:
-                await query.answer("✅ File delivered below! (Auto-deletes in 30s)")
+                await query.answer("✅ File delivered below! (Auto-deletes in 60s)")
         except UserIsBlocked:
             await query.answer("⚠️ Please start the bot in private first!", show_alert=True)
         except Exception as e:

@@ -288,43 +288,13 @@ async def resolve_channel_peer(client: Client) -> Any:
     if TARGET_RESOLVED_CHAT_ID:
         return TARGET_RESOLVED_CHAT_ID
 
-    # 1. Force Pyrogram to load all dialogs to populate internal peer cache
     try:
-        async for dialog in client.get_dialogs():
-            if dialog.chat:
-                cid = dialog.chat.id
-                cuser = (dialog.chat.username or "").lower().lstrip("@")
-                if cid == DB_CHANNEL_ID or cid == -1004312780149 or cuser in ["cenahub01"]:
-                    TARGET_RESOLVED_CHAT_ID = cid
-                    logger.info(f"✅ DB Channel Peer found in dialogs: {TARGET_RESOLVED_CHAT_ID}")
-                    return TARGET_RESOLVED_CHAT_ID
-    except Exception as e:
-        logger.debug(f"Pre-caching dialogs notice: {e}")
-
-    # 2. Try direct get_chat on all candidates
-    candidates = []
-    try:
-        if isinstance(DB_CHANNEL_ID, int):
-            candidates.append(DB_CHANNEL_ID)
-        elif str(DB_CHANNEL_ID).lstrip("-").isdigit():
-            candidates.append(int(DB_CHANNEL_ID))
+        chat = await client.get_chat(DB_CHANNEL_ID)
+        if chat and chat.id:
+            TARGET_RESOLVED_CHAT_ID = chat.id
+            return TARGET_RESOLVED_CHAT_ID
     except Exception:
         pass
-
-    candidates.extend(["cenahub01", "@cenahub01", -1004312780149, DB_CHANNEL_ID])
-
-    for candidate in candidates:
-        if candidate is None:
-            continue
-        try:
-            chat = await client.get_chat(candidate)
-            if chat and chat.id:
-                TARGET_RESOLVED_CHAT_ID = chat.id
-                logger.info(f"✅ DB Channel Peer resolved and cached: {TARGET_RESOLVED_CHAT_ID} (@{chat.username or 'private'})")
-                return TARGET_RESOLVED_CHAT_ID
-        except (PeerIdInvalid, Exception) as e:
-            logger.debug(f"Candidate {candidate} could not be resolved: {e}")
-            continue
 
     TARGET_RESOLVED_CHAT_ID = DB_CHANNEL_ID
     return TARGET_RESOLVED_CHAT_ID
@@ -419,72 +389,41 @@ async def index_handler(client: Client, message: Message):
     if message.from_user:
         await db.add_user(message.from_user.id)
 
-    status_msg = await message.reply_text("⏳ **Discovering all Groups & Channels from Dialogs...**")
+    status_msg = await message.reply_text("⏳ **Starting Fast Channel Indexing...**")
     
     total_new = 0
-    scanned_chats = 0
+    scanned_msgs = 0
     last_update = time.time()
+    batch_to_insert = []
 
     try:
-        dialog_chats = []
-        async for dialog in client.get_dialogs():
-            if dialog.chat and dialog.chat.type in [
-                enums.ChatType.GROUP,
-                enums.ChatType.SUPERGROUP,
-                enums.ChatType.CHANNEL
-            ]:
-                dialog_chats.append((dialog.chat.id, dialog.chat.title or "Chat"))
+        channel_id = int(DB_CHANNEL_ID) if str(DB_CHANNEL_ID).lstrip("-").isdigit() else DB_CHANNEL_ID
+        
+        async for msg in client.get_chat_history(channel_id):
+            if msg and not getattr(msg, "empty", False):
+                scanned_msgs += 1
+                media = msg.video or msg.document or msg.audio or msg.animation
+                if media:
+                    title = (
+                        msg.caption.strip().split("\n")[0].strip() if msg.caption and msg.caption.strip()
+                        else (getattr(media, "file_name", None) or f"Movie_{msg.id}")
+                    )
+                    file_id = getattr(media, "file_id", None)
+                    file_size = getattr(media, "file_size", 0)
+                    if file_id:
+                        batch_to_insert.append((file_id, title, file_size, msg.id))
 
-        if not dialog_chats:
-            await status_msg.edit_text("❌ No groups, supergroups, or channels found in bot dialogs. Add the bot to your group/channel as Admin first!")
-            return
-
-        for chat_id, chat_title in dialog_chats:
-            scanned_chats += 1
-            current_id = 1
-            empty_streak = 0
-
-            while empty_streak < 25:
-                msg_ids = list(range(current_id, current_id + 200))
-                try:
-                    batch = await client.get_messages(chat_id=chat_id, message_ids=msg_ids)
-                except Exception:
-                    break
-
-                found_count = 0
-                to_insert = []
-
-                if batch:
-                    if not isinstance(batch, list):
-                        batch = [batch]
-                    for msg in batch:
-                        if msg and not getattr(msg, "empty", False):
-                            found_count += 1
-                            media = msg.video or msg.document or msg.audio or msg.animation
-                            if media:
-                                title = (
-                                    msg.caption.strip().split("\n")[0].strip() if msg.caption and msg.caption.strip()
-                                    else (getattr(media, "file_name", None) or f"Movie_{msg.id}")
-                                )
-                                file_id = getattr(media, "file_id", None)
-                                file_size = getattr(media, "file_size", 0)
-                                if file_id:
-                                    to_insert.append((file_id, title, file_size, msg.id))
-
-                if to_insert:
-                    added = await db.add_movies_batch(to_insert)
+                if len(batch_to_insert) >= 100:
+                    added = await db.add_movies_batch(batch_to_insert)
                     total_new += added
-
-                empty_streak = empty_streak + 1 if found_count == 0 else 0
-                current_id += 200
+                    batch_to_insert.clear()
 
                 if time.time() - last_update > 3:
                     stats = await db.get_stats()
                     try:
                         await status_msg.edit_text(
                             f"⏳ **Indexing in Progress...**\n\n"
-                            f"• **Scanning Chat ({scanned_chats}/{len(dialog_chats)}):** `{chat_title}`\n"
-                            f"• **Scanned up to ID:** `{current_id}`\n"
+                            f"• **Messages Scanned:** `{scanned_msgs}`\n"
                             f"• **Newly Added:** `{total_new}`\n"
                             f"• **Total Movies in DB:** `{stats['movies']}`"
                         )
@@ -492,10 +431,15 @@ async def index_handler(client: Client, message: Message):
                         pass
                     last_update = time.time()
 
+        if batch_to_insert:
+            added = await db.add_movies_batch(batch_to_insert)
+            total_new += added
+            batch_to_insert.clear()
+
         stats = await db.get_stats()
         await status_msg.edit_text(
             f"✅ **Indexing Complete!**\n\n"
-            f"• **Total Chats Scanned:** `{scanned_chats}`\n"
+            f"• **Total Messages Scanned:** `{scanned_msgs}`\n"
             f"• **New Files Added:** `{total_new}`\n"
             f"🎬 **Total Movies in Database:** `{stats['movies']}`"
         )
@@ -506,7 +450,7 @@ async def index_handler(client: Client, message: Message):
     except Exception as e:
         logger.error(f"Indexing error: {e}")
         stats = await db.get_stats()
-        await status_msg.edit_text(f"⚠️ **Indexing Error:** {e}\n\n🎬 **Total Movies in DB:** `{stats['movies']}`")
+        await status_msg.edit_text(f"⚠️ **Indexing Notice:** {e}\n\n🎬 **Total Movies in DB:** `{stats['movies']}`")
 
 # ---------------------------------------------------------------------------
 # AUTO-INDEX NEW UPLOADS IN CHANNEL

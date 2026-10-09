@@ -289,27 +289,13 @@ async def resolve_channel_peer(client: Client) -> Any:
         return TARGET_RESOLVED_CHAT_ID
 
     try:
-        raw_id = str(DB_CHANNEL_ID).strip()
-        if raw_id.startswith("-100"):
-            chat_target = int(raw_id)
-        elif raw_id.startswith("-"):
-            chat_target = int("-100" + raw_id[1:])
-        else:
-            chat_target = int("-100" + raw_id)
-
-        chat = await client.get_chat(chat_target)
-        if chat and chat.id:
-            TARGET_RESOLVED_CHAT_ID = chat.id
-            return TARGET_RESOLVED_CHAT_ID
+        # Direct int ID force resolve for converted private channels
+        chat = await client.get_chat(-1004312780149)
+        TARGET_RESOLVED_CHAT_ID = chat.id
+        return TARGET_RESOLVED_CHAT_ID
     except Exception:
-        pass
-
-    try:
-        TARGET_RESOLVED_CHAT_ID = int(DB_CHANNEL_ID)
-    except Exception:
-        TARGET_RESOLVED_CHAT_ID = DB_CHANNEL_ID
-
-    return TARGET_RESOLVED_CHAT_ID
+        TARGET_RESOLVED_CHAT_ID = -1004312780149
+        return TARGET_RESOLVED_CHAT_ID
 
 # ---------------------------------------------------------------------------
 # COMMAND HANDLERS

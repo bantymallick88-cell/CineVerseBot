@@ -289,7 +289,7 @@ async def resolve_channel_peer(client: Client) -> Any:
         return TARGET_RESOLVED_CHAT_ID
 
     try:
-        channel_target = int(DB_CHANNEL_ID) if str(DB_CHANNEL_ID).lstrip("-").isdigit() else DB_CHANNEL_ID
+        channel_target = int(DB_CHANNEL_ID)
         chat = await client.get_chat(channel_target)
         if chat and chat.id:
             TARGET_RESOLVED_CHAT_ID = chat.id
@@ -298,7 +298,7 @@ async def resolve_channel_peer(client: Client) -> Any:
         pass
 
     try:
-        TARGET_RESOLVED_CHAT_ID = int(DB_CHANNEL_ID) if str(DB_CHANNEL_ID).lstrip("-").isdigit() else DB_CHANNEL_ID
+        TARGET_RESOLVED_CHAT_ID = int(DB_CHANNEL_ID)
     except Exception:
         TARGET_RESOLVED_CHAT_ID = DB_CHANNEL_ID
 

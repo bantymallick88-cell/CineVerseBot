@@ -26,6 +26,9 @@ from pyrogram.errors import (
     FloodWait,
     UserIsBlocked,
     MessageNotModified,
+    MessageDeleteForbidden,
+    MessageIdInvalid,
+    RPCError,
     PeerIdInvalid
 )
 
@@ -257,12 +260,16 @@ def format_size(size_bytes: int) -> str:
     s = round(size_bytes / p, 2)
     return f"{s} {units[i]}"
 
-async def auto_delete(message: Message, delay: int = 60):
+async def auto_delete(message: Optional[Message], delay: int = 60):
+    if not message:
+        return
     try:
         await asyncio.sleep(delay)
         await message.delete()
-    except Exception:
+    except (MessageDeleteForbidden, MessageIdInvalid, RPCError):
         pass
+    except Exception as e:
+        logger.debug(f"Auto-delete bypassed for message {getattr(message, 'id', 'unknown')}: {e}")
 
 def format_search_text(query: str, total: int, page: int, total_pages: int) -> str:
     return (

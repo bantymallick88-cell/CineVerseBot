@@ -63,7 +63,8 @@ except (ValueError, TypeError):
     DB_CHANNEL_ID = str(raw_db_channel).lstrip("@")
 
 ADMIN_ID = get_env_int("ADMIN_ID", 7831101047)
-CHANNEL_LINK = get_env_str("CHANNEL_LINK", "https://t.me/cenahub01")
+CHANNEL_LINK = get_env_str("CHANNEL_LINK", "https://t.me/CineVerseFlimSearch")
+DEVELOPER_LINK = get_env_str("DEVELOPER_LINK", f"tg://user?id={ADMIN_ID}")
 WELCOME_IMAGE_URL = get_env_str(
     "WELCOME_IMAGE_URL",
     "https://images.unsplash.com/photo-1536440136628-849c177e76a1?q=80&w=1200&auto=format&fit=crop"
@@ -163,8 +164,32 @@ class Database:
         if not words:
             return [], 0
 
-        conditions = ["title LIKE ?" for _ in words]
-        params = [f"%{w}%" for w in words]
+        conditions = []
+        params = []
+        for w in words:
+            if w.upper().startswith("S") and len(w) == 3 and w[1:].isdigit():
+                season_num = int(w[1:])
+                conditions.append("(title LIKE ? OR title LIKE ? OR title LIKE ? OR title LIKE ?)")
+                params.extend([
+                    f"%S{season_num:02d}%",
+                    f"%S{season_num}%",
+                    f"%Season {season_num}%",
+                    f"%Season {season_num:02d}%"
+                ])
+            elif w.upper() in ["S15+", "S15"]:
+                conditions.append("(title LIKE '%S15%' OR title LIKE '%Season 15%' OR title LIKE '%S16%' OR title LIKE '%Season 16%')")
+            elif w.upper() == "4K":
+                conditions.append("(title LIKE '%4K%' OR title LIKE '%2160p%' OR title LIKE '%UHD%')")
+            elif w.upper() == "HEVC":
+                conditions.append("(title LIKE '%HEVC%' OR title LIKE '%x265%')")
+            elif w.lower() == "odia":
+                conditions.append("(title LIKE '%Odia%' OR title LIKE '%Oriya%')")
+            elif w.lower() == "bengali":
+                conditions.append("(title LIKE '%Bengali%' OR title LIKE '%Bangla%')")
+            else:
+                conditions.append("title LIKE ?")
+                params.append(f"%{w}%")
+
         where_sql = " AND ".join(conditions)
 
         with self._get_connection() as conn:
@@ -258,11 +283,11 @@ def build_pagination_markup(files: List[Dict[str, Any]], cache_id: str, current_
         btn_text = f"📁 {size_str} ▷ {display_name}"
         buttons.append([InlineKeyboardButton(btn_text, callback_data=f"get_{f['message_id']}")])
 
-    # Row 1: Filter buttons
+    # Row 1: Filter buttons linking to interactive submenus
     filter_row = [
-        InlineKeyboardButton("🌐 LANGUAGES", callback_data="cb_filter_lang"),
-        InlineKeyboardButton("📺 Qualitys", callback_data="cb_filter_qual"),
-        InlineKeyboardButton("🎬 Season", callback_data="cb_filter_season")
+        InlineKeyboardButton("🌐 LANGUAGES", callback_data=f"flt_m_lang_{cache_id}"),
+        InlineKeyboardButton("📺 Qualitys", callback_data=f"flt_m_qual_{cache_id}"),
+        InlineKeyboardButton("🎬 Season", callback_data=f"flt_m_season_{cache_id}")
     ]
     buttons.append(filter_row)
 
@@ -278,12 +303,77 @@ def build_pagination_markup(files: List[Dict[str, Any]], cache_id: str, current_
     # Row 3: Channel and Creator info
     buttons.append([
         InlineKeyboardButton("🎬 CineVerse Channel", url=CHANNEL_LINK),
-        InlineKeyboardButton("⚡ By Banty", url=CHANNEL_LINK)
+        InlineKeyboardButton("⚡ By Banty", url=DEVELOPER_LINK)
     ])
     
     # Row 4: Close button
     buttons.append([InlineKeyboardButton("🗑️ Close Search", callback_data="cb_close")])
     return InlineKeyboardMarkup(buttons)
+
+def build_quality_menu(cache_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("480p", callback_data=f"flt_set_{cache_id}_480p"),
+            InlineKeyboardButton("720p", callback_data=f"flt_set_{cache_id}_720p"),
+            InlineKeyboardButton("1080p", callback_data=f"flt_set_{cache_id}_1080p")
+        ],
+        [
+            InlineKeyboardButton("4K", callback_data=f"flt_set_{cache_id}_4K"),
+            InlineKeyboardButton("HEVC", callback_data=f"flt_set_{cache_id}_HEVC")
+        ],
+        [
+            InlineKeyboardButton("🔙 Back to Results", callback_data=f"flt_back_{cache_id}")
+        ]
+    ])
+
+def build_language_menu(cache_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Odia", callback_data=f"flt_set_{cache_id}_Odia"),
+            InlineKeyboardButton("Hindi", callback_data=f"flt_set_{cache_id}_Hindi"),
+            InlineKeyboardButton("English", callback_data=f"flt_set_{cache_id}_English")
+        ],
+        [
+            InlineKeyboardButton("Bengali", callback_data=f"flt_set_{cache_id}_Bengali"),
+            InlineKeyboardButton("Tamil", callback_data=f"flt_set_{cache_id}_Tamil"),
+            InlineKeyboardButton("Telugu", callback_data=f"flt_set_{cache_id}_Telugu")
+        ],
+        [
+            InlineKeyboardButton("🔙 Back to Results", callback_data=f"flt_back_{cache_id}")
+        ]
+    ])
+
+def build_season_menu(cache_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Season 1", callback_data=f"flt_set_{cache_id}_S01"),
+            InlineKeyboardButton("Season 2", callback_data=f"flt_set_{cache_id}_S02"),
+            InlineKeyboardButton("Season 3", callback_data=f"flt_set_{cache_id}_S03")
+        ],
+        [
+            InlineKeyboardButton("Season 4", callback_data=f"flt_set_{cache_id}_S04"),
+            InlineKeyboardButton("Season 5", callback_data=f"flt_set_{cache_id}_S05"),
+            InlineKeyboardButton("Season 6", callback_data=f"flt_set_{cache_id}_S06")
+        ],
+        [
+            InlineKeyboardButton("Season 7", callback_data=f"flt_set_{cache_id}_S07"),
+            InlineKeyboardButton("Season 8", callback_data=f"flt_set_{cache_id}_S08"),
+            InlineKeyboardButton("Season 9", callback_data=f"flt_set_{cache_id}_S09")
+        ],
+        [
+            InlineKeyboardButton("Season 10", callback_data=f"flt_set_{cache_id}_S10"),
+            InlineKeyboardButton("Season 11", callback_data=f"flt_set_{cache_id}_S11"),
+            InlineKeyboardButton("Season 12", callback_data=f"flt_set_{cache_id}_S12")
+        ],
+        [
+            InlineKeyboardButton("Season 13", callback_data=f"flt_set_{cache_id}_S13"),
+            InlineKeyboardButton("Season 14", callback_data=f"flt_set_{cache_id}_S14"),
+            InlineKeyboardButton("Season 15+", callback_data=f"flt_set_{cache_id}_S15+")
+        ],
+        [
+            InlineKeyboardButton("🔙 Back to Results", callback_data=f"flt_back_{cache_id}")
+        ]
+    ])
 
 # ---------------------------------------------------------------------------
 # PYROGRAM BOT CLIENT
@@ -599,6 +689,93 @@ async def callback_router(client: Client, query: CallbackQuery):
 
     elif data == "cb_filter_season":
         await query.answer("🎬 Season episodes listed in order.", show_alert=True)
+
+    elif data.startswith("flt_menu_"):
+        parts = data.split("_")
+        menu_type = parts[2]
+        cache_id = parts[3]
+        search_query = SEARCH_CACHE.get(cache_id)
+
+        if not search_query:
+            await query.answer("⚠️ Search session expired. Please search again.", show_alert=True)
+            return
+
+        if menu_type == "qual":
+            menu_text = (
+                f"📺 **Select Quality for:** `{search_query}`\n\n"
+                f"✨ *Choose a quality below to filter results:*"
+            )
+            markup = build_quality_menu(cache_id)
+        elif menu_type == "lang":
+            menu_text = (
+                f"🌐 **Select Language for:** `{search_query}`\n\n"
+                f"✨ *Choose a language below to filter results:*"
+            )
+            markup = build_language_menu(cache_id)
+        elif menu_type == "season":
+            menu_text = (
+                f"🎬 **Select Season for:** `{search_query}`\n\n"
+                f"✨ *Choose a season below to filter results:*"
+            )
+            markup = build_season_menu(cache_id)
+        else:
+            await query.answer()
+            return
+
+        try:
+            await query.message.edit_text(menu_text, reply_markup=markup)
+        except MessageNotModified:
+            pass
+        await query.answer()
+
+    elif data.startswith("flt_set_"):
+        parts = data.split("_")
+        cache_id = parts[2]
+        filter_val = "_".join(parts[3:])
+        base_query = SEARCH_CACHE.get(cache_id)
+
+        if not base_query:
+            await query.answer("⚠️ Search session expired. Please search again.", show_alert=True)
+            return
+
+        target_query = f"{base_query} {filter_val}".strip()
+        files, total = await db.search_files(target_query, offset=0, limit=PAGE_SIZE)
+
+        if total == 0:
+            display_filter = "Season " + filter_val[1:] if filter_val.startswith("S") and filter_val[1:].isdigit() else filter_val
+            await query.answer(f"❌ No {display_filter} results found for '{base_query}'", show_alert=True)
+            return
+
+        new_cache_id = uuid.uuid4().hex[:8]
+        SEARCH_CACHE[new_cache_id] = target_query
+        total_pages = math.ceil(total / PAGE_SIZE)
+        markup = build_pagination_markup(files, new_cache_id, 1, total_pages)
+        response_text = format_search_text(target_query, total, 1, total_pages)
+        try:
+            await query.message.edit_text(response_text, reply_markup=markup)
+        except MessageNotModified:
+            pass
+        await query.answer(f"✅ Filter applied: {filter_val}")
+
+    elif data.startswith("flt_back_"):
+        parts = data.split("_")
+        cache_id = parts[2]
+        search_query = SEARCH_CACHE.get(cache_id)
+
+        if not search_query:
+            await query.answer("⚠️ Search session expired. Please search again.", show_alert=True)
+            return
+
+        files, total = await db.search_files(search_query, offset=0, limit=PAGE_SIZE)
+        total_pages = math.ceil(total / PAGE_SIZE) if total > 0 else 1
+
+        markup = build_pagination_markup(files, cache_id, 1, total_pages)
+        response_text = format_search_text(search_query, total, 1, total_pages)
+        try:
+            await query.message.edit_text(response_text, reply_markup=markup)
+        except MessageNotModified:
+            pass
+        await query.answer()
 
     elif data == "cb_help":
         help_text = (

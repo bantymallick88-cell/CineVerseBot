@@ -113,8 +113,8 @@ class Database:
             try:
                 conn.execute("""
                     DELETE FROM movies 
-                    WHERE file_id NOT IN (
-                        SELECT MIN(file_id) 
+                    WHERE rowid NOT IN (
+                        SELECT MIN(rowid) 
                         FROM movies 
                         GROUP BY title, file_size
                     );

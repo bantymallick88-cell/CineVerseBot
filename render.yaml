@@ -1,14 +1,17 @@
 # Render.com Blueprint Configuration
 # Docs: https://render.com/docs/blueprint-spec
 services:
-  - type: worker
+  - type: web
     name: cineverse-bot
     env: docker
     dockerfilePath: Dockerfile
     region: oregon
-    plan: starter
+    plan: free
     autoDeploy: true
+    healthCheckPath: /
     envVars:
+      - key: PORT
+        value: 10000
       - key: API_ID
         sync: false
       - key: API_HASH

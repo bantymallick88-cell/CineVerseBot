@@ -5,6 +5,8 @@ import time
 import uuid
 import sqlite3
 import logging
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import List, Tuple, Dict, Any, Optional
 
 # --- CRITICAL FOR PYTHON 3.14+ (Must be before pyrogram import) ---
@@ -1028,11 +1030,50 @@ async def callback_router(client: Client, query: CallbackQuery):
         await query.answer()
 
 # ---------------------------------------------------------------------------
+# BACKGROUND DUMMY HTTP SERVER (FOR RENDER / KOYEB / PAAS HEALTH CHECKS)
+# ---------------------------------------------------------------------------
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"OK - CineVerse Movie Search Bot is running 24/7!\n")
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain; charset=utf-8")
+        self.end_headers()
+
+    def log_message(self, format, *args):
+        # Silence default access log spam from Render health probes
+        pass
+
+def start_health_server():
+    port_str = os.getenv("PORT", "8080")
+    try:
+        port = int(port_str)
+    except (ValueError, TypeError):
+        port = 8080
+
+    def run_server():
+        try:
+            server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+            logger.info(f"🌐 Render Health Check HTTP server listening on 0.0.0.0:{port}")
+            server.serve_forever()
+        except Exception as e:
+            logger.warning(f"Could not start health check server on port {port}: {e}")
+
+    thread = threading.Thread(target=run_server, daemon=True)
+    thread.start()
+
+# ---------------------------------------------------------------------------
 # START BOT VIA STANDARD app.run()
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
+    start_health_server()
     print("=" * 60)
     print("🚀 CineVerse Movie Search Bot is starting...")
     print(f"📌 Admin ID: {ADMIN_ID} | DB Channel: {DB_CHANNEL_ID}")
     print("=" * 60)
     app.run()
+

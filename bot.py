@@ -982,6 +982,26 @@ async def auto_filter_handler(client: Client, message: Message):
             asyncio.create_task(auto_delete(fsub_msg, 60))
         return
 
+    # 4. Block Direct PM Search & Show Redirect Button
+    if message.chat.type == enums.ChatType.PRIVATE:
+        user_name = message.from_user.first_name if message.from_user and message.from_user.first_name else "Friend"
+        redirect_text = (
+            f"HEY {user_name.upper()},\n\n"
+            "YOU CAN'T GET ANYTHING FROM HERE. REQUEST ON OUR GROUP OR CLICK REQUEST HERE BUTTON BELOW 👇"
+        )
+        redirect_markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Search Group ✅", url="https://t.me/CineVerseFlimSearch")]
+        ])
+        pm_msg = await message.reply_text(
+            redirect_text,
+            reply_markup=redirect_markup,
+            quote=True,
+            disable_web_page_preview=True
+        )
+        if pm_msg:
+            asyncio.create_task(auto_delete(pm_msg, 120))
+        return
+
     if len(text) < 2:
         return
 

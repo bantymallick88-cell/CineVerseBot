@@ -269,7 +269,8 @@ def format_search_text(query: str, total: int, page: int, total_pages: int) -> s
         f"🔍 **Search Results for:** `{query}`\n\n"
         f"📊 **Total Results:** `{total}` | **Page:** `{page}/{total_pages}`\n"
         f"✨ *Click any button below to download instantly!*\n"
-        f"⚠️ *This search result will auto-delete in 60 seconds (1 minute)!*"
+        f"⚠️ *This search result will auto-delete in 60 seconds (1 minute)!*\n"
+        f"⚖️ *Notice: We do not host any content. For DMCA/Takedown, use /dmca.*"
     )
 
 def build_pagination_markup(files: List[Dict[str, Any]], cache_id: str, current_page: int, total_pages: int) -> InlineKeyboardMarkup:
@@ -435,12 +436,17 @@ async def start_handler(client: Client, message: Message):
         f"• 👥 **Total Users:** `{stats['users']}`\n"
         f"• ⚡ **Speed:** Ultra-Fast (Sub-second)\n"
         f"• 👑 **Developer:** `Banty`\n\n"
+        f"⚖️ **Disclaimer:** *This bot does not store or host any files on its servers. All media files are indexed from third-party channels on Telegram. If you are a copyright owner and want to report/remove content, please use* `/dmca` *command.*\n\n"
         f"💬 *Type any movie name below to search immediately!*"
     )
     markup = InlineKeyboardMarkup([
         [
             InlineKeyboardButton("📖 Help", callback_data="cb_help"),
             InlineKeyboardButton("ℹ️ About", callback_data="cb_about")
+        ],
+        [
+            InlineKeyboardButton("⚖️ Disclaimer", callback_data="cb_disclaimer"),
+            InlineKeyboardButton("📋 DMCA", callback_data="cb_dmca")
         ],
         [
             InlineKeyboardButton("📢 CineVerse Channel", url=CHANNEL_LINK),
@@ -482,9 +488,70 @@ async def help_handler(client: Client, message: Message):
         "📌 **Commands:**\n"
         "• `/start` - Start the bot\n"
         "• `/stats` - View total movies and user stats\n"
+        "• `/disclaimer` - Legal non-hosting disclaimer\n"
+        "• `/dmca` - Submit copyright takedown request\n"
         "• `/index` - Admin DB Channel indexer",
         quote=True
     )
+
+@app.on_message(filters.command("disclaimer"))
+async def disclaimer_handler(client: Client, message: Message):
+    if message.from_user:
+        await db.add_user(message.from_user.id)
+    text = (
+        "⚖️ **Legal Disclaimer & Terms of Service**\n\n"
+        "• **Non-Hosting Policy:** This bot does not store, host, upload, or reproduce any media files or video content on its servers.\n"
+        "• **Telegram Indexing:** All media files and links provided are indexed automatically from publicly accessible third-party channels on Telegram.\n"
+        "• **Copyright Compliance:** CineVerse respects intellectual property rights. If you are a copyright owner or authorized representative and wish to request removal of indexed files, please use the `/dmca` command to submit a takedown notice.\n\n"
+        "⚡ **Powered By:** **CineVerse Network**"
+    )
+    await message.reply_text(text, quote=True)
+
+@app.on_message(filters.command("dmca"))
+async def dmca_handler(client: Client, message: Message):
+    if message.from_user:
+        await db.add_user(message.from_user.id)
+
+    cmd_args = message.text.split(maxsplit=1)
+    user_info = message.from_user
+
+    if len(cmd_args) > 1 and cmd_args[1].strip():
+        report_details = cmd_args[1].strip()
+        
+        # Format log for primary admin ID 7831101047
+        admin_log = (
+            "🚨 **NEW DMCA / CONTENT TAKEDOWN REQUEST**\n\n"
+            f"👤 **From User:** {user_info.mention if user_info else 'Unknown'}\n"
+            f"🆔 **User ID:** `{user_info.id if user_info else 'N/A'}`\n"
+            f"🏷️ **Username:** @{user_info.username if user_info and user_info.username else 'None'}\n"
+            f"📅 **Date:** `{message.date}`\n\n"
+            f"📝 **Report / Removal Details:**\n"
+            f"```\n{report_details}\n```"
+        )
+        
+        try:
+            await client.send_message(chat_id=ADMIN_ID, text=admin_log)
+        except Exception as e:
+            logger.error(f"Failed to forward DMCA request to admin: {e}")
+
+        confirm_text = (
+            "✅ **DMCA Removal Request Submitted!**\n\n"
+            "Thank you for contacting us. Your content removal notice has been logged and forwarded directly to the administrator.\n"
+            "We will review and delist the indexed content promptly.\n\n"
+            "⚡ **CineVerse Administration**"
+        )
+        await message.reply_text(confirm_text, quote=True)
+    else:
+        guide_text = (
+            "📋 **DMCA & Copyright Infringement Takedown Notice**\n\n"
+            "If you are a copyright owner or an agent thereof and believe that any content indexed by CineVerse infringes upon your copyrights, please submit your request:\n\n"
+            "📌 **How to submit:**\n"
+            "Send `/dmca <Movie/Series Name, File Details, or Link>`\n\n"
+            "**Example:**\n"
+            "`/dmca Please remove the movie 'Movie Title (2024)' from index.`\n\n"
+            "Your notice will be immediately forwarded to the bot administrator for prompt review and delisting."
+        )
+        await message.reply_text(guide_text, quote=True)
 
 @app.on_message(filters.command("about"))
 async def about_handler(client: Client, message: Message):
@@ -809,6 +876,38 @@ async def callback_router(client: Client, query: CallbackQuery):
             await query.message.edit_text(about_text, reply_markup=markup)
         await query.answer()
 
+    elif data == "cb_disclaimer":
+        disclaimer_text = (
+            "⚖️ **Legal Disclaimer & Terms of Service**\n\n"
+            "• **Non-Hosting Policy:** This bot does not store, host, upload, or reproduce any media files or video content on its servers.\n"
+            "• **Telegram Indexing:** All media files and links provided are indexed automatically from publicly accessible third-party channels on Telegram.\n"
+            "• **Copyright Compliance:** CineVerse respects intellectual property rights. If you are a copyright owner or authorized representative and wish to request removal of indexed files, please use the `/dmca` command to submit a takedown notice.\n\n"
+            "⚡ **Powered By:** **CineVerse Network**"
+        )
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="cb_home")]])
+        try:
+            await query.message.edit_caption(caption=disclaimer_text, reply_markup=markup)
+        except Exception:
+            await query.message.edit_text(disclaimer_text, reply_markup=markup)
+        await query.answer()
+
+    elif data == "cb_dmca":
+        dmca_text = (
+            "📋 **DMCA & Copyright Infringement Takedown Notice**\n\n"
+            "If you are a copyright owner or an agent thereof and believe that any content indexed by CineVerse infringes upon your copyrights, please submit your request:\n\n"
+            "📌 **How to submit:**\n"
+            "Send `/dmca <Movie/Series Name, File Details, or Link>`\n\n"
+            "**Example:**\n"
+            "`/dmca Please remove the movie 'Movie Title (2024)' from index.`\n\n"
+            "Your notice will be immediately forwarded to the bot administrator for prompt review and delisting."
+        )
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="cb_home")]])
+        try:
+            await query.message.edit_caption(caption=dmca_text, reply_markup=markup)
+        except Exception:
+            await query.message.edit_text(dmca_text, reply_markup=markup)
+        await query.answer()
+
     elif data == "cb_home":
         stats = await db.get_stats()
         bot_me = await client.get_me()
@@ -820,12 +919,17 @@ async def callback_router(client: Client, query: CallbackQuery):
             f"• 👥 **Total Users:** `{stats['users']}`\n"
             f"• ⚡ **Speed:** Ultra-Fast (Sub-second)\n"
             f"• 👑 **Developer:** `Banty`\n\n"
+            f"⚖️ **Disclaimer:** *This bot does not store or host any files on its servers. All media files are indexed from third-party channels on Telegram. If you are a copyright owner and want to report/remove content, please use* `/dmca` *command.*\n\n"
             f"💬 *Type any movie name below to search immediately!*"
         )
         markup = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("📖 Help", callback_data="cb_help"),
                 InlineKeyboardButton("ℹ️ About", callback_data="cb_about")
+            ],
+            [
+                InlineKeyboardButton("⚖️ Disclaimer", callback_data="cb_disclaimer"),
+                InlineKeyboardButton("📋 DMCA", callback_data="cb_dmca")
             ],
             [
                 InlineKeyboardButton("📢 CineVerse Channel", url=CHANNEL_LINK),

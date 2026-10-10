@@ -35,7 +35,8 @@ from pyrogram.errors import (
     MessageDeleteForbidden,
     MessageIdInvalid,
     RPCError,
-    PeerIdInvalid
+    PeerIdInvalid,
+    UserNotParticipant
 )
 
 # ---------------------------------------------------------------------------
@@ -71,9 +72,26 @@ try:
 except (ValueError, TypeError):
     DB_CHANNEL_ID = str(raw_db_channel).lstrip("@")
 
-ADMIN_ID = get_env_int("ADMIN_ID", 7831101047)
+OWNER_ID = get_env_int("OWNER_ID", 7831101047)
+
+def parse_admin_ids() -> set:
+    raw_admin = os.getenv("ADMIN_ID", "7831101047")
+    ids = {OWNER_ID}
+    for item in raw_admin.replace(",", " ").split():
+        item = item.strip()
+        try:
+            ids.add(int(item))
+        except (ValueError, TypeError):
+            pass
+    return ids
+
+ADMIN_IDS = parse_admin_ids()
+ADMIN_ID = OWNER_ID
+
+FSUB_GROUP_ID = get_env_int("FSUB_GROUP_ID", -1004427640174)
+FSUB_GROUP_LINK = get_env_str("FSUB_GROUP_LINK", "https://t.me/CineVerseFlimSearch")
 CHANNEL_LINK = get_env_str("CHANNEL_LINK", "https://t.me/CineVerseFlimSearch")
-DEVELOPER_LINK = get_env_str("DEVELOPER_LINK", f"tg://user?id={ADMIN_ID}")
+DEVELOPER_LINK = get_env_str("DEVELOPER_LINK", f"tg://user?id={OWNER_ID}")
 WELCOME_IMAGE_URL = get_env_str(
     "WELCOME_IMAGE_URL",
     "https://images.unsplash.com/photo-1536440136628-849c177e76a1?q=80&w=1200&auto=format&fit=crop"
@@ -83,6 +101,7 @@ PAGE_SIZE = 8
 SEARCH_CACHE: Dict[str, str] = {}
 DB_FILE = os.path.join(os.getcwd(), "database.db")
 TARGET_RESOLVED_CHAT_ID: Optional[Any] = None
+FSUB_RESOLVED_CHAT_ID: Optional[Any] = None
 
 # ---------------------------------------------------------------------------
 # DATABASE MANAGER (WAL MODE, PERSISTENT & SAFE)
@@ -116,6 +135,18 @@ class Database:
                 CREATE TABLE IF NOT EXISTS users (
                     user_id INTEGER PRIMARY KEY,
                     joined_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS approved_users (
+                    user_id INTEGER PRIMARY KEY,
+                    approved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS disapproved_users (
+                    user_id INTEGER PRIMARY KEY,
+                    disapproved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
             # Clean up existing exact duplicates so only 1 unique record remains per (title, file_size)
@@ -232,6 +263,37 @@ class Database:
             total_users = cursor.execute("SELECT COUNT(*) FROM users;").fetchone()[0]
             return {"movies": total_movies, "users": total_users}
 
+    def _is_approved_user(self, user_id: int) -> bool:
+        if user_id == OWNER_ID or user_id in ADMIN_IDS:
+            return True
+        with self._get_connection() as conn:
+            row = conn.execute("SELECT 1 FROM approved_users WHERE user_id = ?;", (user_id,)).fetchone()
+            return bool(row)
+
+    def _is_disapproved_user(self, user_id: int) -> bool:
+        with self._get_connection() as conn:
+            row = conn.execute("SELECT 1 FROM disapproved_users WHERE user_id = ?;", (user_id,)).fetchone()
+            return bool(row)
+
+    def _approve_user(self, user_id: int) -> bool:
+        with self._get_connection() as conn:
+            conn.execute("DELETE FROM disapproved_users WHERE user_id = ?;", (user_id,))
+            conn.execute("INSERT OR IGNORE INTO approved_users (user_id) VALUES (?);", (user_id,))
+            conn.commit()
+            return True
+
+    def _disapprove_user(self, user_id: int) -> bool:
+        with self._get_connection() as conn:
+            conn.execute("DELETE FROM approved_users WHERE user_id = ?;", (user_id,))
+            conn.execute("INSERT OR IGNORE INTO disapproved_users (user_id) VALUES (?);", (user_id,))
+            conn.commit()
+            return True
+
+    def _get_approved_users(self) -> List[int]:
+        with self._get_connection() as conn:
+            rows = conn.execute("SELECT user_id FROM approved_users;").fetchall()
+            return [r[0] for r in rows]
+
     # Async wrappers
     async def add_user(self, user_id: int):
         await asyncio.to_thread(self._add_user, user_id)
@@ -250,6 +312,21 @@ class Database:
 
     async def get_stats(self) -> Dict[str, int]:
         return await asyncio.to_thread(self._get_stats)
+
+    async def is_approved_user(self, user_id: int) -> bool:
+        return await asyncio.to_thread(self._is_approved_user, user_id)
+
+    async def is_disapproved_user(self, user_id: int) -> bool:
+        return await asyncio.to_thread(self._is_disapproved_user, user_id)
+
+    async def approve_user(self, user_id: int) -> bool:
+        return await asyncio.to_thread(self._approve_user, user_id)
+
+    async def disapprove_user(self, user_id: int) -> bool:
+        return await asyncio.to_thread(self._disapprove_user, user_id)
+
+    async def get_approved_users(self) -> List[int]:
+        return await asyncio.to_thread(self._get_approved_users)
 
 
 db = Database()
@@ -430,13 +507,94 @@ async def resolve_channel_peer(client: Client) -> Any:
 
     return TARGET_RESOLVED_CHAT_ID
 
+async def resolve_fsub_peer(client: Client) -> Any:
+    global FSUB_RESOLVED_CHAT_ID
+    if FSUB_RESOLVED_CHAT_ID:
+        return FSUB_RESOLVED_CHAT_ID
+
+    candidates = [
+        FSUB_GROUP_ID,
+        -1004427640174,
+        "CineVerseFlimSearch",
+        "@CineVerseFlimSearch"
+    ]
+
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        try:
+            chat = await client.get_chat(candidate)
+            if chat and chat.id:
+                FSUB_RESOLVED_CHAT_ID = chat.id
+                return FSUB_RESOLVED_CHAT_ID
+        except Exception:
+            continue
+
+    FSUB_RESOLVED_CHAT_ID = FSUB_GROUP_ID
+    return FSUB_RESOLVED_CHAT_ID
+
+async def is_user_joined_group(client: Client, user_id: int) -> bool:
+    if user_id == OWNER_ID or user_id in ADMIN_IDS:
+        return True
+    try:
+        peer = await resolve_fsub_peer(client)
+        member = await client.get_chat_member(chat_id=peer, user_id=user_id)
+        if member and member.status in [
+            enums.ChatMemberStatus.OWNER,
+            enums.ChatMemberStatus.ADMINISTRATOR,
+            enums.ChatMemberStatus.MEMBER,
+            enums.ChatMemberStatus.RESTRICTED
+        ]:
+            return True
+        return False
+    except UserNotParticipant:
+        return False
+    except Exception as e:
+        logger.warning(f"Error checking group membership for user {user_id}: {e}")
+        return False
+
+async def is_authorized_user(user_id: int) -> bool:
+    if user_id == OWNER_ID or user_id in ADMIN_IDS:
+        return True
+    return await db.is_approved_user(user_id)
+
+def build_force_join_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Join Group 💬", url=FSUB_GROUP_LINK)
+        ],
+        [
+            InlineKeyboardButton("🔄 Try Again", callback_data="cb_check_join")
+        ]
+    ])
+
 # ---------------------------------------------------------------------------
 # COMMAND HANDLERS
 # ---------------------------------------------------------------------------
 @app.on_message(filters.command("start") & filters.private)
 async def start_handler(client: Client, message: Message):
-    if message.from_user:
-        await db.add_user(message.from_user.id)
+    if not message.from_user:
+        return
+    user_id = message.from_user.id
+    await db.add_user(user_id)
+
+    # 1. Owner Permission Gate: Check if disapproved
+    if await db.is_disapproved_user(user_id):
+        await message.reply_text("❌ Access Denied: Permission required from Owner Banty.", quote=True)
+        return
+
+    # 2. Force Join Group Requirement
+    if not await is_user_joined_group(client, user_id):
+        await message.reply_text(
+            "⚠️ **Access Restricted!**\n\n"
+            "To use **CineVerse Movie Search Bot**, you must first join our official group:\n"
+            f"👉 [CineVerse Film Search]({FSUB_GROUP_LINK})\n\n"
+            "Please click **Join Group 💬** below to join, then click **Try Again 🔄**!",
+            reply_markup=build_force_join_markup(),
+            quote=True,
+            disable_web_page_preview=True
+        )
+        return
     stats = await db.get_stats()
     bot_me = await client.get_me()
 
@@ -581,11 +739,57 @@ async def about_handler(client: Client, message: Message):
         quote=True
     )
 
+@app.on_message(filters.command("approve"))
+async def approve_handler(client: Client, message: Message):
+    if not message.from_user or message.from_user.id != OWNER_ID:
+        await message.reply_text("❌ Access Denied: Permission required from Owner Banty.", quote=True)
+        return
+
+    parts = message.text.split()
+    if len(parts) < 2 or not parts[1].strip().isdigit():
+        await message.reply_text("ℹ️ **Usage:** `/approve <user_id>`", quote=True)
+        return
+
+    target_id = int(parts[1].strip())
+    await db.approve_user(target_id)
+    await message.reply_text(f"✅ User `{target_id}` has been approved by Owner Banty.", quote=True)
+
+@app.on_message(filters.command("disapprove"))
+async def disapprove_handler(client: Client, message: Message):
+    if not message.from_user or message.from_user.id != OWNER_ID:
+        await message.reply_text("❌ Access Denied: Permission required from Owner Banty.", quote=True)
+        return
+
+    parts = message.text.split()
+    if len(parts) < 2 or not parts[1].strip().isdigit():
+        await message.reply_text("ℹ️ **Usage:** `/disapprove <user_id>`", quote=True)
+        return
+
+    target_id = int(parts[1].strip())
+    await db.disapprove_user(target_id)
+    await message.reply_text(f"🚫 User `{target_id}` has been blocked / disapproved by Owner Banty.", quote=True)
+
+@app.on_message(filters.command("approved"))
+async def list_approved_handler(client: Client, message: Message):
+    if not message.from_user or message.from_user.id != OWNER_ID:
+        await message.reply_text("❌ Access Denied: Permission required from Owner Banty.", quote=True)
+        return
+
+    approved_list = await db.get_approved_users()
+    msg = f"👑 **Owner ID:** `{OWNER_ID}`\n👥 **Admins:** `{ADMIN_IDS}`\n\n📋 **Approved Users:**\n"
+    if approved_list:
+        msg += "\n".join([f"• `{uid}`" for uid in approved_list])
+    else:
+        msg += "No custom users approved yet."
+    await message.reply_text(msg, quote=True)
+
 @app.on_message(filters.command("index"))
 async def index_handler(client: Client, message: Message):
-    if message.from_user:
-        await db.add_user(message.from_user.id)
+    if not message.from_user or not await is_authorized_user(message.from_user.id):
+        await message.reply_text("❌ Access Denied: Permission required from Owner Banty.", quote=True)
+        return
 
+    await db.add_user(message.from_user.id)
     status_msg = await message.reply_text("⏳ **Starting Fast Channel Indexing...**")
     
     total_new = 0
@@ -712,11 +916,35 @@ async def auto_filter_handler(client: Client, message: Message):
     if text.startswith("/"):
         return
 
-    if message.from_user:
-        await db.add_user(message.from_user.id)
+    if not message.from_user:
+        return
+    user_id = message.from_user.id
+    await db.add_user(user_id)
 
     # 1. Start 60-second auto-delete task for user's query message in all chats
     asyncio.create_task(auto_delete(message, 60))
+
+    # 2. Owner Permission Gate: Strictly block non-approved / disapproved users
+    if await db.is_disapproved_user(user_id):
+        denied_msg = await message.reply_text("❌ Access Denied: Permission required from Owner Banty.", quote=True)
+        if denied_msg:
+            asyncio.create_task(auto_delete(denied_msg, 60))
+        return
+
+    # 3. Force Join Group Requirement: Check membership in CineVerse Film Search group (-1004427640174)
+    if not await is_user_joined_group(client, user_id):
+        fsub_msg = await message.reply_text(
+            "⚠️ **Access Restricted!**\n\n"
+            "To use **CineVerse Movie Search Bot**, you must first join our official group:\n"
+            f"👉 [CineVerse Film Search]({FSUB_GROUP_LINK})\n\n"
+            "Please click **Join Group 💬** below to join, then try your search again!",
+            reply_markup=build_force_join_markup(),
+            quote=True,
+            disable_web_page_preview=True
+        )
+        if fsub_msg:
+            asyncio.create_task(auto_delete(fsub_msg, 60))
+        return
 
     if len(text) < 2:
         return
@@ -747,11 +975,38 @@ async def auto_filter_handler(client: Client, message: Message):
 # ---------------------------------------------------------------------------
 @app.on_callback_query()
 async def callback_router(client: Client, query: CallbackQuery):
-    if query.from_user:
-        await db.add_user(query.from_user.id)
+    if not query.from_user:
+        return
+    user_id = query.from_user.id
+    await db.add_user(user_id)
+
+    # 1. Owner Permission Gate: Check if disapproved
+    if await db.is_disapproved_user(user_id):
+        await query.answer("❌ Access Denied: Permission required from Owner Banty.", show_alert=True)
+        return
+
     data = query.data
 
-    if data == "cb_close":
+    if data == "cb_check_join":
+        is_joined = await is_user_joined_group(client, user_id)
+        if is_joined:
+            await query.answer("✅ Verified! Access Granted.", show_alert=False)
+            try:
+                await query.message.edit_text(
+                    "✅ **Access Granted!**\n\n"
+                    "You are a verified member of **CineVerse Film Search** group.\n\n"
+                    "💬 *Type any movie or web series name to search now!*",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🎬 CineVerse Channel", url=CHANNEL_LINK)],
+                        [InlineKeyboardButton("⚡ By Banty", url=DEVELOPER_LINK)]
+                    ])
+                )
+            except Exception:
+                pass
+        else:
+            await query.answer("❌ You haven't joined the group yet! Please click 'Join Group 💬' first.", show_alert=True)
+
+    elif data == "cb_close":
         try:
             await query.message.delete()
         except Exception:
@@ -959,6 +1214,21 @@ async def callback_router(client: Client, query: CallbackQuery):
         await query.answer()
 
     elif data.startswith("get_"):
+        if not await is_user_joined_group(client, user_id):
+            await query.answer("⚠️ You must join our group to download movies!", show_alert=True)
+            try:
+                await query.message.reply_text(
+                    "⚠️ **Access Restricted!**\n\n"
+                    "To download this movie, you must first join our official group:\n"
+                    f"👉 [CineVerse Film Search]({FSUB_GROUP_LINK})\n\n"
+                    "Click **Join Group 💬** below to join, then try again!",
+                    reply_markup=build_force_join_markup(),
+                    disable_web_page_preview=True
+                )
+            except Exception:
+                pass
+            return
+
         msg_id = int(data.split("_")[1])
         try:
             file_info = await db.get_file_by_msg_id(msg_id)

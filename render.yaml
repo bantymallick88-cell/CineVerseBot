@@ -20,9 +20,15 @@ services:
         sync: false
       - key: DB_CHANNEL_ID
         sync: false
+      - key: OWNER_ID
+        value: 7831101047
       - key: ADMIN_ID
         sync: false
+      - key: FSUB_GROUP_ID
+        value: -1004427640174
+      - key: FSUB_GROUP_LINK
+        value: https://t.me/CineVerseFlimSearch
       - key: CHANNEL_LINK
-        sync: false
+        value: https://t.me/CineVerseFlimSearch
       - key: DEVELOPER_LINK
         sync: false

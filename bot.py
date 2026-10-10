@@ -578,16 +578,19 @@ async def start_handler(client: Client, message: Message):
     if not message.from_user:
         return
     user_id = message.from_user.id
+    asyncio.create_task(auto_delete(message, 120))
     await db.add_user(user_id)
 
     # 1. Owner Permission Gate: Check if disapproved
     if await db.is_disapproved_user(user_id):
-        await message.reply_text("❌ Access Denied: Permission required from Owner Banty.", quote=True)
+        denied_msg = await message.reply_text("❌ Access Denied: Permission required from Owner Banty.", quote=True)
+        if denied_msg:
+            asyncio.create_task(auto_delete(denied_msg, 120))
         return
 
     # 2. Force Join Group Requirement
     if not await is_user_joined_group(client, user_id):
-        await message.reply_text(
+        fsub_msg = await message.reply_text(
             "⚠️ **Access Restricted!**\n\n"
             "To use **CineVerse Movie Search Bot**, you must first join our official group:\n"
             f"👉 [CineVerse Film Search]({FSUB_GROUP_LINK})\n\n"
@@ -596,6 +599,8 @@ async def start_handler(client: Client, message: Message):
             quote=True,
             disable_web_page_preview=True
         )
+        if fsub_msg:
+            asyncio.create_task(auto_delete(fsub_msg, 120))
         return
     stats = await db.get_stats()
     bot_me = await client.get_me()
@@ -627,19 +632,23 @@ async def start_handler(client: Client, message: Message):
         ]
     ])
 
+    sent_msg = None
     try:
-        await message.reply_photo(photo=WELCOME_IMAGE_URL, caption=caption, reply_markup=markup)
+        sent_msg = await message.reply_photo(photo=WELCOME_IMAGE_URL, caption=caption, reply_markup=markup)
     except Exception:
-        await message.reply_text(caption, reply_markup=markup, disable_web_page_preview=True)
+        sent_msg = await message.reply_text(caption, reply_markup=markup, disable_web_page_preview=True)
+    if sent_msg:
+        asyncio.create_task(auto_delete(sent_msg, 120))
 
 @app.on_message(filters.command("stats"))
 async def stats_handler(client: Client, message: Message):
+    asyncio.create_task(auto_delete(message, 120))
     if message.from_user:
         await db.add_user(message.from_user.id)
     stats = await db.get_stats()
     db_size = os.path.getsize(DB_FILE) if os.path.exists(DB_FILE) else 0
 
-    await message.reply_text(
+    sent_msg = await message.reply_text(
         f"📊 **CineVerse Bot Statistics**\n\n"
         f"🎬 **Total Movies in DB:** `{stats['movies']}`\n"
         f"👥 **Total Registered Users:** `{stats['users']}`\n"
@@ -648,12 +657,15 @@ async def stats_handler(client: Client, message: Message):
         f"✨ **Powered By:** CineVerse | By Banty",
         quote=True
     )
+    if sent_msg:
+        asyncio.create_task(auto_delete(sent_msg, 120))
 
 @app.on_message(filters.command("help"))
 async def help_handler(client: Client, message: Message):
+    asyncio.create_task(auto_delete(message, 120))
     if message.from_user:
         await db.add_user(message.from_user.id)
-    await message.reply_text(
+    sent_msg = await message.reply_text(
         "📖 **How to Use CineVerse Movie Search Bot**\n\n"
         "1. Simply send any movie name (e.g., `Inception` or `Avengers`).\n"
         "2. Click the popcorn button with your desired file quality.\n"
@@ -666,9 +678,12 @@ async def help_handler(client: Client, message: Message):
         "• `/index` - Admin DB Channel indexer",
         quote=True
     )
+    if sent_msg:
+        asyncio.create_task(auto_delete(sent_msg, 120))
 
 @app.on_message(filters.command("disclaimer"))
 async def disclaimer_handler(client: Client, message: Message):
+    asyncio.create_task(auto_delete(message, 120))
     if message.from_user:
         await db.add_user(message.from_user.id)
     text = (
@@ -678,10 +693,13 @@ async def disclaimer_handler(client: Client, message: Message):
         "• **Copyright Compliance:** CineVerse respects intellectual property rights. If you are a copyright owner or authorized representative and wish to request removal of indexed files, please use the `/dmca` command to submit a takedown notice.\n\n"
         "⚡ **Powered By:** **CineVerse Network**"
     )
-    await message.reply_text(text, quote=True)
+    sent_msg = await message.reply_text(text, quote=True)
+    if sent_msg:
+        asyncio.create_task(auto_delete(sent_msg, 120))
 
 @app.on_message(filters.command("dmca"))
 async def dmca_handler(client: Client, message: Message):
+    asyncio.create_task(auto_delete(message, 120))
     if message.from_user:
         await db.add_user(message.from_user.id)
 
@@ -713,7 +731,9 @@ async def dmca_handler(client: Client, message: Message):
             "We will review and delist the indexed content promptly.\n\n"
             "⚡ **CineVerse Administration**"
         )
-        await message.reply_text(confirm_text, quote=True)
+        sent_msg = await message.reply_text(confirm_text, quote=True)
+        if sent_msg:
+            asyncio.create_task(auto_delete(sent_msg, 120))
     else:
         guide_text = (
             "📋 **DMCA & Copyright Infringement Takedown Notice**\n\n"
@@ -724,14 +744,17 @@ async def dmca_handler(client: Client, message: Message):
             "`/dmca Please remove the movie 'Movie Title (2024)' from index.`\n\n"
             "Your notice will be immediately forwarded to the bot administrator for prompt review and delisting."
         )
-        await message.reply_text(guide_text, quote=True)
+        sent_msg = await message.reply_text(guide_text, quote=True)
+        if sent_msg:
+            asyncio.create_task(auto_delete(sent_msg, 120))
 
 @app.on_message(filters.command("about"))
 async def about_handler(client: Client, message: Message):
+    asyncio.create_task(auto_delete(message, 120))
     if message.from_user:
         await db.add_user(message.from_user.id)
     stats = await db.get_stats()
-    await message.reply_text(
+    sent_msg = await message.reply_text(
         f"───﹝ 🍿 𝙲𝙸𝙽𝙴𝚅𝙴𝚁𝚂𝙴 𝙼𝙾𝚅𝙸𝙴𝚂 ﹞───\n\n"
         f"🤖 **Bot:** CineVerse Auto-Filter Bot\n"
         f"📁 **Total Movies:** `{stats['movies']}`\n"
@@ -740,6 +763,8 @@ async def about_handler(client: Client, message: Message):
         f"✨ **Powered By:** **CineVerse Network**",
         quote=True
     )
+    if sent_msg:
+        asyncio.create_task(auto_delete(sent_msg, 120))
 
 @app.on_message(filters.command("approve"))
 async def approve_handler(client: Client, message: Message):

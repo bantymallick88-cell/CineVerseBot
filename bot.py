@@ -108,6 +108,18 @@ class Database:
                     joined_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
+            # Clean up existing exact duplicates so only 1 unique record remains per (title, file_size)
+            try:
+                conn.execute("""
+                    DELETE FROM movies 
+                    WHERE file_id NOT IN (
+                        SELECT MIN(file_id) 
+                        FROM movies 
+                        GROUP BY title, file_size
+                    );
+                """)
+            except Exception as e:
+                logger.warning(f"Note on deduplicating movies table: {e}")
             conn.commit()
 
     def _add_user(self, user_id: int):
@@ -157,11 +169,19 @@ class Database:
 
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            total = cursor.execute(f"SELECT COUNT(*) FROM movies WHERE {where_sql};", params).fetchone()[0]
+            count_sql = f"SELECT COUNT(*) FROM (SELECT 1 FROM movies WHERE {where_sql} GROUP BY title, file_size);"
+            total = cursor.execute(count_sql, params).fetchone()[0]
             if total == 0:
                 return [], 0
 
-            search_sql = f"SELECT file_id, title, file_size, message_id FROM movies WHERE {where_sql} ORDER BY message_id DESC LIMIT ? OFFSET ?;"
+            search_sql = f"""
+                SELECT file_id, title, file_size, MAX(message_id) AS message_id 
+                FROM movies 
+                WHERE {where_sql} 
+                GROUP BY title, file_size 
+                ORDER BY message_id DESC 
+                LIMIT ? OFFSET ?;
+            """
             cursor.execute(search_sql, params + [limit, offset])
             rows = [dict(row) for row in cursor.fetchall()]
             return rows, total
@@ -219,17 +239,9 @@ async def auto_delete(message: Message, delay: int = 60):
     except Exception:
         pass
 
-def format_search_text(query: str, files: List[Dict[str, Any]], total: int, page: int, total_pages: int) -> str:
-    lines = []
-    for f in files:
-        name = f.get("title", "Movie File")
-        size_str = format_size(f.get("file_size", 0))
-        lines.append(f"📁 `{size_str}` ▷ **{name}**")
-
-    files_list = "\n".join(lines)
+def format_search_text(query: str, total: int, page: int, total_pages: int) -> str:
     return (
         f"🔍 **Search Results for:** `{query}`\n\n"
-        f"{files_list}\n\n"
         f"📊 **Total Results:** `{total}` | **Page:** `{page}/{total_pages}`\n"
         f"✨ *Click any button below to download instantly!*\n"
         f"⚠️ *This search result will auto-delete in 60 seconds (1 minute)!*"
@@ -553,7 +565,7 @@ async def auto_filter_handler(client: Client, message: Message):
     SEARCH_CACHE[cache_id] = text
     total_pages = math.ceil(total / PAGE_SIZE)
     markup = build_pagination_markup(files, cache_id, 1, total_pages)
-    response_text = format_search_text(text, files, total, 1, total_pages)
+    response_text = format_search_text(text, total, 1, total_pages)
 
     # 2. Reply with formatted results and start 60-second auto-delete task on bot response
     sent_msg = await message.reply_text(response_text, reply_markup=markup, quote=True)
@@ -720,7 +732,7 @@ async def callback_router(client: Client, query: CallbackQuery):
             return
 
         markup = build_pagination_markup(files, cache_id, page, total_pages)
-        response_text = format_search_text(search_query, files, total, page, total_pages)
+        response_text = format_search_text(search_query, total, page, total_pages)
         try:
             await query.message.edit_text(response_text, reply_markup=markup)
         except MessageNotModified:

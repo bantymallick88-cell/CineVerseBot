@@ -99,6 +99,8 @@ WELCOME_IMAGE_URL = get_env_str(
 
 PAGE_SIZE = 8
 SEARCH_CACHE: Dict[str, str] = {}
+PROCESSED_MESSAGE_KEYS: set = set()
+PROCESSED_CALLBACK_IDS: set = set()
 DB_FILE = os.path.join(os.getcwd(), "database.db")
 TARGET_RESOLVED_CHAT_ID: Optional[Any] = None
 FSUB_RESOLVED_CHAT_ID: Optional[Any] = None
@@ -908,17 +910,26 @@ async def auto_index_channel(client: Client, message: Message):
             logger.info(f"[AUTO-INDEX] Saved '{title}' (ID: {message.id})")
 
 # ---------------------------------------------------------------------------
-# SEARCH & AUTO-FILTER HANDLER (WITH 60S AUTO-DELETE)
+# SEARCH & AUTO-FILTER HANDLER (WITH 60S AUTO-DELETE & SINGLE-PROCESS DEDUPLICATION)
 # ---------------------------------------------------------------------------
-@app.on_message(filters.text & ~filters.bot & ~filters.via_bot)
+@app.on_message(filters.text & ~filters.bot & ~filters.via_bot & ~filters.service & ~filters.forwarded)
 async def auto_filter_handler(client: Client, message: Message):
-    text = message.text.strip()
-    if text.startswith("/"):
+    text = message.text.strip() if message.text else ""
+    if not text or text.startswith("/"):
         return
 
     if not message.from_user:
         return
     user_id = message.from_user.id
+
+    # Handler Deduplication: Prevent duplicate message execution across network retries
+    msg_key = (message.chat.id, message.id)
+    if msg_key in PROCESSED_MESSAGE_KEYS:
+        return
+    PROCESSED_MESSAGE_KEYS.add(msg_key)
+    if len(PROCESSED_MESSAGE_KEYS) > 3000:
+        PROCESSED_MESSAGE_KEYS.clear()
+
     await db.add_user(user_id)
 
     # 1. Start 60-second auto-delete task for user's query message in all chats
@@ -978,6 +989,18 @@ async def callback_router(client: Client, query: CallbackQuery):
     if not query.from_user:
         return
     user_id = query.from_user.id
+
+    # Deduplicate callback query triggers
+    if query.id in PROCESSED_CALLBACK_IDS:
+        try:
+            await query.answer()
+        except Exception:
+            pass
+        return
+    PROCESSED_CALLBACK_IDS.add(query.id)
+    if len(PROCESSED_CALLBACK_IDS) > 3000:
+        PROCESSED_CALLBACK_IDS.clear()
+
     await db.add_user(user_id)
 
     # 1. Owner Permission Gate: Check if disapproved

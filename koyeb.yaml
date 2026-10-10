@@ -1,0 +1,11 @@
+# Koyeb Deployment Configuration
+# Reference: https://www.koyeb.com/docs/reference/koyeb-yaml
+name: cineverse-bot
+services:
+  - name: cineverse-bot-service
+    type: worker
+    instance_type: nano
+    regions:
+      - fra
+    dockerfile:
+      dockerfile: Dockerfile

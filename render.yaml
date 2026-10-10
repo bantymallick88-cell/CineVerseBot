@@ -1,0 +1,25 @@
+# Render.com Blueprint Configuration
+# Docs: https://render.com/docs/blueprint-spec
+services:
+  - type: worker
+    name: cineverse-bot
+    env: docker
+    dockerfilePath: Dockerfile
+    region: oregon
+    plan: starter
+    autoDeploy: true
+    envVars:
+      - key: API_ID
+        sync: false
+      - key: API_HASH
+        sync: false
+      - key: BOT_TOKEN
+        sync: false
+      - key: DB_CHANNEL_ID
+        sync: false
+      - key: ADMIN_ID
+        sync: false
+      - key: CHANNEL_LINK
+        sync: false
+      - key: DEVELOPER_LINK
+        sync: false

@@ -87,7 +87,9 @@ API_HASH=e5e4c9c88d0c5c2654d8fbe985523c9c
 BOT_TOKEN=your_bot_token_here
 DB_CHANNEL_ID=-1004312780149
 ADMIN_ID=7831101047
-CHANNEL_LINK=https://t.me/CineVerseFlimSearch
+SEARCH_GROUP_ID=-1004427640174
+SEARCH_GROUP_LINK=https://t.me/CineVerseFlimSearch
+AROLINKS_API_KEY=your_arolinks_api_key_here
 ```
 
 ### 3. Run the Bot

@@ -3,9 +3,12 @@ import sys
 import math
 import time
 import uuid
+import json
 import sqlite3
 import logging
 import threading
+import urllib.request
+import urllib.parse
 from typing import List, Tuple, Dict, Any, Optional
 
 try:
@@ -88,12 +91,15 @@ def parse_admin_ids() -> set:
 ADMIN_IDS = parse_admin_ids()
 ADMIN_ID = OWNER_ID
 
+# AroLinks Shortener API Configuration (Strict 1 File = 1 Ad Flow)
+AROLINKS_API_KEY = get_env_str("AROLINKS_API_KEY", "")
+
 REQ_GROUP_ID = get_env_int("REQ_GROUP_ID", -1003982672894)
 REQ_GROUP_LINK = get_env_str("REQ_GROUP_LINK", "https://t.me/FlimRequest_01")
 BACKUP_CHANNEL_ID = get_env_int("BACKUP_CHANNEL_ID", -1003423603865)
 BACKUP_CHANNEL_LINK = get_env_str("BACKUP_CHANNEL_LINK", "https://t.me/CineVersebackup")
-SEARCH_GROUP_ID = get_env_int("SEARCH_GROUP_ID", -1004427640174)
-SEARCH_GROUP_LINK = get_env_str("SEARCH_GROUP_LINK", "https://t.me/CineVerseFlimSearch")
+SEARCH_GROUP_ID = get_env_int("SEARCH_GROUP_ID", get_env_int("FSUB_GROUP_ID", -1004427640174))
+SEARCH_GROUP_LINK = get_env_str("SEARCH_GROUP_LINK", get_env_str("FSUB_GROUP_LINK", "https://t.me/CineVerseFlimSearch"))
 
 # Aliases for backwards compatibility
 FSUB_GROUP_ID = REQ_GROUP_ID
@@ -160,6 +166,17 @@ class Database:
                     disapproved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS file_tokens (
+                    token TEXT PRIMARY KEY,
+                    user_id INTEGER,
+                    message_id INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    is_used INTEGER DEFAULT 0
+                );
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_token ON file_tokens(token);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_token_user ON file_tokens(user_id);")
             # Clean up existing exact duplicates so only 1 unique record remains per (title, file_size)
             try:
                 conn.execute("""
@@ -305,6 +322,48 @@ class Database:
             rows = conn.execute("SELECT user_id FROM approved_users;").fetchall()
             return [r[0] for r in rows]
 
+    def _create_file_token(self, token: str, user_id: int, message_id: int) -> bool:
+        try:
+            with self._get_connection() as conn:
+                conn.execute(
+                    "INSERT INTO file_tokens (token, user_id, message_id, is_used) VALUES (?, ?, ?, 0);",
+                    (token, user_id, message_id)
+                )
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Error creating file token: {e}")
+            return False
+
+    def _verify_and_consume_token(self, token: str, user_id: int) -> Optional[int]:
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                row = cursor.execute(
+                    "SELECT message_id, is_used FROM file_tokens WHERE token = ? AND user_id = ?;",
+                    (token, user_id)
+                ).fetchone()
+                if not row:
+                    row = cursor.execute(
+                        "SELECT message_id, is_used FROM file_tokens WHERE token = ?;",
+                        (token,)
+                    ).fetchone()
+                if row and row["is_used"] == 0:
+                    conn.execute("UPDATE file_tokens SET is_used = 1 WHERE token = ?;", (token,))
+                    conn.commit()
+                    return int(row["message_id"])
+        except Exception as e:
+            logger.error(f"Error consuming file token: {e}")
+        return None
+
+    def _is_token_used(self, token: str) -> bool:
+        try:
+            with self._get_connection() as conn:
+                row = conn.execute("SELECT is_used FROM file_tokens WHERE token = ?;", (token,)).fetchone()
+                return bool(row and row["is_used"] == 1)
+        except Exception:
+            return False
+
     # Async wrappers
     async def add_user(self, user_id: int):
         await asyncio.to_thread(self._add_user, user_id)
@@ -338,6 +397,15 @@ class Database:
 
     async def get_approved_users(self) -> List[int]:
         return await asyncio.to_thread(self._get_approved_users)
+
+    async def create_file_token(self, token: str, user_id: int, message_id: int) -> bool:
+        return await asyncio.to_thread(self._create_file_token, token, user_id, message_id)
+
+    async def verify_and_consume_token(self, token: str, user_id: int) -> Optional[int]:
+        return await asyncio.to_thread(self._verify_and_consume_token, token, user_id)
+
+    async def is_token_used(self, token: str) -> bool:
+        return await asyncio.to_thread(self._is_token_used, token)
 
 
 db = Database()
@@ -545,9 +613,9 @@ def build_pagination_markup(files: List[Dict[str, Any]], cache_id: str, current_
         nav_row.append(InlineKeyboardButton("NEXT ▶️", callback_data=f"nav_{cache_id}_{current_page + 1}"))
     buttons.append(nav_row)
 
-    # Row 3: Official Channel & Creator badge
+    # Row 3: Official CineVerse Search Group & Creator badge
     buttons.append([
-        InlineKeyboardButton("🎬 CineVerse Channel ↗", url=CHANNEL_LINK),
+        InlineKeyboardButton("🍿 Open CineVerse Search Group", url=SEARCH_GROUP_LINK),
         InlineKeyboardButton("⚡ By Banty ↗", url=DEVELOPER_LINK)
     ])
     
@@ -730,6 +798,110 @@ async def deliver_movie_file(client: Client, user_id: int, msg_id: int):
     except Exception as e:
         logger.error(f"Error delivering file {msg_id} to user {user_id}: {e}")
 
+# ---------------------------------------------------------------------------
+# AROLINKS SHORTENER ENGINE (STRICT 1 FILE = 1 AD VERIFICATION)
+# ---------------------------------------------------------------------------
+def _fetch_arolinks_short_url(destination_url: str) -> str:
+    """
+    Calls AroLinks API synchronously (run in worker thread via asyncio.to_thread).
+    Endpoint: https://arolinks.com/api?api={AROLINKS_API_KEY}&url={DESTINATION_URL}
+    """
+    if not AROLINKS_API_KEY:
+        return destination_url
+    try:
+        encoded_url = urllib.parse.quote(destination_url, safe="")
+        api_url = f"https://arolinks.com/api?api={AROLINKS_API_KEY}&url={encoded_url}"
+        req = urllib.request.Request(
+            api_url,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) CineVerseBot/2.0"}
+        )
+        with urllib.request.urlopen(req, timeout=8) as response:
+            if response.status == 200:
+                body = response.read().decode("utf-8").strip()
+                try:
+                    data = json.loads(body)
+                    if isinstance(data, dict):
+                        if data.get("status") == "success" and data.get("shortenedUrl"):
+                            return str(data["shortenedUrl"]).strip()
+                        for k in ["shortenedUrl", "short_url", "shorturl", "url"]:
+                            if data.get(k):
+                                return str(data[k]).strip()
+                except Exception:
+                    if body.startswith("http://") or body.startswith("https://"):
+                        return body
+    except Exception as e:
+        logger.warning(f"AroLinks API call error: {e}")
+    return destination_url
+
+async def get_arolinks_short_url(destination_url: str) -> str:
+    return await asyncio.to_thread(_fetch_arolinks_short_url, destination_url)
+
+async def send_arolinks_verification_card(client: Client, target_chat: Any, user_id: int, file_msg_id: int, reply_to_message: Optional[Message] = None):
+    """
+    Luxury Dribbble/Godly framed AroLinks verification card.
+    Enforces strictly 1 File = 1 Ad verification per movie file request.
+    Delivers movie file directly upon completion.
+    """
+    file_info = await db.get_file_by_msg_id(file_msg_id)
+    title = file_info.get("title", "Requested Movie") if file_info else "Requested Movie"
+    size_str = format_size(file_info.get("file_size", 0)) if file_info else "N/A"
+    meta = extract_movie_metadata(title)
+
+    # Generate single-use token for strictly 1 File = 1 Ad verification
+    token = uuid.uuid4().hex[:12]
+    await db.create_file_token(token, user_id, file_msg_id)
+
+    bot_uname = await get_bot_username(client)
+    destination_url = f"https://t.me/{bot_uname}?start=verify_{token}"
+    short_url = await get_arolinks_short_url(destination_url)
+
+    verify_text = (
+        "┌──────────────────────────────────────────┐\n"
+        "│   🍿  C I N E V E R S E   V A U L T      │\n"
+        "│      1-Step Verification Required        │\n"
+        "└──────────────────────────────────────────┘\n\n"
+        f"◈ **Title:** `{meta['clean_title']}`\n"
+        f"├─ 🌟 **Rating:** `8.5/10 ★` │ 🎬 **Quality:** `{meta['quality']}`\n"
+        f"├─ 🔊 **Audio:** `{meta['audio']}` │ 💾 **Size:** `{size_str}`\n"
+        "└─ ⚡ **Powered by CineVerse Network**\n\n"
+        "⚡ **Strict 1 File = 1 Ad Flow:**\n"
+        "├─ 🔒 Complete 1 quick ad page verification to unlock your file.\n"
+        "├─ ⏱️ Takes ~5 seconds to complete.\n"
+        "└─ 🚀 File will be delivered here in PM immediately after verification!\n\n"
+        "👉 *Tap the button below to verify & unlock your download:*"
+    )
+    verify_markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⚡ Unlock & Download File (1-Page) ↗", url=short_url)],
+        [InlineKeyboardButton("🍿 Open CineVerse Search Group", url=SEARCH_GROUP_LINK)]
+    ])
+
+    verify_msg = None
+    if reply_to_message:
+        try:
+            verify_msg = await reply_to_message.reply_text(
+                verify_text,
+                reply_markup=verify_markup,
+                quote=True,
+                disable_web_page_preview=True
+            )
+        except Exception:
+            verify_msg = None
+
+    if not verify_msg:
+        try:
+            chat_id = target_chat.chat.id if hasattr(target_chat, "chat") else target_chat
+            verify_msg = await client.send_message(
+                chat_id=chat_id,
+                text=verify_text,
+                reply_markup=verify_markup,
+                disable_web_page_preview=True
+            )
+        except Exception as e:
+            logger.error(f"Error sending AroLinks verification card: {e}")
+
+    if verify_msg:
+        asyncio.create_task(auto_delete(verify_msg, 60, reply_to_message=reply_to_message))
+
 async def check_chat_membership(client: Client, chat_id: Any, user_id: int, fallback_username: Optional[str] = None) -> bool:
     try:
         member = await client.get_chat_member(chat_id=chat_id, user_id=user_id)
@@ -842,19 +1014,87 @@ async def start_handler(client: Client, message: Message):
             asyncio.create_task(auto_delete(denied_msg, 60, reply_to_message=message))
         return
 
-    # 3. Check for deep-link file parameter (e.g. /start file_123 or /start get_123)
+    # 3. Check for deep-link file or verification parameter
     command_parts = message.text.split() if message.text else []
     file_msg_id = None
+    verify_token = None
     if len(command_parts) > 1:
         param = command_parts[1].strip()
-        if param.startswith("file_") and param[5:].isdigit():
+        if param.startswith("verify_"):
+            verify_token = param[7:].strip()
+        elif param.startswith("file_") and param[5:].isdigit():
             file_msg_id = int(param[5:])
         elif param.startswith("get_") and param[4:].isdigit():
             file_msg_id = int(param[4:])
         elif param.isdigit():
             file_msg_id = int(param)
 
-    # If user arrived for a specific file:
+    # A. User completed 1-page AroLinks ad verification and returned to PM:
+    if verify_token:
+        if not await is_user_joined_group(client, user_id):
+            user_name = message.from_user.first_name if message.from_user and message.from_user.first_name else "Friend"
+            fsub_text = (
+                "┌──────────────────────────────────────────┐\n"
+                "│   🔒  A C C E S S   R E Q U I R E D      │\n"
+                "│        Official Membership Gate          │\n"
+                "└──────────────────────────────────────────┘\n\n"
+                f"👋 Hello **{user_name}**,\n\n"
+                "To unlock private access and direct high-speed movie downloads, please join our official network channels below:\n\n"
+                "◈ Channels to Join:\n"
+                "├─ 🟢 **1. CineVerse Request Group** (Discussions & Requests)\n"
+                "└─ 📢 **2. CineVerse Backup Channel** (Updates & Vault)\n\n"
+                "⚡ *After joining both, tap 'Verify & Continue' below.*"
+            )
+            fsub_msg = await message.reply_text(
+                fsub_text,
+                reply_markup=build_force_join_markup(retry_callback=f"check_token_{verify_token}"),
+                quote=True,
+                disable_web_page_preview=True
+            )
+            if fsub_msg:
+                asyncio.create_task(auto_delete(fsub_msg, 60, reply_to_message=message))
+            return
+
+        # Strictly 1 File = 1 Ad: atomical token consumption
+        delivered_msg_id = await db.verify_and_consume_token(verify_token, user_id)
+        if delivered_msg_id:
+            await deliver_movie_file(client, user_id, delivered_msg_id)
+            return
+        elif await db.is_token_used(verify_token):
+            used_msg = await message.reply_text(
+                "┌──────────────────────────────────────────┐\n"
+                "│   ⚠️  V E R I F I C A T I O N   U S E D  │\n"
+                "└──────────────────────────────────────────┘\n\n"
+                "◈ **Link Already Consumed!**\n"
+                "├─ 🔒 This verification link has already unlocked its file.\n"
+                "├─ ⚡ Policy: Strictly 1 File = 1 Ad Verification.\n"
+                "└─ 🍿 Please search again in CineVerse Search Group to get a new download link.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🍿 Open CineVerse Search Group", url=SEARCH_GROUP_LINK)]
+                ]),
+                quote=True
+            )
+            if used_msg:
+                asyncio.create_task(auto_delete(used_msg, 60, reply_to_message=message))
+            return
+        else:
+            invalid_msg = await message.reply_text(
+                "┌──────────────────────────────────────────┐\n"
+                "│   ❌  I N V A L I D   T O K E N          │\n"
+                "└──────────────────────────────────────────┘\n\n"
+                "◈ **Invalid or Expired Link!**\n"
+                "├─ ⚠️ This verification link is invalid or has expired.\n"
+                "└─ 🍿 Please search for your movie again in CineVerse Search Group.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🍿 Open CineVerse Search Group", url=SEARCH_GROUP_LINK)]
+                ]),
+                quote=True
+            )
+            if invalid_msg:
+                asyncio.create_task(auto_delete(invalid_msg, 60, reply_to_message=message))
+            return
+
+    # B. User arrived for a specific file from Search Group:
     if file_msg_id:
         if not await is_user_joined_group(client, user_id):
             user_name = message.from_user.first_name if message.from_user and message.from_user.first_name else "Friend"
@@ -880,7 +1120,12 @@ async def start_handler(client: Client, message: Message):
                 asyncio.create_task(auto_delete(fsub_msg, 60, reply_to_message=message))
             return
 
-        # User is verified: Instantly send requested movie file in PM!
+        # Enforce AroLinks 1 File = 1 Ad flow (if configured and not owner/admin):
+        if AROLINKS_API_KEY and user_id != OWNER_ID and user_id not in ADMIN_IDS:
+            await send_arolinks_verification_card(client, message, user_id, file_msg_id, reply_to_message=message)
+            return
+
+        # Direct delivery (fallback or owner/admin)
         await deliver_movie_file(client, user_id, file_msg_id)
         return
 
@@ -1379,7 +1624,7 @@ async def incoming_user_message_tracker(client: Client, message: Message):
 async def service_message_cleaner(client: Client, message: Message):
     if is_duplicate_message(message):
         return
-    asyncio.create_task(auto_delete(message, 0))
+    asyncio.create_task(auto_delete(message, 60))
 
 # ---------------------------------------------------------------------------
 # SEARCH & AUTO-FILTER HANDLER (WITH 60S AUTO-DELETE & SINGLE-PROCESS DEDUPLICATION)
@@ -1437,7 +1682,7 @@ async def auto_filter_handler(client: Client, message: Message):
             asyncio.create_task(auto_delete(denied_msg, 60, reply_to_message=message))
         return
 
-    # 3. If query is in Private Chat (PM): Redirect to Request Group
+    # 3. If query is in Private Chat (PM): Redirect to CineVerse Search Group (-1004427640174)
     if message.chat.type == enums.ChatType.PRIVATE:
         # Check Force Join first in PM
         if not await is_user_joined_group(client, user_id):
@@ -1472,15 +1717,15 @@ async def auto_filter_handler(client: Client, message: Message):
             "│        Search in Official Group          │\n"
             "└──────────────────────────────────────────┘\n\n"
             f"👋 Hello **{user_name}**,\n\n"
-            "Direct query processing is hosted in our official group for maximum speed & multi-user support!\n\n"
-            "◈ How to Search:\n"
+            "Direct query processing is hosted in **CineVerse Search Group** (`-1004427640174`) for maximum speed & multi-user support!\n\n"
+            "◈ **How to Search:**\n"
             "├─ 💬 Send your movie or series title in CineVerse Search Group\n"
             "├─ 📥 Select your resolution & audio badge\n"
             "└─ ⚡ Bot automatically delivers files directly to your PM!\n\n"
-            "👉 *Tap the button below to open Search Group now!*"
+            "👉 *Tap the button below to open CineVerse Search Group now!*"
         )
         redirect_markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🍿 Open CineVerse Search Group ↗", url=SEARCH_GROUP_LINK)]
+            [InlineKeyboardButton("🍿 Open CineVerse Search Group", url=SEARCH_GROUP_LINK)]
         ])
         pm_msg = await message.reply_text(
             redirect_text,
@@ -1868,7 +2113,14 @@ async def callback_router(client: Client, query: CallbackQuery):
         # Code-Level Deduplication Lock for file delivery callbacks
         delivery_key = f"deliver_{user_id}_{msg_id}"
         if is_duplicate_request(delivery_key, expiry=REQUEST_LOCK_EXPIRY):
-            await query.answer("⏳ File is already being delivered to your PM!", show_alert=False)
+            await query.answer("⏳ Request is already being processed!", show_alert=False)
+            return
+
+        # AroLinks 1 File = 1 Ad Flow (if configured and not owner/admin)
+        if AROLINKS_API_KEY and user_id != OWNER_ID and user_id not in ADMIN_IDS:
+            await query.answer("⚡ Generating secure download link...", show_alert=False)
+            target_chat_id = query.message.chat.id if query.message and query.message.chat else user_id
+            await send_arolinks_verification_card(client, target_chat_id, user_id, msg_id, reply_to_message=query.message)
             return
 
         # User is verified: Send file immediately in PM
@@ -1878,6 +2130,27 @@ async def callback_router(client: Client, query: CallbackQuery):
         except Exception:
             pass
         await deliver_movie_file(client, user_id, msg_id)
+        return
+
+    elif data.startswith("check_token_"):
+        token = data.split("_", 2)[2]
+        if not await is_user_joined_group(client, user_id):
+            await query.answer("❌ You haven't joined both groups yet! Please join both first.", show_alert=True)
+            return
+
+        delivered_msg_id = await db.verify_and_consume_token(token, user_id)
+        if delivered_msg_id:
+            await query.answer("✅ Verified! Delivering your file...", show_alert=False)
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            await deliver_movie_file(client, user_id, delivered_msg_id)
+            return
+        elif await db.is_token_used(token):
+            await query.answer("⚠️ This verification link has already delivered its file.", show_alert=True)
+        else:
+            await query.answer("❌ Invalid or expired verification link.", show_alert=True)
         return
 
     elif data.startswith("nav_"):

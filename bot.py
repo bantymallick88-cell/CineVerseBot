@@ -88,9 +88,15 @@ def parse_admin_ids() -> set:
 ADMIN_IDS = parse_admin_ids()
 ADMIN_ID = OWNER_ID
 
-FSUB_GROUP_ID = get_env_int("FSUB_GROUP_ID", -1004427640174)
-FSUB_GROUP_LINK = get_env_str("FSUB_GROUP_LINK", "https://t.me/CineVerseFlimSearch")
-CHANNEL_LINK = get_env_str("CHANNEL_LINK", "https://t.me/CineVerseFlimSearch")
+REQ_GROUP_ID = get_env_int("REQ_GROUP_ID", -1003982672894)
+REQ_GROUP_LINK = get_env_str("REQ_GROUP_LINK", "https://t.me/FlimRequest_01")
+BACKUP_CHANNEL_ID = get_env_int("BACKUP_CHANNEL_ID", -1003423603865)
+BACKUP_CHANNEL_LINK = get_env_str("BACKUP_CHANNEL_LINK", "https://t.me/CineVersebackup")
+
+# Aliases for backwards compatibility
+FSUB_GROUP_ID = REQ_GROUP_ID
+FSUB_GROUP_LINK = REQ_GROUP_LINK
+CHANNEL_LINK = REQ_GROUP_LINK
 DEVELOPER_LINK = get_env_str("DEVELOPER_LINK", f"tg://user?id={OWNER_ID}")
 WELCOME_IMAGE_URL = get_env_str(
     "WELCOME_IMAGE_URL",
@@ -509,38 +515,11 @@ async def resolve_channel_peer(client: Client) -> Any:
 
     return TARGET_RESOLVED_CHAT_ID
 
-async def resolve_fsub_peer(client: Client) -> Any:
-    global FSUB_RESOLVED_CHAT_ID
-    if FSUB_RESOLVED_CHAT_ID:
-        return FSUB_RESOLVED_CHAT_ID
-
-    candidates = [
-        FSUB_GROUP_ID,
-        -1004427640174,
-        "CineVerseFlimSearch",
-        "@CineVerseFlimSearch"
-    ]
-
-    for candidate in candidates:
-        if candidate is None:
-            continue
-        try:
-            chat = await client.get_chat(candidate)
-            if chat and chat.id:
-                FSUB_RESOLVED_CHAT_ID = chat.id
-                return FSUB_RESOLVED_CHAT_ID
-        except Exception:
-            continue
-
-    FSUB_RESOLVED_CHAT_ID = FSUB_GROUP_ID
-    return FSUB_RESOLVED_CHAT_ID
-
-async def is_user_joined_group(client: Client, user_id: int) -> bool:
+async def check_chat_membership(client: Client, chat_id: Any, user_id: int, fallback_username: Optional[str] = None) -> bool:
     if user_id == OWNER_ID or user_id in ADMIN_IDS:
         return True
     try:
-        peer = await resolve_fsub_peer(client)
-        member = await client.get_chat_member(chat_id=peer, user_id=user_id)
+        member = await client.get_chat_member(chat_id=chat_id, user_id=user_id)
         if member and member.status in [
             enums.ChatMemberStatus.OWNER,
             enums.ChatMemberStatus.ADMINISTRATOR,
@@ -551,22 +530,57 @@ async def is_user_joined_group(client: Client, user_id: int) -> bool:
         return False
     except UserNotParticipant:
         return False
-    except Exception as e:
-        logger.warning(f"Error checking group membership for user {user_id}: {e}")
+    except (PeerIdInvalid, RPCError, Exception) as e:
+        if fallback_username:
+            try:
+                resolved = await client.get_chat(fallback_username)
+                if resolved and resolved.id:
+                    member = await client.get_chat_member(chat_id=resolved.id, user_id=user_id)
+                    if member and member.status in [
+                        enums.ChatMemberStatus.OWNER,
+                        enums.ChatMemberStatus.ADMINISTRATOR,
+                        enums.ChatMemberStatus.MEMBER,
+                        enums.ChatMemberStatus.RESTRICTED
+                    ]:
+                        return True
+                    return False
+            except UserNotParticipant:
+                return False
+            except Exception as e2:
+                logger.warning(f"Error checking membership via {fallback_username}: {e2}")
+        logger.warning(f"Error checking chat membership for {chat_id} (user {user_id}): {e}")
         return False
+
+async def is_user_joined_group(client: Client, user_id: int) -> bool:
+    """Checks if user is a member of BOTH Target Request Group (-1003982672894) AND Backup Channel (-1003423603865)."""
+    if user_id == OWNER_ID or user_id in ADMIN_IDS:
+        return True
+    
+    joined_req = await check_chat_membership(client, REQ_GROUP_ID, user_id, fallback_username="FlimRequest_01")
+    if not joined_req:
+        return False
+
+    joined_backup = await check_chat_membership(client, BACKUP_CHANNEL_ID, user_id, fallback_username="CineVersebackup")
+    if not joined_backup:
+        return False
+
+    return True
 
 async def is_authorized_user(user_id: int) -> bool:
     if user_id == OWNER_ID or user_id in ADMIN_IDS:
         return True
     return await db.is_approved_user(user_id)
 
-def build_force_join_markup() -> InlineKeyboardMarkup:
+def build_force_join_markup(retry_callback: str = "cb_check_join") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("Join Group 💬", url=FSUB_GROUP_LINK)
+            InlineKeyboardButton("🟢 Join Request Group", url=REQ_GROUP_LINK)
         ],
         [
-            InlineKeyboardButton("🔄 Try Again", callback_data="cb_check_join")
+            InlineKeyboardButton("📢 Join Backup Channel", url=BACKUP_CHANNEL_LINK)
+        ],
+        [
+            InlineKeyboardButton("🔄 Try Again", callback_data=retry_callback)
         ]
     ])
 
@@ -590,12 +604,10 @@ async def start_handler(client: Client, message: Message):
 
     # 2. Force Join Group Requirement
     if not await is_user_joined_group(client, user_id):
+        user_name = message.from_user.first_name if message.from_user and message.from_user.first_name else "Friend"
         fsub_msg = await message.reply_text(
-            "⚠️ **Access Restricted!**\n\n"
-            "To use **CineVerse Movie Search Bot**, you must first join our official group:\n"
-            f"👉 [CineVerse Film Search]({FSUB_GROUP_LINK})\n\n"
-            "Please click **Join Group 💬** below to join, then click **Try Again 🔄**!",
-            reply_markup=build_force_join_markup(),
+            f"HEY {user_name}, YOU CAN'T GET ANYTHING FROM HERE. JOIN OUR GROUPS TO GET FILES! 👇",
+            reply_markup=build_force_join_markup("cb_check_join"),
             quote=True,
             disable_web_page_preview=True
         )
@@ -967,19 +979,17 @@ async def auto_filter_handler(client: Client, message: Message):
             asyncio.create_task(auto_delete(denied_msg, 60))
         return
 
-    # 3. Force Join Group Requirement: Check membership in CineVerse Film Search group (-1004427640174)
+    # 3. Force Join Group Requirement: Check membership in Target Request Group (-1003982672894) AND Backup Channel (-1003423603865)
     if not await is_user_joined_group(client, user_id):
+        user_name = message.from_user.first_name if message.from_user and message.from_user.first_name else "Friend"
         fsub_msg = await message.reply_text(
-            "⚠️ **Access Restricted!**\n\n"
-            "To use **CineVerse Movie Search Bot**, you must first join our official group:\n"
-            f"👉 [CineVerse Film Search]({FSUB_GROUP_LINK})\n\n"
-            "Please click **Join Group 💬** below to join, then try your search again!",
-            reply_markup=build_force_join_markup(),
+            f"HEY {user_name}, YOU CAN'T GET ANYTHING FROM HERE. JOIN OUR GROUPS TO GET FILES! 👇",
+            reply_markup=build_force_join_markup("cb_check_join"),
             quote=True,
             disable_web_page_preview=True
         )
         if fsub_msg:
-            asyncio.create_task(auto_delete(fsub_msg, 60))
+            asyncio.create_task(auto_delete(fsub_msg, 120))
         return
 
     # 4. Block Direct PM Search & Show Redirect Button
@@ -990,7 +1000,7 @@ async def auto_filter_handler(client: Client, message: Message):
             "YOU CAN'T GET ANYTHING FROM HERE. REQUEST ON OUR GROUP OR CLICK REQUEST HERE BUTTON BELOW 👇"
         )
         redirect_markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Search Group ✅", url="https://t.me/CineVerseFlimSearch")]
+            [InlineKeyboardButton("🟢 Request Group 💬", url=REQ_GROUP_LINK)]
         ])
         pm_msg = await message.reply_text(
             redirect_text,
@@ -1062,17 +1072,17 @@ async def callback_router(client: Client, query: CallbackQuery):
             try:
                 await query.message.edit_text(
                     "✅ **Access Granted!**\n\n"
-                    "You are a verified member of **CineVerse Film Search** group.\n\n"
-                    "💬 *Type any movie or web series name to search now!*",
+                    "You have joined both **CineVerse Flim Request Group** and **Backup Channel**.\n\n"
+                    "💬 *Send your movie requests in the group to get files!*",
                     reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🎬 CineVerse Channel", url=CHANNEL_LINK)],
-                        [InlineKeyboardButton("⚡ By Banty", url=DEVELOPER_LINK)]
+                        [InlineKeyboardButton("🟢 Request Group", url=REQ_GROUP_LINK)],
+                        [InlineKeyboardButton("📢 Backup Channel", url=BACKUP_CHANNEL_LINK)]
                     ])
                 )
             except Exception:
                 pass
         else:
-            await query.answer("❌ You haven't joined the group yet! Please click 'Join Group 💬' first.", show_alert=True)
+            await query.answer("❌ You haven't joined both groups yet! Please join both and click Try Again.", show_alert=True)
 
     elif data == "cb_close":
         try:
@@ -1283,18 +1293,30 @@ async def callback_router(client: Client, query: CallbackQuery):
 
     elif data.startswith("get_"):
         if not await is_user_joined_group(client, user_id):
-            await query.answer("⚠️ You must join our group to download movies!", show_alert=True)
+            await query.answer("⚠️ You must join our groups to get files!", show_alert=True)
+            user_name = query.from_user.first_name if query.from_user and query.from_user.first_name else "Friend"
+            fsub_text = f"HEY {user_name}, YOU CAN'T GET ANYTHING FROM HERE. JOIN OUR GROUPS TO GET FILES! 👇"
+            reply_markup = build_force_join_markup(retry_callback=data)
             try:
-                await query.message.reply_text(
-                    "⚠️ **Access Restricted!**\n\n"
-                    "To download this movie, you must first join our official group:\n"
-                    f"👉 [CineVerse Film Search]({FSUB_GROUP_LINK})\n\n"
-                    "Click **Join Group 💬** below to join, then try again!",
-                    reply_markup=build_force_join_markup(),
+                sent_msg = await client.send_message(
+                    chat_id=query.from_user.id,
+                    text=fsub_text,
+                    reply_markup=reply_markup,
                     disable_web_page_preview=True
                 )
+                if sent_msg:
+                    asyncio.create_task(auto_delete(sent_msg, 120))
             except Exception:
-                pass
+                try:
+                    sent_msg = await query.message.reply_text(
+                        fsub_text,
+                        reply_markup=reply_markup,
+                        disable_web_page_preview=True
+                    )
+                    if sent_msg:
+                        asyncio.create_task(auto_delete(sent_msg, 120))
+                except Exception:
+                    pass
             return
 
         msg_id = int(data.split("_")[1])

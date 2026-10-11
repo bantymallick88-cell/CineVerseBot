@@ -107,6 +107,9 @@ PAGE_SIZE = 8
 SEARCH_CACHE: Dict[str, str] = {}
 PROCESSED_MESSAGE_KEYS: set = set()
 PROCESSED_CALLBACK_IDS: set = set()
+IN_FLIGHT_GET: Dict[Tuple[int, int], float] = {}
+ACTIVE_SEARCHES: Dict[Tuple[int, str], float] = {}
+USER_LAST_CB: Dict[int, float] = {}
 DB_FILE = os.path.join(os.getcwd(), "database.db")
 TARGET_RESOLVED_CHAT_ID: Optional[Any] = None
 FSUB_RESOLVED_CHAT_ID: Optional[Any] = None
@@ -516,8 +519,6 @@ async def resolve_channel_peer(client: Client) -> Any:
     return TARGET_RESOLVED_CHAT_ID
 
 async def check_chat_membership(client: Client, chat_id: Any, user_id: int, fallback_username: Optional[str] = None) -> bool:
-    if user_id == OWNER_ID or user_id in ADMIN_IDS:
-        return True
     try:
         member = await client.get_chat_member(chat_id=chat_id, user_id=user_id)
         if member and member.status in [
@@ -552,10 +553,7 @@ async def check_chat_membership(client: Client, chat_id: Any, user_id: int, fall
         return False
 
 async def is_user_joined_group(client: Client, user_id: int) -> bool:
-    """Checks if user is a member of BOTH Target Request Group (-1003982672894) AND Backup Channel (-1003423603865)."""
-    if user_id == OWNER_ID or user_id in ADMIN_IDS:
-        return True
-    
+    """Strictly checks if user (including Admins & Owner) is a member of BOTH Target Request Group (-1003982672894) AND Backup Channel (-1003423603865)."""
     joined_req = await check_chat_membership(client, REQ_GROUP_ID, user_id, fallback_username="FlimRequest_01")
     if not joined_req:
         return False
@@ -959,13 +957,21 @@ async def auto_filter_handler(client: Client, message: Message):
         return
     user_id = message.from_user.id
 
-    # Handler Deduplication: Prevent duplicate message execution across network retries
+    # Handler Deduplication: Prevent duplicate message execution across network retries & rapid double posts
     msg_key = (message.chat.id, message.id)
     if msg_key in PROCESSED_MESSAGE_KEYS:
         return
     PROCESSED_MESSAGE_KEYS.add(msg_key)
     if len(PROCESSED_MESSAGE_KEYS) > 3000:
         PROCESSED_MESSAGE_KEYS.clear()
+
+    now = time.time()
+    search_debounce_key = (message.chat.id, text.lower())
+    if search_debounce_key in ACTIVE_SEARCHES and (now - ACTIVE_SEARCHES[search_debounce_key]) < 2.5:
+        return
+    ACTIVE_SEARCHES[search_debounce_key] = now
+    if len(ACTIVE_SEARCHES) > 1000:
+        ACTIVE_SEARCHES.clear()
 
     await db.add_user(user_id)
 
@@ -979,7 +985,7 @@ async def auto_filter_handler(client: Client, message: Message):
             asyncio.create_task(auto_delete(denied_msg, 60))
         return
 
-    # 3. Force Join Group Requirement: Check membership in Target Request Group (-1003982672894) AND Backup Channel (-1003423603865)
+    # 3. Force Join Group Requirement: Check EVERY user for membership in Request Group (-1003982672894) and Backup Channel (-1003423603865)
     if not await is_user_joined_group(client, user_id):
         user_name = message.from_user.first_name if message.from_user and message.from_user.first_name else "Friend"
         fsub_text = f"HEY {user_name}, YOU CAN'T GET ANYTHING FROM HERE. JOIN OUR GROUPS TO GET FILES! 👇"
@@ -999,10 +1005,10 @@ async def auto_filter_handler(client: Client, message: Message):
         except Exception as e:
             logger.warning(f"Could not send force-join PM to {user_id}: {e}")
 
-        # If search query was sent in group, send 1-line notice in group (no buttons in group)
+        # In Group Chat: Send ONLY a 1-line temporary notice (no join buttons in group)
         if message.chat.type != enums.ChatType.PRIVATE:
             group_notice = await message.reply_text(
-                f"Hey {user_name}, please check your PM to unlock files!",
+                f"Hey {user_name}, check your Personal Chat (PM) to join our groups and unlock files!",
                 quote=True
             )
             if group_notice:
@@ -1322,8 +1328,24 @@ async def callback_router(client: Client, query: CallbackQuery):
         await query.answer()
 
     elif data.startswith("get_"):
+        msg_id = int(data.split("_")[1])
+
+        # Debounce duplicate click/triggers for the same file by the same user
+        now = time.time()
+        get_debounce_key = (user_id, msg_id)
+        if get_debounce_key in IN_FLIGHT_GET and (now - IN_FLIGHT_GET[get_debounce_key]) < 6.0:
+            try:
+                await query.answer("⏳ File is already being delivered to your PM!", show_alert=False)
+            except Exception:
+                pass
+            return
+        IN_FLIGHT_GET[get_debounce_key] = now
+        if len(IN_FLIGHT_GET) > 1000:
+            IN_FLIGHT_GET.clear()
+
+        # Strict Force Join Check: Check EVERY user for membership in Request Group and Backup Channel
         if not await is_user_joined_group(client, user_id):
-            await query.answer("Hey! Please check your PM to unlock files!", show_alert=True)
+            await query.answer("Hey! Check your Personal Chat (PM) to join our groups and unlock files!", show_alert=True)
             user_name = query.from_user.first_name if query.from_user and query.from_user.first_name else "Friend"
             fsub_text = f"HEY {user_name}, YOU CAN'T GET ANYTHING FROM HERE. JOIN OUR GROUPS TO GET FILES! 👇"
             reply_markup = build_force_join_markup(retry_callback=data)
@@ -1342,11 +1364,11 @@ async def callback_router(client: Client, query: CallbackQuery):
             except Exception as e:
                 logger.warning(f"Could not send force-join PM to {query.from_user.id}: {e}")
 
-            # If clicked in a group, send 1-line notice in group (no buttons in group)
+            # In Group Chat: Send ONLY a 1-line temporary notice (no join buttons in group)
             if query.message and query.message.chat.type != enums.ChatType.PRIVATE:
                 try:
                     group_notice = await query.message.reply_text(
-                        f"Hey {user_name}, please check your PM to unlock files!",
+                        f"Hey {user_name}, check your Personal Chat (PM) to join our groups and unlock files!",
                         quote=True
                     )
                     if group_notice:
@@ -1365,8 +1387,6 @@ async def callback_router(client: Client, query: CallbackQuery):
                 except Exception:
                     pass
             return
-
-        msg_id = int(data.split("_")[1])
         try:
             file_info = await db.get_file_by_msg_id(msg_id)
             title = file_info.get("title", "Movie File") if file_info else "Movie File"

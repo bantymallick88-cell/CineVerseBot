@@ -766,9 +766,10 @@ async def deliver_movie_file(client: Client, user_id: int, msg_id: int):
             f"├─ 🔊 **Audio:** `{meta['audio']}` │ 💾 **Size:** `{size_str}`\n"
             "└─ ⚡ **Powered by CineVerse Network**\n\n"
             "┌──────────────────────────────────────────┐\n"
-            "│  ⚠️  A U T O - D E L E T E :  6 0 s      │\n"
+            "│  ⚠️  A U T O - D E L E T E :  4  M I N S │\n"
             "│  Forward or save to Saved Messages now!  │\n"
-            "└──────────────────────────────────────────┘"
+            "└──────────────────────────────────────────┘\n\n"
+            "⚠️ **AUTO-DELETE: 4 mins | Forward or save to Saved Messages now!**"
         )
 
         sent_file = None
@@ -792,7 +793,7 @@ async def deliver_movie_file(client: Client, user_id: int, msg_id: int):
                 caption=caption
             )
         if sent_file:
-            asyncio.create_task(auto_delete(sent_file, 60))
+            asyncio.create_task(auto_delete(sent_file, 240))
     except UserIsBlocked:
         logger.warning(f"User {user_id} has blocked the bot.")
     except Exception as e:
@@ -878,8 +879,10 @@ async def send_arolinks_verification_card(client: Client, target_chat: Any, user
         "⚡ **Strict 1 File = 1 Ad Flow:**\n"
         "├─ 🔒 Complete 1 quick ad page verification to unlock your file.\n"
         "├─ ⏱️ Takes ~5 seconds to complete.\n"
+        "├─ ⏳ Auto-Delete Timer: 4 minutes (240s).\n"
         "└─ 🚀 File will be delivered here in PM immediately after verification!\n\n"
-        "👉 *Tap the button below to verify & unlock your download:*"
+        "👉 *Tap the button below to verify & unlock your download:*\n\n"
+        "⚠️ *AUTO-DELETE: 4 mins | Verify ad before timer expires!*"
     )
     verify_markup = InlineKeyboardMarkup([
         [InlineKeyboardButton("📥 Download Movie (Verify Ad 1-Page)", url=short_url)],
@@ -911,7 +914,7 @@ async def send_arolinks_verification_card(client: Client, target_chat: Any, user
             logger.error(f"Error sending AroLinks verification card: {e}")
 
     if verify_msg:
-        asyncio.create_task(auto_delete(verify_msg, 60, reply_to_message=reply_to_message))
+        asyncio.create_task(auto_delete(verify_msg, 240, reply_to_message=reply_to_message))
 
 async def check_chat_membership(client: Client, chat_id: Any, user_id: int, fallback_username: Optional[str] = None) -> bool:
     try:
@@ -987,7 +990,9 @@ async def start_handler(client: Client, message: Message):
     if not message.from_user:
         return
     user_id = message.from_user.id
-    asyncio.create_task(auto_delete(message, 60))
+    command_text = (message.text or "").strip()
+    is_file_flow = any(command_text.startswith(p) for p in ["/start file_", "/start get_", "/start verify_"])
+    asyncio.create_task(auto_delete(message, 240 if is_file_flow else 60))
     await db.add_user(user_id)
 
     # 1. If /start was sent in a Group: politely redirect user to PM or search group
@@ -1625,7 +1630,11 @@ async def incoming_user_message_tracker(client: Client, message: Message):
             enums.ChatType.GROUP,
             enums.ChatType.SUPERGROUP
         ]:
-            asyncio.create_task(auto_delete(message, 60))
+            msg_text = (message.text or message.caption or "").strip()
+            is_file_flow = message.chat.type == enums.ChatType.PRIVATE and any(
+                msg_text.startswith(p) for p in ["/start file_", "/start get_", "/start verify_"]
+            )
+            asyncio.create_task(auto_delete(message, 240 if is_file_flow else 60))
     except Exception as e:
         logger.debug(f"Tracker error: {e}")
 

@@ -374,16 +374,21 @@ def format_search_text(query: str, total: int, page: int, total_pages: int) -> s
         f"⚖️ *Notice: We do not host any content. For DMCA/Takedown, use /dmca.*"
     )
 
-def build_pagination_markup(files: List[Dict[str, Any]], cache_id: str, current_page: int, total_pages: int) -> InlineKeyboardMarkup:
+def build_pagination_markup(files: List[Dict[str, Any]], cache_id: str, current_page: int, total_pages: int, bot_username: Optional[str] = None) -> InlineKeyboardMarkup:
     buttons = []
     
     # File download buttons formatted as: 📁 [File Size] ▷ [Clean File Title]
+    # Redirects user directly to Personal Chat (PM) with deep link start parameter
     for f in files:
         name = f.get("title", "Movie")
         size_str = format_size(f.get("file_size", 0))
         display_name = (name[:30] + "...") if len(name) > 33 else name
         btn_text = f"📁 {size_str} ▷ {display_name}"
-        buttons.append([InlineKeyboardButton(btn_text, callback_data=f"get_{f['message_id']}")])
+        if bot_username:
+            btn_url = f"https://t.me/{bot_username}?start=file_{f['message_id']}"
+            buttons.append([InlineKeyboardButton(btn_text, url=btn_url)])
+        else:
+            buttons.append([InlineKeyboardButton(btn_text, callback_data=f"get_{f['message_id']}")])
 
     # Row 1: Filter buttons linking to interactive submenus
     filter_row = [
@@ -518,6 +523,72 @@ async def resolve_channel_peer(client: Client) -> Any:
 
     return TARGET_RESOLVED_CHAT_ID
 
+BOT_USERNAME: Optional[str] = None
+
+async def get_bot_username(client: Client) -> str:
+    global BOT_USERNAME
+    if BOT_USERNAME:
+        return BOT_USERNAME
+    try:
+        me = await client.get_me()
+        if me and me.username:
+            BOT_USERNAME = me.username
+            return BOT_USERNAME
+    except Exception as e:
+        logger.warning(f"Error fetching bot username: {e}")
+    return os.getenv("BOT_USERNAME", "CineVerse_SearchBot")
+
+async def deliver_movie_file(client: Client, user_id: int, msg_id: int):
+    now = time.time()
+    get_key = (user_id, msg_id)
+    if get_key in IN_FLIGHT_GET and (now - IN_FLIGHT_GET[get_key]) < 6.0:
+        return
+    IN_FLIGHT_GET[get_key] = now
+    if len(IN_FLIGHT_GET) > 1000:
+        IN_FLIGHT_GET.clear()
+
+    try:
+        file_info = await db.get_file_by_msg_id(msg_id)
+        title = file_info.get("title", "Movie File") if file_info else "Movie File"
+        size_str = format_size(file_info.get("file_size", 0)) if file_info else "N/A"
+
+        caption = (
+            "───﹝ 🍿 𝙲𝙸𝙽𝙴𝚅𝙴𝚁𝚂𝙴 𝙼𝙾𝚅𝙸𝙴𝚂 ﹞───\n\n"
+            f"🎬 𝙵𝚒𝚕𝚎 𝙽𝚊𝚖𝚎: `{title}`\n"
+            f"📦 𝚂𝚒𝚣𝚎: `{size_str}`\n"
+            "⚡ 𝙲𝚛𝚎𝚊𝚝𝚎𝚍 𝙱𝚢: `Banty`\n"
+            "✨ 𝙿𝚘𝚠𝚎𝚛𝚎𝚍 𝙱𝚢: **CineVerse Network**\n\n"
+            "───﹝ ⚠️ 𝙰𝚄𝚃𝙾-𝙳𝙴𝙻𝙴𝚃𝙴: 𝟼𝟶𝚜 ﹞───\n"
+            "⚠️ *This movie file will auto-delete in 60 seconds (1 minute) due to copyright! Forward/save it now!*"
+        )
+
+        sent_file = None
+        if file_info and file_info.get("file_id"):
+            try:
+                sent_file = await client.send_cached_media(
+                    chat_id=user_id,
+                    file_id=file_info["file_id"],
+                    caption=caption
+                )
+            except Exception as e:
+                logger.warning(f"send_cached_media failed for {msg_id}: {e}")
+                sent_file = None
+
+        if not sent_file:
+            peer = await resolve_channel_peer(client)
+            sent_file = await client.copy_message(
+                chat_id=user_id,
+                from_chat_id=peer,
+                message_id=msg_id,
+                caption=caption
+            )
+        if sent_file:
+            asyncio.create_task(auto_delete(sent_file, 60))
+    except UserIsBlocked:
+        logger.warning(f"User {user_id} has blocked the bot.")
+    except Exception as e:
+        logger.error(f"Error delivering file {msg_id} to user {user_id}: {e}")
+
 async def check_chat_membership(client: Client, chat_id: Any, user_id: int, fallback_username: Optional[str] = None) -> bool:
     try:
         member = await client.get_chat_member(chat_id=chat_id, user_id=user_id)
@@ -600,7 +671,37 @@ async def start_handler(client: Client, message: Message):
             asyncio.create_task(auto_delete(denied_msg, 120))
         return
 
-    # 2. Force Join Group Requirement
+    # 2. Check for deep-link file parameter (e.g. /start file_123 or /start get_123)
+    command_parts = message.text.split() if message.text else []
+    file_msg_id = None
+    if len(command_parts) > 1:
+        param = command_parts[1].strip()
+        if param.startswith("file_") and param[5:].isdigit():
+            file_msg_id = int(param[5:])
+        elif param.startswith("get_") and param[4:].isdigit():
+            file_msg_id = int(param[4:])
+        elif param.isdigit():
+            file_msg_id = int(param)
+
+    # If user arrived for a specific file:
+    if file_msg_id:
+        if not await is_user_joined_group(client, user_id):
+            user_name = message.from_user.first_name if message.from_user and message.from_user.first_name else "Friend"
+            fsub_msg = await message.reply_text(
+                f"HEY {user_name}, YOU CAN'T GET ANYTHING FROM HERE. JOIN OUR GROUPS TO GET FILES! 👇",
+                reply_markup=build_force_join_markup(retry_callback=f"get_{file_msg_id}"),
+                quote=True,
+                disable_web_page_preview=True
+            )
+            if fsub_msg:
+                asyncio.create_task(auto_delete(fsub_msg, 120))
+            return
+
+        # User is verified: Instantly send requested movie file in PM!
+        await deliver_movie_file(client, user_id, file_msg_id)
+        return
+
+    # 3. Normal /start command (no file parameter): Check Force Join
     if not await is_user_joined_group(client, user_id):
         user_name = message.from_user.first_name if message.from_user and message.from_user.first_name else "Friend"
         fsub_msg = await message.reply_text(
@@ -985,51 +1086,23 @@ async def auto_filter_handler(client: Client, message: Message):
             asyncio.create_task(auto_delete(denied_msg, 60))
         return
 
-    # 3. Force Join Group Requirement: Check EVERY user for membership in Request Group (-1003982672894) and Backup Channel (-1003423603865)
-    if not await is_user_joined_group(client, user_id):
-        user_name = message.from_user.first_name if message.from_user and message.from_user.first_name else "Friend"
-        fsub_text = f"HEY {user_name}, YOU CAN'T GET ANYTHING FROM HERE. JOIN OUR GROUPS TO GET FILES! 👇"
-        fsub_markup = build_force_join_markup("cb_check_join")
-
-        # Send buttons strictly in user's personal chat (PM)
-        pm_sent = None
-        try:
-            pm_sent = await client.send_message(
-                chat_id=user_id,
-                text=fsub_text,
+    # 3. If query is in Private Chat (PM): Redirect to Request Group
+    if message.chat.type == enums.ChatType.PRIVATE:
+        # Check Force Join first in PM
+        if not await is_user_joined_group(client, user_id):
+            user_name = message.from_user.first_name if message.from_user and message.from_user.first_name else "Friend"
+            fsub_text = f"HEY {user_name}, YOU CAN'T GET ANYTHING FROM HERE. JOIN OUR GROUPS TO GET FILES! 👇"
+            fsub_markup = build_force_join_markup("cb_check_join")
+            pm_msg = await message.reply_text(
+                fsub_text,
                 reply_markup=fsub_markup,
+                quote=True,
                 disable_web_page_preview=True
             )
-            if pm_sent:
-                asyncio.create_task(auto_delete(pm_sent, 120))
-        except Exception as e:
-            logger.warning(f"Could not send force-join PM to {user_id}: {e}")
+            if pm_msg:
+                asyncio.create_task(auto_delete(pm_msg, 120))
+            return
 
-        # In Group Chat: Send ONLY a 1-line temporary notice (no join buttons in group)
-        if message.chat.type != enums.ChatType.PRIVATE:
-            group_notice = await message.reply_text(
-                f"Hey {user_name}, check your Personal Chat (PM) to join our groups and unlock files!",
-                quote=True
-            )
-            if group_notice:
-                asyncio.create_task(auto_delete(group_notice, 120))
-        elif not pm_sent:
-            # Fallback if in PM and direct send_message errored
-            try:
-                reply_msg = await message.reply_text(
-                    fsub_text,
-                    reply_markup=fsub_markup,
-                    quote=True,
-                    disable_web_page_preview=True
-                )
-                if reply_msg:
-                    asyncio.create_task(auto_delete(reply_msg, 120))
-            except Exception:
-                pass
-        return
-
-    # 4. Block Direct PM Search & Show Redirect Button
-    if message.chat.type == enums.ChatType.PRIVATE:
         user_name = message.from_user.first_name if message.from_user and message.from_user.first_name else "Friend"
         redirect_text = (
             f"HEY {user_name.upper()},\n\n"
@@ -1048,6 +1121,7 @@ async def auto_filter_handler(client: Client, message: Message):
             asyncio.create_task(auto_delete(pm_msg, 120))
         return
 
+    # 4. Normal Group Search: DO NOT block in group! Reply with results and PM redirect buttons directly
     if len(text) < 2:
         return
 
@@ -1064,10 +1138,11 @@ async def auto_filter_handler(client: Client, message: Message):
     cache_id = uuid.uuid4().hex[:8]
     SEARCH_CACHE[cache_id] = text
     total_pages = math.ceil(total / PAGE_SIZE)
-    markup = build_pagination_markup(files, cache_id, 1, total_pages)
+    bot_uname = await get_bot_username(client)
+    markup = build_pagination_markup(files, cache_id, 1, total_pages, bot_username=bot_uname)
     response_text = format_search_text(text, total, 1, total_pages)
 
-    # 2. Reply with formatted results and start 60-second auto-delete task on bot response
+    # Reply directly in group (Single message only, NO duplicate group notices)
     sent_msg = await message.reply_text(response_text, reply_markup=markup, quote=True)
     if sent_msg:
         asyncio.create_task(auto_delete(sent_msg, 60))
@@ -1198,7 +1273,8 @@ async def callback_router(client: Client, query: CallbackQuery):
         new_cache_id = uuid.uuid4().hex[:8]
         SEARCH_CACHE[new_cache_id] = target_query
         total_pages = math.ceil(total / PAGE_SIZE)
-        markup = build_pagination_markup(files, new_cache_id, 1, total_pages)
+        bot_uname = await get_bot_username(client)
+        markup = build_pagination_markup(files, new_cache_id, 1, total_pages, bot_username=bot_uname)
         response_text = format_search_text(target_query, total, 1, total_pages)
         try:
             await query.message.edit_text(response_text, reply_markup=markup)
@@ -1218,7 +1294,8 @@ async def callback_router(client: Client, query: CallbackQuery):
         files, total = await db.search_files(search_query, offset=0, limit=PAGE_SIZE)
         total_pages = math.ceil(total / PAGE_SIZE) if total > 0 else 1
 
-        markup = build_pagination_markup(files, cache_id, 1, total_pages)
+        bot_uname = await get_bot_username(client)
+        markup = build_pagination_markup(files, cache_id, 1, total_pages, bot_username=bot_uname)
         response_text = format_search_text(search_query, total, 1, total_pages)
         try:
             await query.message.edit_text(response_text, reply_markup=markup)
@@ -1330,109 +1407,19 @@ async def callback_router(client: Client, query: CallbackQuery):
     elif data.startswith("get_"):
         msg_id = int(data.split("_")[1])
 
-        # Debounce duplicate click/triggers for the same file by the same user
-        now = time.time()
-        get_debounce_key = (user_id, msg_id)
-        if get_debounce_key in IN_FLIGHT_GET and (now - IN_FLIGHT_GET[get_debounce_key]) < 6.0:
-            try:
-                await query.answer("⏳ File is already being delivered to your PM!", show_alert=False)
-            except Exception:
-                pass
-            return
-        IN_FLIGHT_GET[get_debounce_key] = now
-        if len(IN_FLIGHT_GET) > 1000:
-            IN_FLIGHT_GET.clear()
-
-        # Strict Force Join Check: Check EVERY user for membership in Request Group and Backup Channel
+        # Strict Force Join Check (Even for Admins/Owner)
         if not await is_user_joined_group(client, user_id):
-            await query.answer("Hey! Check your Personal Chat (PM) to join our groups and unlock files!", show_alert=True)
-            user_name = query.from_user.first_name if query.from_user and query.from_user.first_name else "Friend"
-            fsub_text = f"HEY {user_name}, YOU CAN'T GET ANYTHING FROM HERE. JOIN OUR GROUPS TO GET FILES! 👇"
-            reply_markup = build_force_join_markup(retry_callback=data)
-
-            # Send buttons strictly in user's personal chat (PM)
-            pm_sent = None
-            try:
-                pm_sent = await client.send_message(
-                    chat_id=query.from_user.id,
-                    text=fsub_text,
-                    reply_markup=reply_markup,
-                    disable_web_page_preview=True
-                )
-                if pm_sent:
-                    asyncio.create_task(auto_delete(pm_sent, 120))
-            except Exception as e:
-                logger.warning(f"Could not send force-join PM to {query.from_user.id}: {e}")
-
-            # In Group Chat: Send ONLY a 1-line temporary notice (no join buttons in group)
-            if query.message and query.message.chat.type != enums.ChatType.PRIVATE:
-                try:
-                    group_notice = await query.message.reply_text(
-                        f"Hey {user_name}, check your Personal Chat (PM) to join our groups and unlock files!",
-                        quote=True
-                    )
-                    if group_notice:
-                        asyncio.create_task(auto_delete(group_notice, 120))
-                except Exception:
-                    pass
-            elif not pm_sent and query.message:
-                try:
-                    reply_msg = await query.message.reply_text(
-                        fsub_text,
-                        reply_markup=reply_markup,
-                        disable_web_page_preview=True
-                    )
-                    if reply_msg:
-                        asyncio.create_task(auto_delete(reply_msg, 120))
-                except Exception:
-                    pass
+            await query.answer("❌ You haven't joined both groups yet! Please join both first.", show_alert=True)
             return
+
+        # User is verified: Send file immediately in PM
+        await query.answer("✅ Verified! Delivering your file...", show_alert=False)
         try:
-            file_info = await db.get_file_by_msg_id(msg_id)
-            title = file_info.get("title", "Movie File") if file_info else "Movie File"
-            size_str = format_size(file_info.get("file_size", 0)) if file_info else "N/A"
-
-            caption = (
-                "───﹝ 🍿 𝙲𝙸𝙽𝙴𝚅𝙴𝚁𝚂𝙴 𝙼𝙾𝚅𝙸𝙴𝚂 ﹞───\n\n"
-                f"🎬 𝙵𝚒𝚕𝚎 𝙽𝚊𝚖𝚎: `{title}`\n"
-                f"📦 𝚂𝚒𝚣𝚎: `{size_str}`\n"
-                "⚡ 𝙲𝚛𝚎𝚊𝚝𝚎𝚍 𝙱𝚢: `Banty`\n"
-                "✨ 𝙿𝚘𝚠𝚎𝚛𝚎𝚍 𝙱𝚢: **CineVerse Network**\n\n"
-                "───﹝ ⚠️ 𝙰𝚄𝚃𝙾-𝙳𝙴𝙻𝙴𝚃𝙴: 𝟼𝟶𝚜 ﹞───\n"
-                "⚠️ *This movie file will auto-delete in 60 seconds (1 minute) due to copyright! Forward/save it now!*"
-            )
-
-            sent_file = None
-            if file_info and file_info.get("file_id"):
-                try:
-                    sent_file = await client.send_cached_media(
-                        chat_id=query.from_user.id,
-                        file_id=file_info["file_id"],
-                        caption=caption
-                    )
-                except Exception:
-                    sent_file = None
-
-            if not sent_file:
-                peer = await resolve_channel_peer(client)
-                sent_file = await client.copy_message(
-                    chat_id=query.from_user.id,
-                    from_chat_id=peer,
-                    message_id=msg_id,
-                    caption=caption
-                )
-            if sent_file:
-                asyncio.create_task(auto_delete(sent_file, 60))
-
-            if query.message.chat.type != enums.ChatType.PRIVATE:
-                await query.answer("✅ File sent to your PM! (Auto-deletes in 60s)", show_alert=True)
-            else:
-                await query.answer("✅ File delivered below! (Auto-deletes in 60s)")
-        except UserIsBlocked:
-            await query.answer("⚠️ Please start the bot in private first!", show_alert=True)
-        except Exception as e:
-            logger.error(f"Error copying file {msg_id}: {e}")
-            await query.answer("❌ File unavailable or removed.", show_alert=True)
+            await query.message.delete()
+        except Exception:
+            pass
+        await deliver_movie_file(client, user_id, msg_id)
+        return
 
     elif data.startswith("nav_"):
         parts = data.split("_")
@@ -1452,7 +1439,8 @@ async def callback_router(client: Client, query: CallbackQuery):
             await query.answer("No more results.", show_alert=True)
             return
 
-        markup = build_pagination_markup(files, cache_id, page, total_pages)
+        bot_uname = await get_bot_username(client)
+        markup = build_pagination_markup(files, cache_id, page, total_pages, bot_username=bot_uname)
         response_text = format_search_text(search_query, total, page, total_pages)
         try:
             await query.message.edit_text(response_text, reply_markup=markup)

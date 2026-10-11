@@ -354,17 +354,48 @@ def format_size(size_bytes: int) -> str:
     s = round(size_bytes / p, 2)
     return f"{s} {units[i]}"
 
-async def auto_delete(message: Optional[Message], delay: int = 60):
+async def auto_delete(message: Optional[Message], delay: int = 60, reply_to_message: Optional[Message] = None):
+    """
+    Global 60-Second Auto-Delete Engine:
+    Reliably deletes the target message (bot reply or user message) after `delay` seconds.
+    If reply_to_message is supplied (or accessible via reply_to_message_id), it also
+    deletes the associated user query/command to keep group and PM history 100% clean.
+    """
     if not message:
         return
     try:
         if delay > 0:
             await asyncio.sleep(delay)
-        await message.delete()
-    except (MessageDeleteForbidden, MessageIdInvalid, RPCError):
-        pass
+
+        # 1. Delete primary target message
+        try:
+            await message.delete()
+        except (MessageDeleteForbidden, MessageIdInvalid, RPCError):
+            pass
+        except Exception as e:
+            logger.debug(f"Auto-delete bypassed for message {getattr(message, 'id', 'unknown')}: {e}")
+
+        # 2. Delete reply_to message (user query / command) if available
+        target_reply = reply_to_message or getattr(message, "reply_to_message", None)
+        if target_reply:
+            try:
+                await target_reply.delete()
+            except (MessageDeleteForbidden, MessageIdInvalid, RPCError):
+                pass
+            except Exception as e:
+                logger.debug(f"Auto-delete bypassed for reply_to message {getattr(target_reply, 'id', 'unknown')}: {e}")
+        elif getattr(message, "reply_to_message_id", None) and getattr(message, "chat", None) and getattr(message, "_client", None):
+            try:
+                await message._client.delete_messages(
+                    chat_id=message.chat.id,
+                    message_ids=[message.reply_to_message_id]
+                )
+            except (MessageDeleteForbidden, MessageIdInvalid, RPCError):
+                pass
+            except Exception as e:
+                pass
     except Exception as e:
-        logger.debug(f"Auto-delete bypassed for message {getattr(message, 'id', 'unknown')}: {e}")
+        logger.debug(f"Auto-delete task encountered error: {e}")
 
 def is_duplicate_request(key: Any, expiry: float = REQUEST_LOCK_EXPIRY) -> bool:
     """
@@ -416,7 +447,7 @@ def format_search_text(query: str, total: int, page: int, total_pages: int) -> s
         f"🔍 **Search Results for:** `{query}`\n\n"
         f"📊 **Total Results:** `{total}` | **Page:** `{page}/{total_pages}`\n"
         f"✨ *Click any button below to download instantly!*\n"
-        f"⚠️ *This search result will auto-delete in 120 seconds (2 minutes)!*\n"
+        f"⚠️ *This search result will auto-delete in 60 seconds (1 minute)!*\n"
         f"⚖️ *Notice: We do not host any content. For DMCA/Takedown, use /dmca.*"
     )
 
@@ -601,8 +632,8 @@ async def deliver_movie_file(client: Client, user_id: int, msg_id: int):
             f"📦 𝚂𝚒𝚣𝚎: `{size_str}`\n"
             "⚡ 𝙲𝚛𝚎𝚊𝚝𝚎𝚍 𝙱𝚢: `Banty`\n"
             "✨ 𝙿𝚘𝚠𝚎𝚛𝚎𝚍 𝙱𝚢: **CineVerse Network**\n\n"
-            "───﹝ ⚠️ 𝙰𝚄𝚃𝙾-𝙳𝙴𝙻𝙴𝚃𝙴: 𝟷𝟸𝟶𝚜 ﹞───\n"
-            "⚠️ *This movie file will auto-delete in 120 seconds (2 minutes) due to copyright! Forward/save it now!*"
+            "───﹝ ⚠️ 𝙰𝚄𝚃𝙾-𝙳𝙴𝙻𝙴𝚃𝙴: 𝟼𝟶𝚜 ﹞───\n"
+            "⚠️ *This movie file will auto-delete in 60 seconds (1 minute) due to copyright! Forward/save it now!*"
         )
 
         sent_file = None
@@ -626,7 +657,7 @@ async def deliver_movie_file(client: Client, user_id: int, msg_id: int):
                 caption=caption
             )
         if sent_file:
-            asyncio.create_task(auto_delete(sent_file, 120))
+            asyncio.create_task(auto_delete(sent_file, 60))
     except UserIsBlocked:
         logger.warning(f"User {user_id} has blocked the bot.")
     except Exception as e:
@@ -699,7 +730,7 @@ def build_force_join_markup(retry_callback: str = "cb_check_join") -> InlineKeyb
 # ---------------------------------------------------------------------------
 # COMMAND HANDLERS
 # ---------------------------------------------------------------------------
-@app.on_message(filters.command("start") & filters.private)
+@app.on_message(filters.command("start"))
 async def start_handler(client: Client, message: Message):
     if is_duplicate_message(message):
         return
@@ -709,14 +740,27 @@ async def start_handler(client: Client, message: Message):
     asyncio.create_task(auto_delete(message, 60))
     await db.add_user(user_id)
 
-    # 1. Owner Permission Gate: Check if disapproved
+    # 1. If /start was sent in a Group: politely redirect user to PM or search group
+    if message.chat and message.chat.type != enums.ChatType.PRIVATE:
+        bot_uname = await get_bot_username(client)
+        pm_link = f"https://t.me/{bot_uname}?start=true"
+        start_grp = await message.reply_text(
+            f"👋 Hello {message.from_user.mention}! Please start me in private chat (PM) for bot menus, or search directly here by typing the movie name.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🤖 Open Bot PM", url=pm_link)]]),
+            quote=True
+        )
+        if start_grp:
+            asyncio.create_task(auto_delete(start_grp, 60, reply_to_message=message))
+        return
+
+    # 2. Owner Permission Gate: Check if disapproved
     if await db.is_disapproved_user(user_id):
         denied_msg = await message.reply_text("❌ Access Denied: Permission required from Owner Banty.", quote=True)
         if denied_msg:
-            asyncio.create_task(auto_delete(denied_msg, 60))
+            asyncio.create_task(auto_delete(denied_msg, 60, reply_to_message=message))
         return
 
-    # 2. Check for deep-link file parameter (e.g. /start file_123 or /start get_123)
+    # 3. Check for deep-link file parameter (e.g. /start file_123 or /start get_123)
     command_parts = message.text.split() if message.text else []
     file_msg_id = None
     if len(command_parts) > 1:
@@ -739,14 +783,14 @@ async def start_handler(client: Client, message: Message):
                 disable_web_page_preview=True
             )
             if fsub_msg:
-                asyncio.create_task(auto_delete(fsub_msg, 60))
+                asyncio.create_task(auto_delete(fsub_msg, 60, reply_to_message=message))
             return
 
         # User is verified: Instantly send requested movie file in PM!
         await deliver_movie_file(client, user_id, file_msg_id)
         return
 
-    # 3. Normal /start command (no file parameter): Check Force Join
+    # 4. Normal /start command (no file parameter): Check Force Join
     if not await is_user_joined_group(client, user_id):
         user_name = message.from_user.first_name if message.from_user and message.from_user.first_name else "Friend"
         fsub_msg = await message.reply_text(
@@ -756,7 +800,7 @@ async def start_handler(client: Client, message: Message):
             disable_web_page_preview=True
         )
         if fsub_msg:
-            asyncio.create_task(auto_delete(fsub_msg, 60))
+            asyncio.create_task(auto_delete(fsub_msg, 60, reply_to_message=message))
         return
     stats = await db.get_stats()
     bot_me = await client.get_me()
@@ -793,11 +837,11 @@ async def start_handler(client: Client, message: Message):
 
     sent_msg = None
     try:
-        sent_msg = await message.reply_photo(photo=WELCOME_IMAGE_URL, caption=caption, reply_markup=markup)
+        sent_msg = await message.reply_photo(photo=WELCOME_IMAGE_URL, caption=caption, reply_markup=markup, quote=True)
     except Exception:
-        sent_msg = await message.reply_text(caption, reply_markup=markup, disable_web_page_preview=True)
+        sent_msg = await message.reply_text(caption, reply_markup=markup, disable_web_page_preview=True, quote=True)
     if sent_msg:
-        asyncio.create_task(auto_delete(sent_msg, 60))
+        asyncio.create_task(auto_delete(sent_msg, 60, reply_to_message=message))
 
 @app.on_message(filters.command("stats"))
 async def stats_handler(client: Client, message: Message):
@@ -819,7 +863,7 @@ async def stats_handler(client: Client, message: Message):
         quote=True
     )
     if sent_msg:
-        asyncio.create_task(auto_delete(sent_msg, 60))
+        asyncio.create_task(auto_delete(sent_msg, 60, reply_to_message=message))
 
 @app.on_message(filters.command("help"))
 async def help_handler(client: Client, message: Message):
@@ -842,7 +886,7 @@ async def help_handler(client: Client, message: Message):
         quote=True
     )
     if sent_msg:
-        asyncio.create_task(auto_delete(sent_msg, 60))
+        asyncio.create_task(auto_delete(sent_msg, 60, reply_to_message=message))
 
 @app.on_message(filters.command("disclaimer"))
 async def disclaimer_handler(client: Client, message: Message):
@@ -860,7 +904,7 @@ async def disclaimer_handler(client: Client, message: Message):
     )
     sent_msg = await message.reply_text(text, quote=True)
     if sent_msg:
-        asyncio.create_task(auto_delete(sent_msg, 60))
+        asyncio.create_task(auto_delete(sent_msg, 60, reply_to_message=message))
 
 @app.on_message(filters.command("dmca"))
 async def dmca_handler(client: Client, message: Message):
@@ -900,7 +944,7 @@ async def dmca_handler(client: Client, message: Message):
         )
         sent_msg = await message.reply_text(confirm_text, quote=True)
         if sent_msg:
-            asyncio.create_task(auto_delete(sent_msg, 60))
+            asyncio.create_task(auto_delete(sent_msg, 60, reply_to_message=message))
     else:
         guide_text = (
             "📋 **DMCA & Copyright Infringement Takedown Notice**\n\n"
@@ -913,7 +957,7 @@ async def dmca_handler(client: Client, message: Message):
         )
         sent_msg = await message.reply_text(guide_text, quote=True)
         if sent_msg:
-            asyncio.create_task(auto_delete(sent_msg, 60))
+            asyncio.create_task(auto_delete(sent_msg, 60, reply_to_message=message))
 
 @app.on_message(filters.command("about"))
 async def about_handler(client: Client, message: Message):
@@ -933,48 +977,65 @@ async def about_handler(client: Client, message: Message):
         quote=True
     )
     if sent_msg:
-        asyncio.create_task(auto_delete(sent_msg, 60))
+        asyncio.create_task(auto_delete(sent_msg, 60, reply_to_message=message))
 
 @app.on_message(filters.command("approve"))
 async def approve_handler(client: Client, message: Message):
     if is_duplicate_message(message):
         return
+    asyncio.create_task(auto_delete(message, 60))
     if not message.from_user or message.from_user.id != OWNER_ID:
-        await message.reply_text("❌ Access Denied: Permission required from Owner Banty.", quote=True)
+        denied_msg = await message.reply_text("❌ Access Denied: Permission required from Owner Banty.", quote=True)
+        if denied_msg:
+            asyncio.create_task(auto_delete(denied_msg, 60, reply_to_message=message))
         return
 
     parts = message.text.split()
     if len(parts) < 2 or not parts[1].strip().isdigit():
-        await message.reply_text("ℹ️ **Usage:** `/approve <user_id>`", quote=True)
+        usage_msg = await message.reply_text("ℹ️ **Usage:** `/approve <user_id>`", quote=True)
+        if usage_msg:
+            asyncio.create_task(auto_delete(usage_msg, 60, reply_to_message=message))
         return
 
     target_id = int(parts[1].strip())
     await db.approve_user(target_id)
-    await message.reply_text(f"✅ User `{target_id}` has been approved by Owner Banty.", quote=True)
+    reply_msg = await message.reply_text(f"✅ User `{target_id}` has been approved by Owner Banty.", quote=True)
+    if reply_msg:
+        asyncio.create_task(auto_delete(reply_msg, 60, reply_to_message=message))
 
 @app.on_message(filters.command("disapprove"))
 async def disapprove_handler(client: Client, message: Message):
     if is_duplicate_message(message):
         return
+    asyncio.create_task(auto_delete(message, 60))
     if not message.from_user or message.from_user.id != OWNER_ID:
-        await message.reply_text("❌ Access Denied: Permission required from Owner Banty.", quote=True)
+        denied_msg = await message.reply_text("❌ Access Denied: Permission required from Owner Banty.", quote=True)
+        if denied_msg:
+            asyncio.create_task(auto_delete(denied_msg, 60, reply_to_message=message))
         return
 
     parts = message.text.split()
     if len(parts) < 2 or not parts[1].strip().isdigit():
-        await message.reply_text("ℹ️ **Usage:** `/disapprove <user_id>`", quote=True)
+        usage_msg = await message.reply_text("ℹ️ **Usage:** `/disapprove <user_id>`", quote=True)
+        if usage_msg:
+            asyncio.create_task(auto_delete(usage_msg, 60, reply_to_message=message))
         return
 
     target_id = int(parts[1].strip())
     await db.disapprove_user(target_id)
-    await message.reply_text(f"🚫 User `{target_id}` has been blocked / disapproved by Owner Banty.", quote=True)
+    reply_msg = await message.reply_text(f"🚫 User `{target_id}` has been blocked / disapproved by Owner Banty.", quote=True)
+    if reply_msg:
+        asyncio.create_task(auto_delete(reply_msg, 60, reply_to_message=message))
 
 @app.on_message(filters.command("approved"))
 async def list_approved_handler(client: Client, message: Message):
     if is_duplicate_message(message):
         return
+    asyncio.create_task(auto_delete(message, 60))
     if not message.from_user or message.from_user.id != OWNER_ID:
-        await message.reply_text("❌ Access Denied: Permission required from Owner Banty.", quote=True)
+        denied_msg = await message.reply_text("❌ Access Denied: Permission required from Owner Banty.", quote=True)
+        if denied_msg:
+            asyncio.create_task(auto_delete(denied_msg, 60, reply_to_message=message))
         return
 
     approved_list = await db.get_approved_users()
@@ -983,18 +1044,23 @@ async def list_approved_handler(client: Client, message: Message):
         msg += "\n".join([f"• `{uid}`" for uid in approved_list])
     else:
         msg += "No custom users approved yet."
-    await message.reply_text(msg, quote=True)
+    reply_msg = await message.reply_text(msg, quote=True)
+    if reply_msg:
+        asyncio.create_task(auto_delete(reply_msg, 60, reply_to_message=message))
 
 @app.on_message(filters.command("index"))
 async def index_handler(client: Client, message: Message):
     if is_duplicate_message(message):
         return
+    asyncio.create_task(auto_delete(message, 60))
     if not message.from_user or not await is_authorized_user(message.from_user.id):
-        await message.reply_text("❌ Access Denied: Permission required from Owner Banty.", quote=True)
+        denied_msg = await message.reply_text("❌ Access Denied: Permission required from Owner Banty.", quote=True)
+        if denied_msg:
+            asyncio.create_task(auto_delete(denied_msg, 60, reply_to_message=message))
         return
 
     await db.add_user(message.from_user.id)
-    status_msg = await message.reply_text("⏳ **Starting Fast Channel Indexing...**")
+    status_msg = await message.reply_text("⏳ **Starting Fast Channel Indexing...**", quote=True)
     
     total_new = 0
     scanned_msgs = 0
@@ -1069,10 +1135,14 @@ async def index_handler(client: Client, message: Message):
             f"• **New Files Added:** `{total_new}`\n"
             f"🎬 **Total Movies in Database:** `{stats['movies']}`"
         )
+        if status_msg:
+            asyncio.create_task(auto_delete(status_msg, 60, reply_to_message=message))
     except FloodWait as e:
         await asyncio.sleep(e.value)
         stats = await db.get_stats()
         await status_msg.edit_text(f"✅ **Indexing Complete!**\n\n🎬 **Total Movies in Database:** `{stats['movies']}`")
+        if status_msg:
+            asyncio.create_task(auto_delete(status_msg, 60, reply_to_message=message))
     except PeerIdInvalid as e:
         logger.warning(f"PeerIdInvalid in index_handler: {e}")
         stats = await db.get_stats()
@@ -1081,10 +1151,14 @@ async def index_handler(client: Client, message: Message):
             f"Please ensure the bot is added as an **Administrator** in the DB Channel (`{DB_CHANNEL_ID}`).\n\n"
             f"🎬 **Total Movies in DB:** `{stats['movies']}`"
         )
+        if status_msg:
+            asyncio.create_task(auto_delete(status_msg, 60, reply_to_message=message))
     except Exception as e:
         logger.error(f"Indexing error: {e}")
         stats = await db.get_stats()
         await status_msg.edit_text(f"⚠️ **Indexing Notice:** {e}\n\n🎬 **Total Movies in DB:** `{stats['movies']}`")
+        if status_msg:
+            asyncio.create_task(auto_delete(status_msg, 60, reply_to_message=message))
 
 # ---------------------------------------------------------------------------
 # AUTO-INDEX NEW UPLOADS IN CHANNEL
@@ -1112,6 +1186,41 @@ async def auto_index_channel(client: Client, message: Message):
             logger.info(f"[AUTO-INDEX] Saved '{title}' (ID: {message.id})")
 
 # ---------------------------------------------------------------------------
+# GLOBAL INCOMING USER MESSAGE AUTO-DELETE TRACKER (GROUP -1)
+# ---------------------------------------------------------------------------
+@app.on_message(group=-1)
+async def incoming_user_message_tracker(client: Client, message: Message):
+    """
+    Global 60-Second Auto-Delete Engine:
+    Guarantees EVERY incoming user message in Group or PM (user search query,
+    /start, /index, /stats commands, invalid queries, etc.) is automatically
+    scheduled for deletion after exactly 60 seconds (1 minute).
+    Excludes the DB Channel so channel archives are never removed.
+    """
+    try:
+        peer = await resolve_channel_peer(client)
+        # Never auto-delete media/messages inside the DB Channel
+        if message.chat and (
+            message.chat.id == peer or 
+            str(getattr(message.chat, "username", "") or "").lower() in ["cenahub01", "@cenahub01"]
+        ):
+            return
+
+        # Do not process outgoing messages or messages from bots
+        if getattr(message, "outgoing", False) or (message.from_user and message.from_user.is_bot):
+            return
+
+        # Auto-delete incoming user messages in Private Chats and Groups
+        if message.chat and message.chat.type in [
+            enums.ChatType.PRIVATE,
+            enums.ChatType.GROUP,
+            enums.ChatType.SUPERGROUP
+        ]:
+            asyncio.create_task(auto_delete(message, 60))
+    except Exception as e:
+        logger.debug(f"Tracker error: {e}")
+
+# ---------------------------------------------------------------------------
 # GROUP SERVICE MESSAGES CLEANER (AUTO-DELETE IMMEDIATELY)
 # ---------------------------------------------------------------------------
 @app.on_message(filters.service & ~filters.private)
@@ -1121,12 +1230,12 @@ async def service_message_cleaner(client: Client, message: Message):
     asyncio.create_task(auto_delete(message, 0))
 
 # ---------------------------------------------------------------------------
-# SEARCH & AUTO-FILTER HANDLER (WITH 120S AUTO-DELETE & SINGLE-PROCESS DEDUPLICATION)
+# SEARCH & AUTO-FILTER HANDLER (WITH 60S AUTO-DELETE & SINGLE-PROCESS DEDUPLICATION)
 # ---------------------------------------------------------------------------
 @app.on_message(filters.text & ~filters.bot & ~filters.via_bot & ~filters.service & ~filters.forwarded)
 async def auto_filter_handler(client: Client, message: Message):
     text = message.text.strip() if message.text else ""
-    if not text or text.startswith("/"):
+    if not text:
         return
 
     if is_duplicate_message(message):
@@ -1136,6 +1245,19 @@ async def auto_filter_handler(client: Client, message: Message):
         return
     user_id = message.from_user.id
 
+    # 1. Enforce 60-second auto-delete on user message
+    asyncio.create_task(auto_delete(message, 60))
+
+    # Catch unknown / invalid commands in group or PM
+    if text.startswith("/"):
+        err_msg = await message.reply_text(
+            "❌ Invalid command. Type /help to see available commands.",
+            quote=True
+        )
+        if err_msg:
+            asyncio.create_task(auto_delete(err_msg, 60, reply_to_message=message))
+        return
+
     # Code-Level Deduplication Lock on search query within 5 seconds
     search_lock_key = f"search_{message.chat.id}_{text.lower()}"
     if is_duplicate_request(search_lock_key, expiry=REQUEST_LOCK_EXPIRY):
@@ -1143,14 +1265,11 @@ async def auto_filter_handler(client: Client, message: Message):
 
     await db.add_user(user_id)
 
-    # 1. Start 120-second (2 minutes) auto-delete task for user's query message in all chats
-    asyncio.create_task(auto_delete(message, 120))
-
     # 2. Owner Permission Gate: Strictly block non-approved / disapproved users
     if await db.is_disapproved_user(user_id):
         denied_msg = await message.reply_text("❌ Access Denied: Permission required from Owner Banty.", quote=True)
         if denied_msg:
-            asyncio.create_task(auto_delete(denied_msg, 120))
+            asyncio.create_task(auto_delete(denied_msg, 60, reply_to_message=message))
         return
 
     # 3. If query is in Private Chat (PM): Redirect to Request Group
@@ -1167,7 +1286,7 @@ async def auto_filter_handler(client: Client, message: Message):
                 disable_web_page_preview=True
             )
             if pm_msg:
-                asyncio.create_task(auto_delete(pm_msg, 120))
+                asyncio.create_task(auto_delete(pm_msg, 60, reply_to_message=message))
             return
 
         user_name = message.from_user.first_name if message.from_user and message.from_user.first_name else "Friend"
@@ -1186,11 +1305,17 @@ async def auto_filter_handler(client: Client, message: Message):
             disable_web_page_preview=True
         )
         if pm_msg:
-            asyncio.create_task(auto_delete(pm_msg, 120))
+            asyncio.create_task(auto_delete(pm_msg, 60, reply_to_message=message))
         return
 
-    # 4. Normal Group Search: DO NOT block in group! Reply with results and PM redirect buttons directly
+    # 4. Group Search: Handle queries < 2 chars as invalid queries
     if len(text) < 2:
+        short_msg = await message.reply_text(
+            "⚠️ Query too short! Please enter at least 2 characters to search for a movie.",
+            quote=True
+        )
+        if short_msg:
+            asyncio.create_task(auto_delete(short_msg, 60, reply_to_message=message))
         return
 
     files, total = await db.search_files(text, offset=0, limit=PAGE_SIZE)
@@ -1200,7 +1325,7 @@ async def auto_filter_handler(client: Client, message: Message):
             quote=True
         )
         if not_found_msg:
-            asyncio.create_task(auto_delete(not_found_msg, 120))
+            asyncio.create_task(auto_delete(not_found_msg, 60, reply_to_message=message))
         return
 
     cache_id = uuid.uuid4().hex[:8]
@@ -1213,7 +1338,7 @@ async def auto_filter_handler(client: Client, message: Message):
     # Reply directly in group (Single message only, NO duplicate group notices)
     sent_msg = await message.reply_text(response_text, reply_markup=markup, quote=True)
     if sent_msg:
-        asyncio.create_task(auto_delete(sent_msg, 120))
+        asyncio.create_task(auto_delete(sent_msg, 60, reply_to_message=message))
 
 # ---------------------------------------------------------------------------
 # CALLBACK QUERY ROUTER
@@ -1262,6 +1387,16 @@ async def callback_router(client: Client, query: CallbackQuery):
 
     elif data == "cb_close":
         try:
+            if getattr(query.message, "reply_to_message", None):
+                try:
+                    await query.message.reply_to_message.delete()
+                except Exception:
+                    pass
+            elif getattr(query.message, "reply_to_message_id", None) and query.message.chat:
+                try:
+                    await client.delete_messages(chat_id=query.message.chat.id, message_ids=[query.message.reply_to_message_id])
+                except Exception:
+                    pass
             await query.message.delete()
         except Exception:
             pass

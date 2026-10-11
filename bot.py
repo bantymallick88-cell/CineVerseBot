@@ -766,10 +766,10 @@ async def deliver_movie_file(client: Client, user_id: int, msg_id: int):
             f"├─ 🔊 **Audio:** `{meta['audio']}` │ 💾 **Size:** `{size_str}`\n"
             "└─ ⚡ **Powered by CineVerse Network**\n\n"
             "┌──────────────────────────────────────────┐\n"
-            "│  ⚠️  A U T O - D E L E T E :  5  M I N S │\n"
+            "│  ⚠️  A U T O - D E L E T E :  3  M I N S │\n"
             "│  Forward or save to Saved Messages now!  │\n"
             "└──────────────────────────────────────────┘\n\n"
-            "⚠️ **AUTO-DELETE: 5 mins | Forward or save to Saved Messages now!**"
+            "⚠️ **AUTO-DELETE: 3 mins | Forward or save to Saved Messages now!**"
         )
 
         sent_file = None
@@ -793,7 +793,7 @@ async def deliver_movie_file(client: Client, user_id: int, msg_id: int):
                 caption=caption
             )
         if sent_file:
-            asyncio.create_task(auto_delete(sent_file, 300))
+            asyncio.create_task(auto_delete(sent_file, 180))
     except UserIsBlocked:
         logger.warning(f"User {user_id} has blocked the bot.")
     except Exception as e:
@@ -870,29 +870,26 @@ async def send_arolinks_verification_card(client: Client, target_chat: Any, user
     verify_text = (
         "┌──────────────────────────────────────────┐\n"
         "│   🍿  C I N E V E R S E   V A U L T      │\n"
-        "│     ⚡ 2-PAGE AD VERIFICATION REQUIRED   │\n"
+        "│     ⚡ 1-STEP QUICK VERIFICATION         │\n"
         "└──────────────────────────────────────────┘\n\n"
         f"◈ **Title:** `{meta['clean_title']}`\n"
         f"├─ 🌟 **Rating:** `8.5/10 ★` │ 🎬 **Quality:** `{meta['quality']}`\n"
         f"├─ 🔊 **Audio:** `{meta['audio']}` │ 💾 **Size:** `{size_str}`\n"
         "└─ ⚡ **Powered by CineVerse Network**\n\n"
         "┌──────────────────────────────────────────┐\n"
-        "│  ⚡ 2-PAGE AD VERIFICATION REQUIRED      │\n"
+        "│  ⚡ 1-STEP QUICK AD VERIFICATION         │\n"
         "├──────────────────────────────────────────┤\n"
-        "│ 📍 Step 1: Tap 'Open Ad Link' below.     │\n"
-        "│ ⏱️ Step 2: Scroll down & click 'CONTINUE'│\n"
-        "│            (Wait 10-15s timer).          │\n"
-        "│ 🔓 Step 3: Click 'GET LINK' on Page 2    │\n"
-        "│            to unlock file.               │\n"
+        "│ 📍 Step: Tap 'Unlock Movie'              │\n"
+        "│         -> Wait 5s Timer -> Get Link.    │\n"
         "├──────────────────────────────────────────┤\n"
-        "│ ⏳ Movie Link Valid For: 5 MINUTES       │\n"
+        "│ ⏳ Movie Link Valid For: 3 MINUTES       │\n"
         "└──────────────────────────────────────────┘\n\n"
         "👉 *Tap the button below to verify & unlock your download:*\n\n"
-        "⚠️ *AUTO-DELETE: 5 mins | Forward or save to Saved Messages now!*"
+        "⚠️ *AUTO-DELETE: 3 mins | Forward or save to Saved Messages now!*"
     )
     verify_markup = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔓 Unlock Movie (2-Page Ad Link)", url=short_url)],
-        [InlineKeyboardButton("🎬 How to Complete 2-Page Ad? (Video Guide)", callback_data="ad_video_guide")],
+        [InlineKeyboardButton("🔓 Unlock Movie (1-Page Verification)", url=short_url)],
+        [InlineKeyboardButton("❓ How to Open Link? / କେମିତି ଖୋଲିବେ?", callback_data="how_to_open_link")],
         [InlineKeyboardButton("🍿 Open CineVerse Search Group", url=SEARCH_GROUP_LINK)]
     ])
 
@@ -921,7 +918,7 @@ async def send_arolinks_verification_card(client: Client, target_chat: Any, user
             logger.error(f"Error sending AroLinks verification card: {e}")
 
     if verify_msg:
-        asyncio.create_task(auto_delete(verify_msg, 300, reply_to_message=reply_to_message))
+        asyncio.create_task(auto_delete(verify_msg, 180, reply_to_message=reply_to_message))
 
 async def check_chat_membership(client: Client, chat_id: Any, user_id: int, fallback_username: Optional[str] = None) -> bool:
     try:
@@ -999,7 +996,7 @@ async def start_handler(client: Client, message: Message):
     user_id = message.from_user.id
     command_text = (message.text or "").strip()
     is_file_flow = any(command_text.startswith(p) for p in ["/start file_", "/start get_", "/start verify_"])
-    asyncio.create_task(auto_delete(message, 300 if is_file_flow else 60))
+    asyncio.create_task(auto_delete(message, 180 if is_file_flow else 60))
     await db.add_user(user_id)
 
     # 1. If /start was sent in a Group: politely redirect user to PM or search group
@@ -1641,7 +1638,7 @@ async def incoming_user_message_tracker(client: Client, message: Message):
             is_file_flow = message.chat.type == enums.ChatType.PRIVATE and any(
                 msg_text.startswith(p) for p in ["/start file_", "/start get_", "/start verify_"]
             )
-            asyncio.create_task(auto_delete(message, 300 if is_file_flow else 60))
+            asyncio.create_task(auto_delete(message, 180 if is_file_flow else 60))
     except Exception as e:
         logger.debug(f"Tracker error: {e}")
 
@@ -2213,35 +2210,33 @@ async def callback_router(client: Client, query: CallbackQuery):
             await query.answer("❌ Invalid or expired verification link.", show_alert=True)
         return
 
-    elif data == "ad_video_guide":
+    elif data in ["how_to_open_link", "ad_video_guide"]:
         popup_guide = (
-            "🎬 2-PAGE AD GUIDE:\n"
-            "📍 1. Tap 'Unlock Movie (2-Page Ad Link)'\n"
-            "⏱️ 2. Scroll & click 'CONTINUE' (wait 10-15s)\n"
-            "🔓 3. Click 'GET LINK' on Page 2\n"
-            "🚀 File delivers here in PM instantly!"
+            "⚡ 1-STEP VERIFICATION / କେମିତି ଖୋଲିବେ:\n"
+            "📍 1. Tap 'Unlock Movie'\n"
+            "⏱️ 2. Wait 5s timer on page\n"
+            "🔓 3. Click 'Get Link' -> File delivers in PM!\n"
+            "ଲିଙ୍କ୍ ଖୋଲି 5s ଅପେକ୍ଷା କରି Get Link ଦବାନ୍ତୁ!"
         )
         await query.answer(popup_guide, show_alert=True)
 
         guide_card = (
             "┌──────────────────────────────────────────┐\n"
-            "│   🎬  2-PAGE AD VERIFICATION GUIDE       │\n"
-            "│      Step-by-Step Instructions           │\n"
+            "│   🎬  1-STEP QUICK VERIFICATION GUIDE    │\n"
+            "│          କେମିତି ଖୋଲିବେ? (How To Open)     │\n"
             "└──────────────────────────────────────────┘\n\n"
-            "⚡ **How to Complete 2-Page Ad Verification:**\n\n"
-            "📍 **Step 1: Open the Ad Link**\n"
-            "├─ Tap `[ 🔓 Unlock Movie (2-Page Ad Link) ]`\n"
-            "└─ It opens the secure verification page in your browser.\n\n"
-            "⏱️ **Step 2: Page 1 (Wait 10-15s Timer)**\n"
+            "⚡ **How to Complete 1-Step Quick Verification:**\n\n"
+            "📍 **Step 1: Open the Verification Link**\n"
+            "├─ Tap `[ 🔓 Unlock Movie (1-Page Verification) ]`\n"
+            "└─ It opens the secure page in your browser.\n\n"
+            "⏱️ **Step 2: Wait 5 Seconds Timer**\n"
             "├─ Scroll down slightly on the webpage.\n"
-            "├─ Wait 10-15 seconds for the countdown timer to reach 0.\n"
-            "└─ Click the green **CONTINUE** or **NEXT** button.\n\n"
-            "🔓 **Step 3: Page 2 (Final Unlock)**\n"
-            "├─ On the second page, scroll down.\n"
-            "├─ Click **GET LINK**.\n"
+            "└─ Wait for the 5-second countdown timer to reach 0.\n\n"
+            "🔓 **Step 3: Click Get Link**\n"
+            "├─ Click the green **GET LINK** button.\n"
             "└─ You will automatically return to CineVerse Bot!\n\n"
             "🚀 **Instant Delivery:** Your requested movie file will be delivered directly here in PM!\n\n"
-            "⏳ *Take your time — your link & messages are valid for 5 MINUTES!*"
+            "⏳ *Take your time — your link & messages are valid for 3 MINUTES!*"
         )
         try:
             guide_msg = await query.message.reply_text(
@@ -2250,7 +2245,7 @@ async def callback_router(client: Client, query: CallbackQuery):
                 disable_web_page_preview=True
             )
             if guide_msg:
-                asyncio.create_task(auto_delete(guide_msg, 300, reply_to_message=query.message))
+                asyncio.create_task(auto_delete(guide_msg, 180, reply_to_message=query.message))
         except Exception as e:
             logger.debug(f"Guide reply error: {e}")
         return

@@ -92,11 +92,13 @@ REQ_GROUP_ID = get_env_int("REQ_GROUP_ID", -1003982672894)
 REQ_GROUP_LINK = get_env_str("REQ_GROUP_LINK", "https://t.me/FlimRequest_01")
 BACKUP_CHANNEL_ID = get_env_int("BACKUP_CHANNEL_ID", -1003423603865)
 BACKUP_CHANNEL_LINK = get_env_str("BACKUP_CHANNEL_LINK", "https://t.me/CineVersebackup")
+SEARCH_GROUP_ID = get_env_int("SEARCH_GROUP_ID", -1004427640174)
+SEARCH_GROUP_LINK = get_env_str("SEARCH_GROUP_LINK", "https://t.me/CineVerseFlimSearch")
 
 # Aliases for backwards compatibility
 FSUB_GROUP_ID = REQ_GROUP_ID
 FSUB_GROUP_LINK = REQ_GROUP_LINK
-CHANNEL_LINK = REQ_GROUP_LINK
+CHANNEL_LINK = SEARCH_GROUP_LINK
 DEVELOPER_LINK = get_env_str("DEVELOPER_LINK", f"tg://user?id={OWNER_ID}")
 WELCOME_IMAGE_URL = get_env_str(
     "WELCOME_IMAGE_URL",
@@ -769,9 +771,12 @@ async def start_handler(client: Client, message: Message):
         f"• ⚡ **Speed:** Ultra-Fast (Sub-second)\n"
         f"• 👑 **Developer:** `Banty`\n\n"
         f"⚖️ **Disclaimer:** *This bot does not store or host any files on its servers. All media files are indexed from third-party channels on Telegram. If you are a copyright owner and want to report/remove content, please use* `/dmca` *command.*\n\n"
-        f"💬 *Type any movie name below to search immediately!*"
+        f"💬 Send your movie/series requests directly in our main group: CineVerse Search Group!"
     )
     markup = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🍿 Open CineVerse Search Group", url=SEARCH_GROUP_LINK)
+        ],
         [
             InlineKeyboardButton("📖 Help", callback_data="cb_help"),
             InlineKeyboardButton("ℹ️ About", callback_data="cb_about")
@@ -1168,10 +1173,11 @@ async def auto_filter_handler(client: Client, message: Message):
         user_name = message.from_user.first_name if message.from_user and message.from_user.first_name else "Friend"
         redirect_text = (
             f"HEY {user_name.upper()},\n\n"
-            "YOU CAN'T GET ANYTHING FROM HERE. REQUEST ON OUR GROUP OR CLICK REQUEST HERE BUTTON BELOW 👇"
+            "YOU CAN'T GET ANYTHING FROM HERE.\n\n"
+            "💬 Send your movie/series requests directly in our main group: CineVerse Search Group! 👇"
         )
         redirect_markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🟢 Request Group 💬", url=REQ_GROUP_LINK)]
+            [InlineKeyboardButton("🍿 Open CineVerse Search Group", url=SEARCH_GROUP_LINK)]
         ])
         pm_msg = await message.reply_text(
             redirect_text,
@@ -1243,10 +1249,10 @@ async def callback_router(client: Client, query: CallbackQuery):
                 await query.message.edit_text(
                     "✅ **Access Granted!**\n\n"
                     "You have joined both **CineVerse Flim Request Group** and **Backup Channel**.\n\n"
-                    "💬 *Send your movie requests in the group to get files!*",
+                    "💬 Send your movie/series requests directly in our main group: CineVerse Search Group!",
                     reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🟢 Request Group", url=REQ_GROUP_LINK)],
-                        [InlineKeyboardButton("📢 Backup Channel", url=BACKUP_CHANNEL_LINK)]
+                        [InlineKeyboardButton("🍿 Open CineVerse Search Group", url=SEARCH_GROUP_LINK)],
+                        [InlineKeyboardButton("🟢 Request Group", url=REQ_GROUP_LINK), InlineKeyboardButton("📢 Backup Channel", url=BACKUP_CHANNEL_LINK)]
                     ])
                 )
             except Exception:
@@ -1438,9 +1444,12 @@ async def callback_router(client: Client, query: CallbackQuery):
             f"• ⚡ **Speed:** Ultra-Fast (Sub-second)\n"
             f"• 👑 **Developer:** `Banty`\n\n"
             f"⚖️ **Disclaimer:** *This bot does not store or host any files on its servers. All media files are indexed from third-party channels on Telegram. If you are a copyright owner and want to report/remove content, please use* `/dmca` *command.*\n\n"
-            f"💬 *Type any movie name below to search immediately!*"
+            f"💬 Send your movie/series requests directly in our main group: CineVerse Search Group!"
         )
         markup = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🍿 Open CineVerse Search Group", url=SEARCH_GROUP_LINK)
+            ],
             [
                 InlineKeyboardButton("📖 Help", callback_data="cb_help"),
                 InlineKeyboardButton("ℹ️ About", callback_data="cb_about")

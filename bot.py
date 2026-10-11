@@ -92,7 +92,7 @@ ADMIN_IDS = parse_admin_ids()
 ADMIN_ID = OWNER_ID
 
 # AroLinks Shortener API Configuration (Strict 1 File = 1 Ad Flow)
-AROLINKS_API_KEY = get_env_str("AROLINKS_API_KEY", "")
+AROLINKS_API_KEY = "d0e32c64e85d355dd4da53fbe9c25c9safe0baba"
 
 REQ_GROUP_ID = get_env_int("REQ_GROUP_ID", -1003982672894)
 REQ_GROUP_LINK = get_env_str("REQ_GROUP_LINK", "https://t.me/FlimRequest_01")
@@ -808,29 +808,40 @@ def _fetch_arolinks_short_url(destination_url: str) -> str:
     """
     if not AROLINKS_API_KEY:
         return destination_url
-    try:
-        encoded_url = urllib.parse.quote(destination_url, safe="")
-        api_url = f"https://arolinks.com/api?api={AROLINKS_API_KEY}&url={encoded_url}"
-        req = urllib.request.Request(
-            api_url,
-            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) CineVerseBot/2.0"}
-        )
-        with urllib.request.urlopen(req, timeout=8) as response:
-            if response.status == 200:
-                body = response.read().decode("utf-8").strip()
-                try:
-                    data = json.loads(body)
-                    if isinstance(data, dict):
-                        if data.get("status") == "success" and data.get("shortenedUrl"):
-                            return str(data["shortenedUrl"]).strip()
-                        for k in ["shortenedUrl", "short_url", "shorturl", "url"]:
-                            if data.get(k):
-                                return str(data[k]).strip()
-                except Exception:
-                    if body.startswith("http://") or body.startswith("https://"):
-                        return body
-    except Exception as e:
-        logger.warning(f"AroLinks API call error: {e}")
+
+    keys_to_try = [
+        AROLINKS_API_KEY,
+        AROLINKS_API_KEY.replace("safe0baba", "5afe0baba"),
+        "d0e32c64e85d355dd4da53fbe9c25c95afe0baba",
+        "d0e32c64e85d355dd4da53fbe9c25c9safe0baba"
+    ]
+    seen = set()
+    unique_keys = [k for k in keys_to_try if k and not (k in seen or seen.add(k))]
+
+    encoded_url = urllib.parse.quote(destination_url, safe="")
+    for key in unique_keys:
+        try:
+            api_url = f"https://arolinks.com/api?api={key}&url={encoded_url}"
+            req = urllib.request.Request(
+                api_url,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) CineVerseBot/2.0"}
+            )
+            with urllib.request.urlopen(req, timeout=8) as response:
+                if response.status == 200:
+                    body = response.read().decode("utf-8").strip()
+                    try:
+                        data = json.loads(body)
+                        if isinstance(data, dict):
+                            if data.get("status") == "success" and data.get("shortenedUrl"):
+                                return str(data["shortenedUrl"]).strip()
+                            for k in ["shortenedUrl", "short_url", "shorturl", "url"]:
+                                if data.get(k):
+                                    return str(data[k]).strip()
+                    except Exception:
+                        if body.startswith("http://") or body.startswith("https://"):
+                            return body
+        except Exception as e:
+            logger.warning(f"AroLinks API attempt error for {key[:10]}...: {e}")
     return destination_url
 
 async def get_arolinks_short_url(destination_url: str) -> str:
@@ -871,7 +882,7 @@ async def send_arolinks_verification_card(client: Client, target_chat: Any, user
         "👉 *Tap the button below to verify & unlock your download:*"
     )
     verify_markup = InlineKeyboardMarkup([
-        [InlineKeyboardButton("⚡ Unlock & Download File (1-Page) ↗", url=short_url)],
+        [InlineKeyboardButton("📥 Download Movie (Verify Ad 1-Page)", url=short_url)],
         [InlineKeyboardButton("🍿 Open CineVerse Search Group", url=SEARCH_GROUP_LINK)]
     ])
 
@@ -1179,18 +1190,18 @@ async def start_handler(client: Client, message: Message):
     )
     markup = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🍿 Open CineVerse Search Group ↗", url=SEARCH_GROUP_LINK)
+            InlineKeyboardButton("🍿 Open CineVerse Search Group", url=SEARCH_GROUP_LINK)
         ],
         [
             InlineKeyboardButton("📖 Guide & Help", callback_data="cb_help"),
-            InlineKeyboardButton("ℹ️ About CineVerse", callback_data="cb_about")
+            InlineKeyboardButton("📜 Community Rules", callback_data="cb_rules")
         ],
         [
             InlineKeyboardButton("⚖️ Disclaimer", callback_data="cb_disclaimer"),
             InlineKeyboardButton("📋 DMCA Takedown", callback_data="cb_dmca")
         ],
         [
-            InlineKeyboardButton("📢 Official Channel ↗", url=CHANNEL_LINK),
+            InlineKeyboardButton("ℹ️ About CineVerse", callback_data="cb_about"),
             InlineKeyboardButton("➕ Add Me to Group ↗", url=f"https://t.me/{bot_me.username}?startgroup=true")
         ]
     ])
@@ -1250,6 +1261,7 @@ async def help_handler(client: Client, message: Message):
         "└─ 3️⃣ **Receive:** Bot delivers the file directly to your PM instantly!\n\n"
         "◈ **Command Center:**\n"
         "├─ `/start` ─ Initialize bot & access main portal\n"
+        "├─ `/rules` ─ Community guidelines (EN / OD / HI)\n"
         "├─ `/stats` ─ Live database and user metrics\n"
         "├─ `/help` ─ Interactive usage guide\n"
         "├─ `/disclaimer` ─ Terms of service & legal notice\n"
@@ -1973,6 +1985,7 @@ async def callback_router(client: Client, query: CallbackQuery):
             "└─ 3️⃣ **Receive:** Bot delivers the file directly to your PM instantly!\n\n"
             "◈ **Command Center:**\n"
             "├─ `/start` ─ Initialize bot & access main portal\n"
+            "├─ `/rules` ─ Community guidelines (EN / OD / HI)\n"
             "├─ `/stats` ─ Live database and user metrics\n"
             "├─ `/help` ─ Interactive usage guide\n"
             "├─ `/disclaimer` ─ Terms of service & legal notice\n"
@@ -2053,6 +2066,37 @@ async def callback_router(client: Client, query: CallbackQuery):
             await query.message.edit_text(dmca_text, reply_markup=markup)
         await query.answer()
 
+    elif data == "cb_rules":
+        rules_text = (
+            "┌──────────────────────────────────────────┐\n"
+            "│   📜  C I N E V E R S E   R U L E S      │\n"
+            "│    Community & Downloading Guidelines    │\n"
+            "└──────────────────────────────────────────┘\n\n"
+            "🇬🇧 **English Guidelines:**\n"
+            "├─ 1. Send clean movie / series names only (e.g. `Avatar` or `Leo`).\n"
+            "├─ 2. Strictly 1 File = 1 Ad verification to keep high-speed vault free.\n"
+            "├─ 3. No spamming, abusive language, or non-movie links.\n"
+            "└─ 4. Auto-delete is active (60 seconds) to maintain chat cleanliness.\n\n"
+            "🇮🇳 **ଓଡ଼ିଆ ନିୟମାବଳୀ (Odia Guidelines):**\n"
+            "├─ ୧. ଗ୍ରୁପ୍‌ରେ କେବଳ ଫିଲ୍ମ କିମ୍ବା ୱେବ୍ ସିରିଜ୍‌ର ସଠିକ୍ ନାମ ଲେଖି ସର୍ଚ୍ଚ କରନ୍ତୁ।\n"
+            "├─ ୨. ଡାଉନଲୋଡ୍ କରିବା ପାଇଁ ଗୋଟିଏ ଫାଇଲ୍ ପାଇଁ ଗୋଟିଏ ଆଡ୍ ଭେରିଫିକେସନ୍ ବାଧ୍ୟତାମୂଳକ।\n"
+            "├─ ୩. କୌଣସି ଅପ୍ରାସଙ୍ଗିକ ଲିଙ୍କ୍ କିମ୍ବା ଗାଳିଗୁଲଜ ବ୍ୟବହାର କରନ୍ତୁ ନାହିଁ।\n"
+            "└─ ୪. ସମସ୍ତ ମେସେଜ୍ ୬୦ ସେକେଣ୍ଡ ମଧ୍ୟରେ ସ୍ୱତଃ ଡିଲିଟ୍ ହୋଇଯିବ।\n\n"
+            "🇮🇳 **हिंदी नियमावली (Hindi Guidelines):**\n"
+            "├─ १. सर्च ग्रुप में केवल सही मूवी अथवा सीरीज का नाम लिखकर खोजें।\n"
+            "├─ २. फ्री हाई-स्पीड डाउनलोड के लिए प्रति फ़ाइल १-पेज ऐड वेरिफिकेशन अनिवार्य है।\n"
+            "├─ ३. ग्रुप में स्पैम, अभद्र भाषा या अन्य लिंक शेयर करना सख्त मना है।\n"
+            "└─ ४. चैट साफ़ रखने के लिए सभी संदेश ६० सेकंड में स्वतः डिलीट हो जाते हैं।\n\n"
+            "──────────────────────────────────────────\n"
+            "⚡ *CineVerse Network Policy Team*"
+        )
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Main Portal", callback_data="cb_home")]])
+        try:
+            await query.message.edit_caption(caption=rules_text, reply_markup=markup)
+        except Exception:
+            await query.message.edit_text(rules_text, reply_markup=markup)
+        await query.answer()
+
     elif data == "cb_home":
         stats = await db.get_stats()
         bot_me = await client.get_me()
@@ -2078,18 +2122,18 @@ async def callback_router(client: Client, query: CallbackQuery):
         )
         markup = InlineKeyboardMarkup([
             [
-                InlineKeyboardButton("🍿 Open CineVerse Search Group ↗", url=SEARCH_GROUP_LINK)
+                InlineKeyboardButton("🍿 Open CineVerse Search Group", url=SEARCH_GROUP_LINK)
             ],
             [
                 InlineKeyboardButton("📖 Guide & Help", callback_data="cb_help"),
-                InlineKeyboardButton("ℹ️ About CineVerse", callback_data="cb_about")
+                InlineKeyboardButton("📜 Community Rules", callback_data="cb_rules")
             ],
             [
                 InlineKeyboardButton("⚖️ Disclaimer", callback_data="cb_disclaimer"),
                 InlineKeyboardButton("📋 DMCA Takedown", callback_data="cb_dmca")
             ],
             [
-                InlineKeyboardButton("📢 Official Channel ↗", url=CHANNEL_LINK),
+                InlineKeyboardButton("ℹ️ About CineVerse", callback_data="cb_about"),
                 InlineKeyboardButton("➕ Add Me to Group ↗", url=f"https://t.me/{bot_me.username}?startgroup=true")
             ]
         ])

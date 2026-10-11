@@ -105,11 +105,9 @@ WELCOME_IMAGE_URL = get_env_str(
 
 PAGE_SIZE = 8
 SEARCH_CACHE: Dict[str, str] = {}
-PROCESSED_MESSAGE_KEYS: set = set()
-PROCESSED_CALLBACK_IDS: set = set()
-IN_FLIGHT_GET: Dict[Tuple[int, int], float] = {}
-ACTIVE_SEARCHES: Dict[Tuple[int, str], float] = {}
-USER_LAST_CB: Dict[int, float] = {}
+processed_requests: Dict[Any, float] = {}
+PROCESSED_REQUESTS = processed_requests  # Global processed_requests cache with timestamp expiry
+REQUEST_LOCK_EXPIRY = 5.0  # 5-second deduplication lock window
 DB_FILE = os.path.join(os.getcwd(), "database.db")
 TARGET_RESOLVED_CHAT_ID: Optional[Any] = None
 FSUB_RESOLVED_CHAT_ID: Optional[Any] = None
@@ -366,15 +364,49 @@ async def auto_delete(message: Optional[Message], delay: int = 60):
     except Exception as e:
         logger.debug(f"Auto-delete bypassed for message {getattr(message, 'id', 'unknown')}: {e}")
 
-def is_duplicate_message(message: Optional[Message]) -> bool:
+def is_duplicate_request(key: Any, expiry: float = REQUEST_LOCK_EXPIRY) -> bool:
+    """
+    Code-Level Deduplication Lock:
+    Checks if a request key is currently being processed or was processed within `expiry` seconds.
+    If already processed within `expiry` (default 5.0s), returns True to ignore duplicate executions.
+    Otherwise, marks the key with current timestamp and returns False to allow execution.
+    """
+    now = time.time()
+    # Prune expired keys if cache grows large
+    if len(processed_requests) > 3000:
+        expired = [k for k, ts in processed_requests.items() if (now - ts) > (expiry * 2)]
+        for k in expired:
+            processed_requests.pop(k, None)
+
+    last_time = processed_requests.get(key)
+    if last_time is not None and (now - last_time) < expiry:
+        return True
+
+    processed_requests[key] = now
+    return False
+
+def is_duplicate_message(message: Optional[Message], expiry: float = REQUEST_LOCK_EXPIRY) -> bool:
+    """
+    Tracks recent message_ids per chat with timestamp expiry to guarantee exact-once execution.
+    """
     if not message or not message.chat:
         return False
-    msg_key = (message.chat.id, message.id)
-    if msg_key in PROCESSED_MESSAGE_KEYS:
+    msg_key = f"msg_{message.chat.id}_{message.id}"
+    return is_duplicate_request(msg_key, expiry=expiry)
+
+def is_duplicate_callback(query: CallbackQuery, expiry: float = REQUEST_LOCK_EXPIRY) -> bool:
+    """
+    Tracks callback queries by query.id and callback_query data with timestamp expiry to guarantee exact-once execution.
+    """
+    if not query:
+        return False
+    if is_duplicate_request(f"cb_id_{query.id}", expiry=expiry):
         return True
-    PROCESSED_MESSAGE_KEYS.add(msg_key)
-    if len(PROCESSED_MESSAGE_KEYS) > 3000:
-        PROCESSED_MESSAGE_KEYS.clear()
+    chat_id = query.message.chat.id if query.message else getattr(query.from_user, "id", 0)
+    user_id = getattr(query.from_user, "id", 0)
+    data_key = f"cb_data_{chat_id}_{user_id}_{query.data}"
+    if is_duplicate_request(data_key, expiry=expiry):
+        return True
     return False
 
 def format_search_text(query: str, total: int, page: int, total_pages: int) -> str:
@@ -551,13 +583,10 @@ async def get_bot_username(client: Client) -> str:
     return os.getenv("BOT_USERNAME", "CineVerse_SearchBot")
 
 async def deliver_movie_file(client: Client, user_id: int, msg_id: int):
-    now = time.time()
-    get_key = (user_id, msg_id)
-    if get_key in IN_FLIGHT_GET and (now - IN_FLIGHT_GET[get_key]) < 6.0:
+    # Code-Level Deduplication Lock: Ignore duplicate delivery within 5 seconds
+    delivery_key = f"deliver_{user_id}_{msg_id}"
+    if is_duplicate_request(delivery_key, expiry=REQUEST_LOCK_EXPIRY):
         return
-    IN_FLIGHT_GET[get_key] = now
-    if len(IN_FLIGHT_GET) > 1000:
-        IN_FLIGHT_GET.clear()
 
     try:
         file_info = await db.get_file_by_msg_id(msg_id)
@@ -1102,13 +1131,10 @@ async def auto_filter_handler(client: Client, message: Message):
         return
     user_id = message.from_user.id
 
-    now = time.time()
-    search_debounce_key = (message.chat.id, text.lower())
-    if search_debounce_key in ACTIVE_SEARCHES and (now - ACTIVE_SEARCHES[search_debounce_key]) < 2.5:
+    # Code-Level Deduplication Lock on search query within 5 seconds
+    search_lock_key = f"search_{message.chat.id}_{text.lower()}"
+    if is_duplicate_request(search_lock_key, expiry=REQUEST_LOCK_EXPIRY):
         return
-    ACTIVE_SEARCHES[search_debounce_key] = now
-    if len(ACTIVE_SEARCHES) > 1000:
-        ACTIVE_SEARCHES.clear()
 
     await db.add_user(user_id)
 
@@ -1192,16 +1218,13 @@ async def callback_router(client: Client, query: CallbackQuery):
         return
     user_id = query.from_user.id
 
-    # Deduplicate callback query triggers
-    if query.id in PROCESSED_CALLBACK_IDS:
+    # Code-Level Deduplication Lock on callback queries & callback data within 5 seconds
+    if is_duplicate_callback(query, expiry=REQUEST_LOCK_EXPIRY):
         try:
             await query.answer()
         except Exception:
             pass
         return
-    PROCESSED_CALLBACK_IDS.add(query.id)
-    if len(PROCESSED_CALLBACK_IDS) > 3000:
-        PROCESSED_CALLBACK_IDS.clear()
 
     await db.add_user(user_id)
 
@@ -1446,6 +1469,12 @@ async def callback_router(client: Client, query: CallbackQuery):
         # Strict Force Join Check (Even for Admins/Owner)
         if not await is_user_joined_group(client, user_id):
             await query.answer("❌ You haven't joined both groups yet! Please join both first.", show_alert=True)
+            return
+
+        # Code-Level Deduplication Lock for file delivery callbacks
+        delivery_key = f"deliver_{user_id}_{msg_id}"
+        if is_duplicate_request(delivery_key, expiry=REQUEST_LOCK_EXPIRY):
+            await query.answer("⏳ File is already being delivered to your PM!", show_alert=False)
             return
 
         # User is verified: Send file immediately in PM

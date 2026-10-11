@@ -177,6 +177,17 @@ class Database:
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_token ON file_tokens(token);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_token_user ON file_tokens(user_id);")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS authorized_groups (
+                    group_id INTEGER PRIMARY KEY,
+                    added_by INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            conn.execute(
+                "INSERT OR IGNORE INTO authorized_groups (group_id, added_by) VALUES (?, ?);",
+                (SEARCH_GROUP_ID, OWNER_ID)
+            )
             # Clean up existing exact duplicates so only 1 unique record remains per (title, file_size)
             try:
                 conn.execute("""
@@ -364,6 +375,40 @@ class Database:
         except Exception:
             return False
 
+    def _is_authorized_group(self, group_id: int) -> bool:
+        if group_id == SEARCH_GROUP_ID:
+            return True
+        try:
+            with self._get_connection() as conn:
+                row = conn.execute("SELECT 1 FROM authorized_groups WHERE group_id = ?;", (group_id,)).fetchone()
+                return bool(row)
+        except Exception as e:
+            logger.error(f"Error checking authorized group {group_id}: {e}")
+            return False
+
+    def _add_authorized_group(self, group_id: int, added_by: int) -> bool:
+        try:
+            with self._get_connection() as conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO authorized_groups (group_id, added_by) VALUES (?, ?);",
+                    (group_id, added_by)
+                )
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Error adding authorized group {group_id}: {e}")
+            return False
+
+    def _remove_authorized_group(self, group_id: int) -> bool:
+        try:
+            with self._get_connection() as conn:
+                conn.execute("DELETE FROM authorized_groups WHERE group_id = ?;", (group_id,))
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Error removing authorized group {group_id}: {e}")
+            return False
+
     # Async wrappers
     async def add_user(self, user_id: int):
         await asyncio.to_thread(self._add_user, user_id)
@@ -406,6 +451,15 @@ class Database:
 
     async def is_token_used(self, token: str) -> bool:
         return await asyncio.to_thread(self._is_token_used, token)
+
+    async def is_authorized_group(self, group_id: int) -> bool:
+        return await asyncio.to_thread(self._is_authorized_group, group_id)
+
+    async def add_authorized_group(self, group_id: int, added_by: int) -> bool:
+        return await asyncio.to_thread(self._add_authorized_group, group_id, added_by)
+
+    async def remove_authorized_group(self, group_id: int) -> bool:
+        return await asyncio.to_thread(self._remove_authorized_group, group_id)
 
 
 db = Database()
@@ -955,16 +1009,16 @@ async def check_chat_membership(client: Client, chat_id: Any, user_id: int, fall
         return False
 
 async def is_user_joined_group(client: Client, user_id: int) -> bool:
-    """Strictly checks if user (including Admins & Owner) is a member of BOTH Target Request Group (-1003982672894) AND Backup Channel (-1003423603865)."""
-    joined_req = await check_chat_membership(client, REQ_GROUP_ID, user_id, fallback_username="FlimRequest_01")
-    if not joined_req:
-        return False
+    """Strictly checks if user is a member of CineVerse Search Group (-1004427640174)."""
+    if user_id == OWNER_ID or user_id in ADMIN_IDS:
+        return True
 
-    joined_backup = await check_chat_membership(client, BACKUP_CHANNEL_ID, user_id, fallback_username="CineVersebackup")
-    if not joined_backup:
-        return False
-
-    return True
+    return await check_chat_membership(
+        client,
+        SEARCH_GROUP_ID,
+        user_id,
+        fallback_username="CineVerseFlimSearch"
+    )
 
 async def is_authorized_user(user_id: int) -> bool:
     if user_id == OWNER_ID or user_id in ADMIN_IDS:
@@ -974,15 +1028,60 @@ async def is_authorized_user(user_id: int) -> bool:
 def build_force_join_markup(retry_callback: str = "cb_check_join") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🟢 1. Join Request Group ↗", url=REQ_GROUP_LINK)
-        ],
-        [
-            InlineKeyboardButton("📢 2. Join Backup Channel ↗", url=BACKUP_CHANNEL_LINK)
+            InlineKeyboardButton("🍿 Join Group First", url=SEARCH_GROUP_LINK)
         ],
         [
             InlineKeyboardButton("🔄 Verify & Continue", callback_data=retry_callback)
         ]
     ])
+
+async def check_group_authorization(client: Client, message: Message) -> bool:
+    """
+    Unauthorized Group Protection:
+    Allow bot ONLY in CineVerse Search Group (-1004427640174) or added by ADMIN_ID.
+    If added to any other group, automatically send a notice and leave the group immediately.
+    """
+    if not message.chat or message.chat.type not in [enums.ChatType.GROUP, enums.ChatType.SUPERGROUP]:
+        return True
+
+    peer = await resolve_channel_peer(client)
+    if message.chat.id == peer:
+        return True
+
+    if message.chat.id == SEARCH_GROUP_ID:
+        return True
+
+    if await db.is_authorized_group(message.chat.id):
+        return True
+
+    # If message is from admin, authorize the group
+    if message.from_user and (message.from_user.id == OWNER_ID or message.from_user.id in ADMIN_IDS):
+        await db.add_authorized_group(message.chat.id, message.from_user.id)
+        return True
+
+    # Unauthorized group detected!
+    logger.warning(f"Unauthorized access in group '{getattr(message.chat, 'title', '')}' ({message.chat.id}). Sending notice and leaving...")
+    try:
+        notice = await message.reply_text(
+            "┌──────────────────────────────────────────┐\n"
+            "│   🚫  U N A U T H O R I Z E D   G R O U P │\n"
+            "└──────────────────────────────────────────┘\n\n"
+            "⚠️ **Unauthorized Group Access Detected!**\n"
+            "├─ CineVerse Bot is strictly authorized for **CineVerse Search Group** (`-1004427640174`).\n"
+            "├─ Non-admin invitation detected.\n"
+            "└─ 🚪 *Leaving this group immediately...*",
+            disable_web_page_preview=True
+        )
+        if notice:
+            asyncio.create_task(auto_delete(notice, 10))
+    except Exception as e:
+        logger.debug(f"Failed to reply notice in unauthorized group: {e}")
+
+    try:
+        await client.leave_chat(message.chat.id)
+    except Exception as e:
+        logger.error(f"Failed to leave unauthorized chat {message.chat.id}: {e}")
+    return False
 
 # ---------------------------------------------------------------------------
 # COMMAND HANDLERS
@@ -999,8 +1098,10 @@ async def start_handler(client: Client, message: Message):
     asyncio.create_task(auto_delete(message, 180 if is_file_flow else 60))
     await db.add_user(user_id)
 
-    # 1. If /start was sent in a Group: politely redirect user to PM or search group
+    # 1. If /start was sent in a Group: check authorization first, then politely redirect
     if message.chat and message.chat.type != enums.ChatType.PRIVATE:
+        if not await check_group_authorization(client, message):
+            return
         bot_uname = await get_bot_username(client)
         pm_link = f"https://t.me/{bot_uname}?start=true"
         start_grp = await message.reply_text(
@@ -1056,14 +1157,14 @@ async def start_handler(client: Client, message: Message):
             fsub_text = (
                 "┌──────────────────────────────────────────┐\n"
                 "│   🔒  A C C E S S   R E Q U I R E D      │\n"
-                "│        Official Membership Gate          │\n"
+                "│      CineVerse Search Group Member Gate  │\n"
                 "└──────────────────────────────────────────┘\n\n"
                 f"👋 Hello **{user_name}**,\n\n"
-                "To unlock private access and direct high-speed movie downloads, please join our official network channels below:\n\n"
-                "◈ Channels to Join:\n"
-                "├─ 🟢 **1. CineVerse Request Group** (Discussions & Requests)\n"
-                "└─ 📢 **2. CineVerse Backup Channel** (Updates & Vault)\n\n"
-                "⚡ *After joining both, tap 'Verify & Continue' below.*"
+                "You **MUST** be a member of **CineVerse Search Group** (`-1004427640174`) to download movies!\n\n"
+                "◈ **Mandatory Requirement:**\n"
+                "├─ 🍿 Join **CineVerse Search Group**\n"
+                "└─ ⚡ Access instant movie downloads & vault\n\n"
+                "👉 *Tap the button below to join the group first:*"
             )
             fsub_msg = await message.reply_text(
                 fsub_text,
@@ -1121,14 +1222,14 @@ async def start_handler(client: Client, message: Message):
             fsub_text = (
                 "┌──────────────────────────────────────────┐\n"
                 "│   🔒  A C C E S S   R E Q U I R E D      │\n"
-                "│        Official Membership Gate          │\n"
+                "│      CineVerse Search Group Member Gate  │\n"
                 "└──────────────────────────────────────────┘\n\n"
                 f"👋 Hello **{user_name}**,\n\n"
-                "To unlock private access and direct high-speed movie downloads, please join our official network channels below:\n\n"
-                "◈ Channels to Join:\n"
-                "├─ 🟢 **1. CineVerse Request Group** (Discussions & Requests)\n"
-                "└─ 📢 **2. CineVerse Backup Channel** (Updates & Vault)\n\n"
-                "⚡ *After joining both, tap 'Verify & Continue' below.*"
+                "You **MUST** be a member of **CineVerse Search Group** (`-1004427640174`) to download movies!\n\n"
+                "◈ **Mandatory Requirement:**\n"
+                "├─ 🍿 Join **CineVerse Search Group**\n"
+                "└─ ⚡ Access instant movie downloads & vault\n\n"
+                "👉 *Tap the button below to join the group first:*"
             )
             fsub_msg = await message.reply_text(
                 fsub_text,
@@ -1155,14 +1256,14 @@ async def start_handler(client: Client, message: Message):
         fsub_text = (
             "┌──────────────────────────────────────────┐\n"
             "│   🔒  A C C E S S   R E Q U I R E D      │\n"
-            "│        Official Membership Gate          │\n"
+            "│      CineVerse Search Group Member Gate  │\n"
             "└──────────────────────────────────────────┘\n\n"
             f"👋 Hello **{user_name}**,\n\n"
-            "To unlock private access and direct high-speed movie downloads, please join our official network channels below:\n\n"
-            "◈ Channels to Join:\n"
-            "├─ 🟢 **1. CineVerse Request Group** (Discussions & Requests)\n"
-            "└─ 📢 **2. CineVerse Backup Channel** (Updates & Vault)\n\n"
-            "⚡ *After joining both, tap 'Verify & Continue' below.*"
+            "You **MUST** be a member of **CineVerse Search Group** (`-1004427640174`) to search or download movies!\n\n"
+            "◈ **Mandatory Requirement:**\n"
+            "├─ 🍿 Join **CineVerse Search Group**\n"
+            "└─ ⚡ Access instant movie downloads & vault\n\n"
+            "👉 *Tap the button below to join the group first:*"
         )
         fsub_msg = await message.reply_text(
             fsub_text,
@@ -1628,6 +1729,11 @@ async def incoming_user_message_tracker(client: Client, message: Message):
         if getattr(message, "outgoing", False) or (message.from_user and message.from_user.is_bot):
             return
 
+        # Unauthorized Group Protection: If message is in an unauthorized group, check & leave immediately
+        if message.chat and message.chat.type in [enums.ChatType.GROUP, enums.ChatType.SUPERGROUP]:
+            if not await check_group_authorization(client, message):
+                return
+
         # Auto-delete incoming user messages in Private Chats and Groups
         if message.chat and message.chat.type in [
             enums.ChatType.PRIVATE,
@@ -1649,6 +1755,14 @@ async def incoming_user_message_tracker(client: Client, message: Message):
 async def service_message_cleaner(client: Client, message: Message):
     if is_duplicate_message(message):
         return
+
+    # Unauthorized Group Protection: If bot was added to a group
+    if getattr(message, "new_chat_members", None):
+        me = await client.get_me()
+        if any(u.id == me.id for u in message.new_chat_members):
+            if not await check_group_authorization(client, message):
+                return
+
     asyncio.create_task(auto_delete(message, 60))
 
 # ---------------------------------------------------------------------------
@@ -1666,6 +1780,11 @@ async def auto_filter_handler(client: Client, message: Message):
     if not message.from_user:
         return
     user_id = message.from_user.id
+
+    # Unauthorized Group Protection: Check group authorization before responding
+    if message.chat and message.chat.type in [enums.ChatType.GROUP, enums.ChatType.SUPERGROUP]:
+        if not await check_group_authorization(client, message):
+            return
 
     # 1. Enforce 60-second auto-delete on user message
     asyncio.create_task(auto_delete(message, 60))
@@ -1715,14 +1834,14 @@ async def auto_filter_handler(client: Client, message: Message):
             fsub_text = (
                 "┌──────────────────────────────────────────┐\n"
                 "│   🔒  A C C E S S   R E Q U I R E D      │\n"
-                "│        Official Membership Gate          │\n"
+                "│      CineVerse Search Group Member Gate  │\n"
                 "└──────────────────────────────────────────┘\n\n"
                 f"👋 Hello **{user_name}**,\n\n"
-                "To unlock private access and direct high-speed movie downloads, please join our official network channels below:\n\n"
-                "◈ Channels to Join:\n"
-                "├─ 🟢 **1. CineVerse Request Group** (Discussions & Requests)\n"
-                "└─ 📢 **2. CineVerse Backup Channel** (Updates & Vault)\n\n"
-                "⚡ *After joining both, tap 'Verify & Continue' below.*"
+                "You **MUST** be a member of **CineVerse Search Group** (`-1004427640174`) to search or download movies!\n\n"
+                "◈ **Mandatory Requirement:**\n"
+                "├─ 🍿 Join **CineVerse Search Group**\n"
+                "└─ ⚡ Access instant movie downloads & vault\n\n"
+                "👉 *Tap the button below to join the group first:*"
             )
             fsub_markup = build_force_join_markup("cb_check_join")
             pm_msg = await message.reply_text(
@@ -1762,7 +1881,29 @@ async def auto_filter_handler(client: Client, message: Message):
             asyncio.create_task(auto_delete(pm_msg, 60, reply_to_message=message))
         return
 
-    # 4. Group Search: Handle queries < 2 chars as invalid queries
+    # 4. Mandatory Group Member Check (Force-Sub)
+    if not await is_user_joined_group(client, user_id):
+        fsub_text = (
+            "┌──────────────────────────────────────────┐\n"
+            "│   🔒  A C C E S S   R E Q U I R E D      │\n"
+            "│      CineVerse Search Group Member Gate  │\n"
+            "└──────────────────────────────────────────┘\n\n"
+            f"👋 Hello {message.from_user.mention},\n\n"
+            "You **MUST** be a member of **CineVerse Search Group** (`-1004427640174`) to search or download movies!\n\n"
+            "👉 *Tap the button below to join the group first:*"
+        )
+        fsub_markup = build_force_join_markup("cb_check_join")
+        block_msg = await message.reply_text(
+            fsub_text,
+            reply_markup=fsub_markup,
+            quote=True,
+            disable_web_page_preview=True
+        )
+        if block_msg:
+            asyncio.create_task(auto_delete(block_msg, 60, reply_to_message=message))
+        return
+
+    # 5. Group Search: Handle queries < 2 chars as invalid queries
     if len(text) < 2:
         short_msg = await message.reply_text(
             "┌──────────────────────────────────────────┐\n"
@@ -1842,19 +1983,19 @@ async def callback_router(client: Client, query: CallbackQuery):
                     "│   ✅  A C C E S S   G R A N T E D        │\n"
                     "│       Membership Verified & Unlocked     │\n"
                     "└──────────────────────────────────────────┘\n\n"
-                    "🎉 **Welcome to CineVerse Cinematic Vault!**\n\n"
-                    "You are now fully verified in both **CineVerse Request Group** and **Backup Channel**.\n\n"
+                    "🎉 **Welcome to CineVerse Search Network!**\n\n"
+                    "Your membership in **CineVerse Search Group** has been verified successfully.\n\n"
                     "◈ **Next Step:**\n"
-                    "💬 Search and request any movie directly in our main Search Group below!",
+                    "💬 Search any movie title directly in CineVerse Search Group below!",
                     reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🍿 Open CineVerse Search Group ↗", url=SEARCH_GROUP_LINK)],
-                        [InlineKeyboardButton("🟢 Request Group", url=REQ_GROUP_LINK), InlineKeyboardButton("📢 Backup Channel", url=BACKUP_CHANNEL_LINK)]
+                        [InlineKeyboardButton("🍿 Open CineVerse Search Group ↗", url=SEARCH_GROUP_LINK)]
                     ])
                 )
             except Exception:
                 pass
         else:
-            await query.answer("❌ You haven't joined both groups yet! Please join both and click Try Again.", show_alert=True)
+            await query.answer("❌ You haven't joined CineVerse Search Group yet! Please join first.", show_alert=True)
+        return
 
     elif data == "cb_close":
         try:
@@ -2162,9 +2303,31 @@ async def callback_router(client: Client, query: CallbackQuery):
     elif data.startswith("get_"):
         msg_id = int(data.split("_")[1])
 
-        # Strict Force Join Check (Even for Admins/Owner)
+        # Strict Force Join Check (CineVerse Search Group)
         if not await is_user_joined_group(client, user_id):
-            await query.answer("❌ You haven't joined both groups yet! Please join both first.", show_alert=True)
+            await query.answer("❌ You must join CineVerse Search Group first!", show_alert=True)
+            user_name = query.from_user.first_name if query.from_user else "Friend"
+            fsub_text = (
+                "┌──────────────────────────────────────────┐\n"
+                "│   🔒  A C C E S S   R E Q U I R E D      │\n"
+                "│      CineVerse Search Group Member Gate  │\n"
+                "└──────────────────────────────────────────┘\n\n"
+                f"👋 Hello **{user_name}**,\n\n"
+                "You **MUST** be a member of **CineVerse Search Group** (`-1004427640174`) to download movies!\n\n"
+                "👉 *Tap the button below to join the group first:*"
+            )
+            fsub_markup = build_force_join_markup(f"get_{msg_id}")
+            try:
+                block_msg = await query.message.reply_text(
+                    fsub_text,
+                    reply_markup=fsub_markup,
+                    quote=True,
+                    disable_web_page_preview=True
+                )
+                if block_msg:
+                    asyncio.create_task(auto_delete(block_msg, 60, reply_to_message=query.message))
+            except Exception:
+                pass
             return
 
         # Code-Level Deduplication Lock for file delivery callbacks
@@ -2192,7 +2355,7 @@ async def callback_router(client: Client, query: CallbackQuery):
     elif data.startswith("check_token_"):
         token = data.split("_", 2)[2]
         if not await is_user_joined_group(client, user_id):
-            await query.answer("❌ You haven't joined both groups yet! Please join both first.", show_alert=True)
+            await query.answer("❌ You must join CineVerse Search Group first!", show_alert=True)
             return
 
         delivered_msg_id = await db.verify_and_consume_token(token, user_id)

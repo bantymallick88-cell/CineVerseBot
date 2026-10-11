@@ -982,14 +982,44 @@ async def auto_filter_handler(client: Client, message: Message):
     # 3. Force Join Group Requirement: Check membership in Target Request Group (-1003982672894) AND Backup Channel (-1003423603865)
     if not await is_user_joined_group(client, user_id):
         user_name = message.from_user.first_name if message.from_user and message.from_user.first_name else "Friend"
-        fsub_msg = await message.reply_text(
-            f"HEY {user_name}, YOU CAN'T GET ANYTHING FROM HERE. JOIN OUR GROUPS TO GET FILES! 👇",
-            reply_markup=build_force_join_markup("cb_check_join"),
-            quote=True,
-            disable_web_page_preview=True
-        )
-        if fsub_msg:
-            asyncio.create_task(auto_delete(fsub_msg, 120))
+        fsub_text = f"HEY {user_name}, YOU CAN'T GET ANYTHING FROM HERE. JOIN OUR GROUPS TO GET FILES! 👇"
+        fsub_markup = build_force_join_markup("cb_check_join")
+
+        # Send buttons strictly in user's personal chat (PM)
+        pm_sent = None
+        try:
+            pm_sent = await client.send_message(
+                chat_id=user_id,
+                text=fsub_text,
+                reply_markup=fsub_markup,
+                disable_web_page_preview=True
+            )
+            if pm_sent:
+                asyncio.create_task(auto_delete(pm_sent, 120))
+        except Exception as e:
+            logger.warning(f"Could not send force-join PM to {user_id}: {e}")
+
+        # If search query was sent in group, send 1-line notice in group (no buttons in group)
+        if message.chat.type != enums.ChatType.PRIVATE:
+            group_notice = await message.reply_text(
+                f"Hey {user_name}, please check your PM to unlock files!",
+                quote=True
+            )
+            if group_notice:
+                asyncio.create_task(auto_delete(group_notice, 120))
+        elif not pm_sent:
+            # Fallback if in PM and direct send_message errored
+            try:
+                reply_msg = await message.reply_text(
+                    fsub_text,
+                    reply_markup=fsub_markup,
+                    quote=True,
+                    disable_web_page_preview=True
+                )
+                if reply_msg:
+                    asyncio.create_task(auto_delete(reply_msg, 120))
+            except Exception:
+                pass
         return
 
     # 4. Block Direct PM Search & Show Redirect Button
@@ -1293,28 +1323,45 @@ async def callback_router(client: Client, query: CallbackQuery):
 
     elif data.startswith("get_"):
         if not await is_user_joined_group(client, user_id):
-            await query.answer("⚠️ You must join our groups to get files!", show_alert=True)
+            await query.answer("Hey! Please check your PM to unlock files!", show_alert=True)
             user_name = query.from_user.first_name if query.from_user and query.from_user.first_name else "Friend"
             fsub_text = f"HEY {user_name}, YOU CAN'T GET ANYTHING FROM HERE. JOIN OUR GROUPS TO GET FILES! 👇"
             reply_markup = build_force_join_markup(retry_callback=data)
+
+            # Send buttons strictly in user's personal chat (PM)
+            pm_sent = None
             try:
-                sent_msg = await client.send_message(
+                pm_sent = await client.send_message(
                     chat_id=query.from_user.id,
                     text=fsub_text,
                     reply_markup=reply_markup,
                     disable_web_page_preview=True
                 )
-                if sent_msg:
-                    asyncio.create_task(auto_delete(sent_msg, 120))
-            except Exception:
+                if pm_sent:
+                    asyncio.create_task(auto_delete(pm_sent, 120))
+            except Exception as e:
+                logger.warning(f"Could not send force-join PM to {query.from_user.id}: {e}")
+
+            # If clicked in a group, send 1-line notice in group (no buttons in group)
+            if query.message and query.message.chat.type != enums.ChatType.PRIVATE:
                 try:
-                    sent_msg = await query.message.reply_text(
+                    group_notice = await query.message.reply_text(
+                        f"Hey {user_name}, please check your PM to unlock files!",
+                        quote=True
+                    )
+                    if group_notice:
+                        asyncio.create_task(auto_delete(group_notice, 120))
+                except Exception:
+                    pass
+            elif not pm_sent and query.message:
+                try:
+                    reply_msg = await query.message.reply_text(
                         fsub_text,
                         reply_markup=reply_markup,
                         disable_web_page_preview=True
                     )
-                    if sent_msg:
-                        asyncio.create_task(auto_delete(sent_msg, 120))
+                    if reply_msg:
+                        asyncio.create_task(auto_delete(reply_msg, 120))
                 except Exception:
                     pass
             return

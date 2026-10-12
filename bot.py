@@ -1932,21 +1932,41 @@ async def index_handler(client: Client, message: Message):
     asyncio.create_task(auto_delete(message, 60))
     await db.add_user(user_id)
 
+    target_channel = -1004312780149
     status_msg = await message.reply_text(
-        "⏳ **Starting Full Channel Indexing...**\n\n"
-        f"• **Channel ID:** `{-1004312780149}`\n"
-        "• Resolving channel peer and syncing vault...",
+        "⏳ **Starting Channel Indexing...**\n\n"
+        f"• **Target Channel:** `{target_channel}`\n"
+        "• Resolving channel access...",
         quote=True
     )
 
-    channel_id = -1004312780149
-    channel_name = "Odia flim data base"
+    chat = None
     try:
-        target_chat = await client.get_chat(-1004312780149)
-        channel_id = target_chat.id
-        channel_name = getattr(target_chat, "title", "Odia flim data base")
+        # Method 1: Integer ID direct fetch
+        chat = await client.get_chat(int(target_channel))
     except Exception as e:
-        logger.error(f"Failed to resolve channel peer: {e}")
+        logger.warning(f"Direct get_chat failed for {target_channel}: {e}")
+        try:
+            # Method 2: Access via dialogs / cache refresh
+            async for dialog in client.get_dialogs():
+                if dialog.chat and dialog.chat.id == target_channel:
+                    chat = dialog.chat
+                    break
+        except Exception as e2:
+            logger.error(f"Dialog search failed: {e2}")
+
+    # Fallback to known username if still unresolved
+    if not chat:
+        for fallback_user in ["cenahub01", "@cenahub01"]:
+            try:
+                chat = await client.get_chat(fallback_user)
+                if chat:
+                    break
+            except Exception:
+                pass
+
+    channel_name = getattr(chat, "title", "Odia flim data base") if chat else "Odia flim data base"
+    scan_target = chat.id if chat else target_channel
 
     total_scanned = 0
     total_media = 0
@@ -1955,15 +1975,15 @@ async def index_handler(client: Client, message: Message):
     last_update = time.time()
 
     try:
-        # Stream all historical messages directly from resolved channel peer
-        async for msg in client.get_chat_history(channel_id):
-            total_scanned += 1
+        # Scan channel history once resolved
+        async for msg in client.get_chat_history(scan_target):
             if not msg or getattr(msg, "empty", False):
                 continue
+            total_scanned += 1
 
-            media = msg.video or msg.document or msg.audio or msg.animation
-            if media:
+            if msg.media or msg.document or msg.video:
                 total_media += 1
+                media = msg.video or msg.document or msg.audio or msg.animation
                 raw_caption = msg.caption.strip() if msg.caption else ""
                 file_name = getattr(media, "file_name", None) or ""
 
@@ -1992,7 +2012,7 @@ async def index_handler(client: Client, message: Message):
                 try:
                     await status_msg.edit_text(
                         f"⏳ **Indexing in Progress...**\n\n"
-                        f"• **Channel:** `{channel_name}` (`{channel_id}`)\n"
+                        f"• **Channel:** `{channel_name}` (`{scan_target}`)\n"
                         f"• **Messages Scanned:** `{total_scanned}`\n"
                         f"• **Videos/Files Found:** `{total_media}`\n"
                         f"• **Newly Added:** `{total_new}`\n"
@@ -2011,7 +2031,7 @@ async def index_handler(client: Client, message: Message):
         stats = await db.get_stats()
         await status_msg.edit_text(
             f"✅ **Full Channel Indexing Complete!**\n\n"
-            f"• **Channel:** `{channel_name}` (`{channel_id}`)\n"
+            f"• **Channel:** `{channel_name}` (`{scan_target}`)\n"
             f"• **Total Messages Scanned:** `{total_scanned}`\n"
             f"• **Total Videos/Files Identified:** `{total_media}`\n"
             f"• **New Titles Imported:** `{total_new}`\n"
@@ -2035,7 +2055,7 @@ async def index_handler(client: Client, message: Message):
             f"🎬 **Total Movies in Database:** `{stats['movies']}`"
         )
     except Exception as e:
-        logger.error(f"Error streaming channel history for {channel_id}: {e}", exc_info=True)
+        logger.error(f"Error streaming channel history for {scan_target}: {e}", exc_info=True)
         if batch_buffer:
             await db.add_movies_batch(batch_buffer)
             batch_buffer.clear()
@@ -3017,7 +3037,7 @@ async def set_bot_commands(client: Client):
     try:
         public_commands = [
             BotCommand("start", "Start Bot"),
-            BotCommand("help", "Help"),
+            BotCommand("help", "Help Guide"),
             BotCommand("about", "About Bot"),
             BotCommand("dmca", "DMCA Takedown Notice"),
         ]
@@ -3029,9 +3049,9 @@ async def set_bot_commands(client: Client):
     try:
         await client.set_bot_commands(
             [
-                BotCommand("index", "Index All Database Files"),
+                BotCommand("index", "Index All Movies (Owner)"),
                 BotCommand("start", "Start Bot"),
-                BotCommand("help", "Help"),
+                BotCommand("help", "Help Guide"),
                 BotCommand("about", "About Bot")
             ],
             scope=BotCommandScopeChat(chat_id=783110149)

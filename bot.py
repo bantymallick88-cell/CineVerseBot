@@ -254,6 +254,24 @@ class Database:
                 """)
             except Exception as e:
                 logger.warning(f"Note on deduplicating movies table: {e}")
+
+            # Ensure files VIEW or movies VIEW exists to support both files and movies tables interchangeably
+            try:
+                tables_info = [r[0].lower() for r in conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'view');").fetchall()]
+                if "files" not in tables_info and "movies" in tables_info:
+                    conn.execute("""
+                        CREATE VIEW IF NOT EXISTS files AS 
+                        SELECT file_id, title AS file_name, file_size, message_id, title AS caption 
+                        FROM movies;
+                    """)
+                elif "files" in tables_info and "movies" not in tables_info:
+                    conn.execute("""
+                        CREATE VIEW IF NOT EXISTS movies AS 
+                        SELECT file_id, file_name AS title, file_size, message_id 
+                        FROM files;
+                    """)
+            except Exception as e:
+                logger.warning(f"Note checking files/movies view: {e}")
             conn.commit()
 
     def _increment_user_warning(self, user_id: int, chat_id: int) -> int:
@@ -362,62 +380,169 @@ class Database:
             logger.error(f"Error inserting batch: {e}")
             return 0
 
-    def _search_files(self, query: str, offset: int = 0, limit: int = PAGE_SIZE) -> Tuple[List[Dict[str, Any]], int]:
-        words = [w.strip() for w in query.split() if w.strip()]
-        if not words:
-            return [], 0
+    def _detect_table_and_columns(self, conn: sqlite3.Connection) -> Tuple[str, str, str, Optional[str], Optional[str]]:
+        try:
+            cur = conn.cursor()
+            tables = [r[0].lower() for r in cur.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'view');").fetchall()]
 
-        conditions = []
-        params = []
-        for w in words:
-            if w.upper().startswith("S") and len(w) == 3 and w[1:].isdigit():
-                season_num = int(w[1:])
-                conditions.append("(title LIKE ? OR title LIKE ? OR title LIKE ? OR title LIKE ?)")
-                params.extend([
-                    f"%S{season_num:02d}%",
-                    f"%S{season_num}%",
-                    f"%Season {season_num}%",
-                    f"%Season {season_num:02d}%"
-                ])
-            elif w.upper() in ["S15+", "S15"]:
-                conditions.append("(title LIKE '%S15%' OR title LIKE '%Season 15%' OR title LIKE '%S16%' OR title LIKE '%Season 16%')")
-            elif w.upper() == "4K":
-                conditions.append("(title LIKE '%4K%' OR title LIKE '%2160p%' OR title LIKE '%UHD%')")
-            elif w.upper() == "HEVC":
-                conditions.append("(title LIKE '%HEVC%' OR title LIKE '%x265%')")
-            elif w.lower() == "odia":
-                conditions.append("(title LIKE '%Odia%' OR title LIKE '%Oriya%')")
-            elif w.lower() == "bengali":
-                conditions.append("(title LIKE '%Bengali%' OR title LIKE '%Bangla%')")
+            # Prefer 'files' table/view if available, else 'movies'
+            if "files" in tables:
+                target_table = "files"
+            elif "movies" in tables:
+                target_table = "movies"
             else:
-                conditions.append("title LIKE ?")
-                params.append(f"%{w}%")
+                user_tables = [t for t in tables if not t.startswith("sqlite_") and t not in (
+                    "users", "approved_users", "disapproved_users", "file_tokens", "authorized_groups", "user_downloads", "group_warnings"
+                )]
+                target_table = user_tables[0] if user_tables else "files"
 
-        where_sql = " AND ".join(conditions)
+            col_info = cur.execute(f"PRAGMA table_info({target_table});").fetchall()
+            col_names = [c[1] for c in col_info]
+            col_names_lower = [c.lower() for c in col_names]
 
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            count_sql = f"SELECT COUNT(*) FROM (SELECT 1 FROM movies WHERE {where_sql} GROUP BY title, file_size);"
-            total = cursor.execute(count_sql, params).fetchone()[0]
-            if total == 0:
+            # Detect title / file_name column
+            if "file_name" in col_names_lower:
+                title_col = col_names[col_names_lower.index("file_name")]
+            elif "title" in col_names_lower:
+                title_col = col_names[col_names_lower.index("title")]
+            elif "caption" in col_names_lower:
+                title_col = col_names[col_names_lower.index("caption")]
+            elif "name" in col_names_lower:
+                title_col = col_names[col_names_lower.index("name")]
+            else:
+                title_col = col_names[1] if len(col_names) > 1 else "file_name"
+
+            # Detect file_id column
+            if "file_id" in col_names_lower:
+                file_id_col = col_names[col_names_lower.index("file_id")]
+            elif "id" in col_names_lower:
+                file_id_col = col_names[col_names_lower.index("id")]
+            else:
+                file_id_col = col_names[0] if col_names else "file_id"
+
+            # Detect file_size column
+            if "file_size" in col_names_lower:
+                size_col = col_names[col_names_lower.index("file_size")]
+            elif "size" in col_names_lower:
+                size_col = col_names[col_names_lower.index("size")]
+            else:
+                size_col = None
+
+            # Detect message_id column
+            if "message_id" in col_names_lower:
+                msg_id_col = col_names[col_names_lower.index("message_id")]
+            elif "msg_id" in col_names_lower:
+                msg_id_col = col_names[col_names_lower.index("msg_id")]
+            else:
+                msg_id_col = None
+
+            return target_table, title_col, file_id_col, size_col, msg_id_col
+        except Exception as e:
+            logger.error(f"Error detecting table columns: {e}")
+            return "files", "file_name", "file_id", "file_size", "message_id"
+
+    def _search_files(self, query: str, offset: int = 0, limit: int = PAGE_SIZE) -> Tuple[List[Dict[str, Any]], int]:
+        try:
+            words = [w.strip() for w in query.split() if w.strip()]
+            if not words:
                 return [], 0
 
-            search_sql = f"""
-                SELECT file_id, title, file_size, MAX(message_id) AS message_id 
-                FROM movies 
-                WHERE {where_sql} 
-                GROUP BY title, file_size 
-                ORDER BY message_id DESC 
-                LIMIT ? OFFSET ?;
-            """
-            cursor.execute(search_sql, params + [limit, offset])
-            rows = [dict(row) for row in cursor.fetchall()]
-            return rows, total
+            with self._get_connection() as conn:
+                target_table, title_col, file_id_col, size_col, msg_id_col = self._detect_table_and_columns(conn)
+
+                conditions = []
+                params: List[Any] = []
+                for w in words:
+                    if w.upper().startswith("S") and len(w) == 3 and w[1:].isdigit():
+                        season_num = int(w[1:])
+                        conditions.append(f"({title_col} LIKE ? OR {title_col} LIKE ? OR {title_col} LIKE ? OR {title_col} LIKE ?)")
+                        params.extend([
+                            f"%S{season_num:02d}%",
+                            f"%S{season_num}%",
+                            f"%Season {season_num}%",
+                            f"%Season {season_num:02d}%"
+                        ])
+                    elif w.upper() in ["S15+", "S15"]:
+                        conditions.append(f"({title_col} LIKE ? OR {title_col} LIKE ? OR {title_col} LIKE ? OR {title_col} LIKE ?)")
+                        params.extend(["%S15%", "%Season 15%", "%S16%", "%Season 16%"])
+                    elif w.upper() == "4K":
+                        conditions.append(f"({title_col} LIKE ? OR {title_col} LIKE ? OR {title_col} LIKE ?)")
+                        params.extend(["%4K%", "%2160p%", "%UHD%"])
+                    elif w.upper() == "HEVC":
+                        conditions.append(f"({title_col} LIKE ? OR {title_col} LIKE ?)")
+                        params.extend(["%HEVC%", "%x265%"])
+                    elif w.lower() == "odia":
+                        conditions.append(f"({title_col} LIKE ? OR {title_col} LIKE ?)")
+                        params.extend(["%Odia%", "%Oriya%"])
+                    elif w.lower() == "bengali":
+                        conditions.append(f"({title_col} LIKE ? OR {title_col} LIKE ?)")
+                        params.extend(["%Bengali%", "%Bangla%"])
+                    else:
+                        conditions.append(f"{title_col} LIKE ?")
+                        params.append(f"%{w}%")
+
+                where_sql = " AND ".join(conditions)
+
+                cursor = conn.cursor()
+                count_sql = f"SELECT COUNT(*) FROM {target_table} WHERE {where_sql};"
+                total_res = cursor.execute(count_sql, params).fetchone()
+                total = int(total_res[0]) if total_res else 0
+                if total == 0:
+                    return [], 0
+
+                order_clause = f"ORDER BY {msg_id_col} DESC" if msg_id_col else ""
+                search_sql = f"SELECT * FROM {target_table} WHERE {where_sql} {order_clause} LIMIT ? OFFSET ?;"
+                cursor.execute(search_sql, params + [limit, offset])
+                raw_rows = cursor.fetchall()
+
+                normalized_rows: List[Dict[str, Any]] = []
+                for row in raw_rows:
+                    r = dict(row)
+                    name = str(r.get(title_col) or r.get("file_name") or r.get("title") or r.get("caption") or "Movie")
+                    f_id = str(r.get(file_id_col) or r.get("file_id") or r.get("id") or "")
+                    f_size = int(r.get(size_col) if size_col else (r.get("file_size") or 0))
+                    m_id = int(r.get(msg_id_col) if msg_id_col else (r.get("message_id") or r.get("msg_id") or 0))
+                    cap = str(r.get("caption") or name)
+
+                    normalized_rows.append({
+                        "file_id": f_id,
+                        "title": name,
+                        "file_name": name,
+                        "file_size": f_size,
+                        "message_id": m_id,
+                        "caption": cap
+                    })
+
+                return normalized_rows, total
+        except Exception as e:
+            logger.error(f"Database search exception for query '{query}': {e}", exc_info=True)
+            return [], 0
 
     def _get_file_by_msg_id(self, message_id: int) -> Optional[Dict[str, Any]]:
-        with self._get_connection() as conn:
-            row = conn.execute("SELECT file_id, title, file_size, message_id FROM movies WHERE message_id = ?;", (message_id,)).fetchone()
-            return dict(row) if row else None
+        try:
+            with self._get_connection() as conn:
+                target_table, title_col, file_id_col, size_col, msg_id_col = self._detect_table_and_columns(conn)
+                msg_col = msg_id_col or "message_id"
+                row = conn.execute(f"SELECT * FROM {target_table} WHERE {msg_col} = ? LIMIT 1;", (message_id,)).fetchone()
+                if not row:
+                    return None
+                r = dict(row)
+                name = str(r.get(title_col) or r.get("file_name") or r.get("title") or r.get("caption") or "Movie")
+                f_id = str(r.get(file_id_col) or r.get("file_id") or r.get("id") or "")
+                f_size = int(r.get(size_col) if size_col else (r.get("file_size") or 0))
+                m_id = int(r.get(msg_col) or message_id)
+                cap = str(r.get("caption") or name)
+                return {
+                    "file_id": f_id,
+                    "title": name,
+                    "file_name": name,
+                    "file_size": f_size,
+                    "message_id": m_id,
+                    "caption": cap
+                }
+        except Exception as e:
+            logger.error(f"Error fetching file by message_id {message_id}: {e}")
+            return None
 
     def _get_stats(self) -> Dict[str, int]:
         with self._get_connection() as conn:
@@ -2219,12 +2344,19 @@ async def auto_filter_handler(client: Client, message: Message):
         logger.error(f"❌ Database/Search error processing '{text}' in chat {message.chat.id}: {e}", exc_info=True)
         print(f"❌ Database/Search error for '{text}' in chat {message.chat.id}: {e}")
         try:
-            err_msg = await message.reply_text(
-                f"⚠️ Error executing search for `{text}`. Please try again shortly.",
-                quote=True
+            fallback_msg = await message.reply_text(
+                "┌──────────────────────────────────────────┐\n"
+                "│   ❌  F I L E   N O T   F O U N D        │\n"
+                "└──────────────────────────────────────────┘\n\n"
+                f"◈ **Searched:** `{text}`\n"
+                "├─ ⚠️ No matching file available in current vault.\n"
+                "├─ 💡 Tip: Check spelling or try searching with release year.\n"
+                f"└─ 🍿 Request new titles in our Request Group: {REQ_GROUP_LINK}",
+                quote=True,
+                disable_web_page_preview=True
             )
-            if err_msg:
-                asyncio.create_task(auto_delete(err_msg, 30, reply_to_message=message))
+            if fallback_msg:
+                asyncio.create_task(auto_delete(fallback_msg, 60, reply_to_message=message))
         except Exception:
             pass
 

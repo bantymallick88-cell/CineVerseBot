@@ -1963,16 +1963,24 @@ async def index_handler(client: Client, message: Message):
     try:
         target_chat = await client.get_chat(-1004312780149)
     except Exception as e:
-        logger.warning(f"Direct get_chat(-1004312780149) error: {e}. Checking dialogs fallback...")
-        try:
-            async for dialog in client.get_dialogs():
-                if dialog.chat and dialog.chat.id == DB_CHANNEL:
+        logger.warning(f"Direct get_chat(-1004312780149) notice: {e}")
+
+    try:
+        async for dialog in client.get_dialogs():
+            if dialog.chat and dialog.chat.id == DB_CHANNEL:
+                if not target_chat:
                     target_chat = dialog.chat
-                    if getattr(dialog, "top_message", None):
-                        max_id = dialog.top_message.id
-                    break
-        except Exception as e2:
-            logger.error(f"Dialog fallback failed for {DB_CHANNEL}: {e2}")
+                if getattr(dialog, "top_message", None):
+                    max_id = dialog.top_message.id
+                break
+    except Exception as e2:
+        logger.warning(f"Dialog lookup notice: {e2}")
+
+    if not target_chat:
+        try:
+            target_chat = await client.get_chat("cenahub01")
+        except Exception:
+            pass
 
     if not target_chat:
         await status_msg.edit_text(
@@ -1981,23 +1989,9 @@ async def index_handler(client: Client, message: Message):
         )
         return
 
+    # Direct resolution without sending probe message to prevent FloodWait
     if max_id <= 0:
-        try:
-            async for dialog in client.get_dialogs():
-                if dialog.chat and dialog.chat.id == target_chat.id:
-                    if getattr(dialog, "top_message", None):
-                        max_id = dialog.top_message.id
-                    break
-        except Exception:
-            pass
-
-    if max_id <= 0:
-        try:
-            probe = await client.send_message(target_chat.id, "🔍 Testing indexing connection...")
-            max_id = probe.id
-            await probe.delete()
-        except Exception:
-            max_id = 15000
+        max_id = 20000
 
     # Iterate message IDs in batches of 100 backwards from max_id down to 1
     added = 0
@@ -2011,7 +2005,7 @@ async def index_handler(client: Client, message: Message):
             msg_ids = list(range(max(1, i - 99), i + 1))
             total_scanned += len(msg_ids)
             try:
-                msgs = await client.get_messages(target_chat.id, msg_ids)
+                msgs = await client.get_messages(-1004312780149, msg_ids)
                 if not msgs:
                     continue
                 if not isinstance(msgs, list):
@@ -2041,6 +2035,8 @@ async def index_handler(client: Client, message: Message):
                     ins_count = await db.add_movies_batch(batch_buffer)
                     added += ins_count
                     batch_buffer.clear()
+
+                await asyncio.sleep(0.02)
 
             except FloodWait as fw:
                 wait_time = int(getattr(fw, "value", getattr(fw, "x", 30)))

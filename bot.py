@@ -35,6 +35,7 @@ from pyrogram.types import (
     CallbackQuery,
     Message,
     BotCommand,
+    BotCommandScopeDefault,
     WebAppInfo
 )
 from pyrogram.errors import (
@@ -1645,12 +1646,18 @@ async def start_handler(client: Client, message: Message):
 async def stats_handler(client: Client, message: Message):
     if is_duplicate_message(message):
         return
-    asyncio.create_task(auto_delete(message, 60))
-    if not message.from_user or message.from_user.id != OWNER_ID:
-        denied_msg = await message.reply_text("❌ Access Denied: Permission required from Owner Banty.", quote=True)
+    user_id = message.from_user.id if message.from_user else None
+    if user_id != ADMIN_ID:
+        denied_msg = await message.reply_text(
+            "⚠️ Unauthorized command. This command is restricted to the Owner.",
+            quote=True
+        )
         if denied_msg:
-            asyncio.create_task(auto_delete(denied_msg, 60, reply_to_message=message))
+            asyncio.create_task(auto_delete(denied_msg, 10, reply_to_message=message))
+        asyncio.create_task(auto_delete(message, 10))
         return
+
+    asyncio.create_task(auto_delete(message, 60))
 
     stats = await db.get_stats()
     db_size = os.path.getsize(DB_FILE) if os.path.exists(DB_FILE) else 0
@@ -1888,13 +1895,18 @@ async def list_approved_handler(client: Client, message: Message):
 async def index_handler(client: Client, message: Message):
     if is_duplicate_message(message):
         return
-    asyncio.create_task(auto_delete(message, 60))
-    if not message.from_user or message.from_user.id != OWNER_ID:
-        denied_msg = await message.reply_text("❌ Access Denied: Permission required from Owner Banty.", quote=True)
+    user_id = message.from_user.id if message.from_user else None
+    if user_id != ADMIN_ID:
+        denied_msg = await message.reply_text(
+            "⚠️ Unauthorized command. This command is restricted to the Owner.",
+            quote=True
+        )
         if denied_msg:
-            asyncio.create_task(auto_delete(denied_msg, 60, reply_to_message=message))
+            asyncio.create_task(auto_delete(denied_msg, 10, reply_to_message=message))
+        asyncio.create_task(auto_delete(message, 10))
         return
 
+    asyncio.create_task(auto_delete(message, 60))
     await db.add_user(message.from_user.id)
     status_msg = await message.reply_text("⏳ **Starting Fast Channel Indexing...**", quote=True)
     
@@ -2552,12 +2564,9 @@ async def callback_router(client: Client, query: CallbackQuery):
             "└─ 3️⃣ **Receive:** Bot delivers the file directly to your PM instantly!\n\n"
             "◈ **Command Center:**\n"
             "├─ `/start` ─ Initialize bot & access main portal\n"
-            "├─ `/rules` ─ Community guidelines (EN / OD / HI)\n"
-            "├─ `/stats` ─ Live database and user metrics\n"
             "├─ `/help` ─ Interactive usage guide\n"
-            "├─ `/disclaimer` ─ Terms of service & legal notice\n"
-            "├─ `/dmca` ─ Content takedown request\n"
-            "└─ `/index` ─ Admin database channel sync\n\n"
+            "├─ `/about` ─ About CineVerse & developer\n"
+            "└─ `/dmca` ─ Content takedown request\n\n"
             "──────────────────────────────────────────\n"
             "⚡ *Powered by CineVerse Luxury Media Engine*"
         )
@@ -2948,7 +2957,7 @@ def start_flask_server():
 async def set_bot_commands(client: Client):
     """
     Sets official bot commands visible in public Telegram client menu.
-    Public users ONLY see: /start, /help, /about, /dmca.
+    Public users ONLY see: /start, /help, /about, /dmca via BotCommandScopeDefault().
     /index and /stats are strictly removed from public suggestions and restricted to OWNER_ID.
     """
     try:
@@ -2958,8 +2967,8 @@ async def set_bot_commands(client: Client):
             BotCommand("about", "About CineVerse bot & developer"),
             BotCommand("dmca", "DMCA takedown & copyright notice"),
         ]
-        await client.set_bot_commands(commands)
-        logger.info("✅ Bot commands updated: only /start, /help, /about, /dmca visible in public menu")
+        await client.set_bot_commands(commands, scope=BotCommandScopeDefault())
+        logger.info("✅ Bot commands updated: only /start, /help, /about, /dmca visible in public menu (BotCommandScopeDefault)")
     except Exception as e:
         logger.warning(f"Failed to set bot commands: {e}")
 

@@ -132,8 +132,12 @@ GPLINKS_API_KEY = os.getenv("GPLINKS_API_KEY") or get_env_str("GPLINKS_API_KEY",
 AROLINKS_API_KEY = GPLINKS_API_KEY  # Backward compatibility alias
 VERIFY_BASE_URL = os.getenv("VERIFY_BASE_URL", os.getenv("RENDER_EXTERNAL_URL", "")).strip()
 
-MAIN_GROUP_ID = get_env_int("MAIN_GROUP_ID", get_env_int("SEARCH_GROUP_ID", get_env_int("FSUB_GROUP_ID", -1004427640174)))
-MAIN_GROUP_LINK = get_env_str("MAIN_GROUP_LINK", get_env_str("SEARCH_GROUP_LINK", "https://t.me/CineVerseFlimSearch"))
+FSUB_CHANNEL_LINK = "https://t.me/CineVerseFlimSearch"
+FSUB_GROUP_ID = -1004427640174
+FSUB_GROUP_LINK = FSUB_CHANNEL_LINK
+
+MAIN_GROUP_ID = FSUB_GROUP_ID
+MAIN_GROUP_LINK = FSUB_CHANNEL_LINK
 REQUEST_GROUP_ID = get_env_int("REQUEST_GROUP_ID", get_env_int("REQ_GROUP_ID", -1003982672894))
 REQUEST_GROUP_LINK = get_env_str("REQUEST_GROUP_LINK", get_env_str("REQ_GROUP_LINK", "https://t.me/FlimRequest_01"))
 BACKUP_GROUP_ID = get_env_int("BACKUP_GROUP_ID", get_env_int("BACKUP_CHANNEL_ID", -1003423603865))
@@ -147,11 +151,9 @@ REQ_GROUP_ID = REQUEST_GROUP_ID
 REQ_GROUP_LINK = REQUEST_GROUP_LINK
 BACKUP_CHANNEL_ID = BACKUP_GROUP_ID
 BACKUP_CHANNEL_LINK = BACKUP_GROUP_LINK
-SEARCH_GROUP_ID = MAIN_GROUP_ID
-SEARCH_GROUP_LINK = MAIN_GROUP_LINK
-FSUB_GROUP_ID = REQ_GROUP_ID
-FSUB_GROUP_LINK = REQ_GROUP_LINK
-CHANNEL_LINK = SEARCH_GROUP_LINK
+SEARCH_GROUP_ID = FSUB_GROUP_ID
+SEARCH_GROUP_LINK = FSUB_CHANNEL_LINK
+CHANNEL_LINK = FSUB_CHANNEL_LINK
 DEVELOPER_LINK = get_env_str("DEVELOPER_LINK", f"tg://user?id={OWNER_ID}")
 WELCOME_IMAGE_URL = get_env_str(
     "WELCOME_IMAGE_URL",
@@ -1327,50 +1329,38 @@ async def check_chat_membership(client: Client, chat_id: Any, user_id: int, fall
         logger.warning(f"Error checking chat membership for {chat_id} (user {user_id}): {e}")
         return False
 
-async def is_user_joined_group(client: Client, user_id: int) -> bool:
-    """Strictly checks if user is a member of CineVerse Search Group / Request Group."""
-    if user_id == OWNER_ID or user_id in ADMIN_IDS:
+async def fsub_check(client: Client, user_id: int) -> bool:
+    """
+    Force Subscribe check for CineVerse:
+    - ADMIN_ID = 7831101047 and all admins completely BYPASS Force Subscribe check.
+    - Regular users are verified against official FSUB_GROUP_ID (-1004427640174) / CineVerseFlimSearch.
+    - Removed ALL hardcoded external spam/demo channels.
+    """
+    if user_id == 7831101047 or user_id == ADMIN_ID or user_id == OWNER_ID or user_id in ADMIN_IDS:
         return True
 
-    joined_req = await check_chat_membership(
+    return await check_chat_membership(
         client,
-        REQ_GROUP_ID,
+        FSUB_GROUP_ID,
         user_id,
-        fallback_username="FlimRequest_01"
+        fallback_username="CineVerseFlimSearch"
     )
-    if not joined_req and SEARCH_GROUP_ID != REQ_GROUP_ID:
-        joined_req = await check_chat_membership(
-            client,
-            SEARCH_GROUP_ID,
-            user_id,
-            fallback_username="CineVerseFlimSearch"
-        )
-    return joined_req
+
+async def is_user_joined_group(client: Client, user_id: int) -> bool:
+    return await fsub_check(client, user_id)
 
 async def is_user_fully_joined(client: Client, user_id: int) -> bool:
-    """Strictly checks if user has joined BOTH required channels: Request Group & Backup Channel."""
-    if user_id == OWNER_ID or user_id in ADMIN_IDS:
-        return True
-
-    has_group = await is_user_joined_group(client, user_id)
-    has_backup = await check_chat_membership(
-        client,
-        BACKUP_CHANNEL_ID,
-        user_id,
-        fallback_username="CineVersebackup"
-    )
-    return has_group and has_backup
+    return await fsub_check(client, user_id)
 
 async def is_authorized_user(user_id: int) -> bool:
-    if user_id == OWNER_ID or user_id in ADMIN_IDS:
+    if user_id == 7831101047 or user_id == ADMIN_ID or user_id == OWNER_ID or user_id in ADMIN_IDS:
         return True
     return await db.is_approved_user(user_id)
 
 def build_force_join_markup(retry_callback: str = "cb_check_join") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🍿 Join Request Group", url=REQ_GROUP_LINK),
-            InlineKeyboardButton("📢 Join Backup Channel", url=BACKUP_CHANNEL_LINK)
+            InlineKeyboardButton("🍿 Join CineVerse Channel", url=FSUB_CHANNEL_LINK)
         ],
         [
             InlineKeyboardButton("🔄 Try Again / Verified", callback_data=retry_callback)
@@ -1378,7 +1368,7 @@ def build_force_join_markup(retry_callback: str = "cb_check_join") -> InlineKeyb
     ])
 
 async def is_sender_chat_admin(client: Client, chat_id: int, user_id: int) -> bool:
-    if user_id == OWNER_ID or user_id in ADMIN_IDS:
+    if user_id == 7831101047 or user_id == OWNER_ID or user_id in ADMIN_IDS:
         return True
     try:
         member = await client.get_chat_member(chat_id, user_id)
@@ -1558,14 +1548,13 @@ async def start_handler(client: Client, message: Message):
             fsub_text = (
                 "┌──────────────────────────────────────────┐\n"
                 "│   🔒  A C C E S S   R E Q U I R E D      │\n"
-                "│    CineVerse Dual Channel Verification   │\n"
+                "│     CineVerse Force Subscribe Gate       │\n"
                 "└──────────────────────────────────────────┘\n\n"
                 f"👋 Hello **{user_name}**,\n\n"
-                "To unlock and receive your movie file, you **MUST** join both required channels:\n\n"
-                "◈ **Required Channels:**\n"
-                "├─ 🍿 **CineVerse Request Group**\n"
-                "└─ 📢 **CineVerse Backup Channel**\n\n"
-                "👉 *Join both channels below and tap 'Try Again / Verified':*"
+                "To unlock and receive your movie file, you **MUST** join our official channel:\n\n"
+                "◈ **Required Channel:**\n"
+                "└─ 🍿 **CineVerse Official** (`@CineVerseFlimSearch`)\n\n"
+                "👉 *Join below and tap 'Try Again / Verified':*"
             )
             fsub_msg = await message.reply_text(
                 fsub_text,
@@ -1614,14 +1603,13 @@ async def start_handler(client: Client, message: Message):
         fsub_text = (
             "┌──────────────────────────────────────────┐\n"
             "│   🔒  A C C E S S   R E Q U I R E D      │\n"
-            "│    CineVerse Dual Channel Verification   │\n"
+            "│     CineVerse Force Subscribe Gate       │\n"
             "└──────────────────────────────────────────┘\n\n"
             f"👋 Hello **{user_name}**,\n\n"
-            "To access CineVerse Bot features, you **MUST** join both required channels:\n\n"
-            "◈ **Required Channels:**\n"
-            "├─ 🍿 **CineVerse Request Group**\n"
-            "└─ 📢 **CineVerse Backup Channel**\n\n"
-            "👉 *Join both channels below and tap 'Try Again / Verified':*"
+            "To access CineVerse Bot features, you **MUST** join our official channel:\n\n"
+            "◈ **Required Channel:**\n"
+            "└─ 🍿 **CineVerse Official** (`@CineVerseFlimSearch`)\n\n"
+            "👉 *Join below and tap 'Try Again / Verified':*"
         )
         fsub_msg = await message.reply_text(
             fsub_text,
@@ -2330,14 +2318,13 @@ async def auto_filter_handler(client: Client, message: Message):
             fsub_text = (
                 "┌──────────────────────────────────────────┐\n"
                 "│   🔒  A C C E S S   R E Q U I R E D      │\n"
-                "│    CineVerse Dual Channel Verification   │\n"
+                "│     CineVerse Force Subscribe Gate       │\n"
                 "└──────────────────────────────────────────┘\n\n"
                 f"👋 Hello **{user_name}**,\n\n"
-                "To access CineVerse Bot search, you **MUST** join both required channels:\n\n"
-                "◈ **Required Channels:**\n"
-                "├─ 🍿 **CineVerse Request Group**\n"
-                "└─ 📢 **CineVerse Backup Channel**\n\n"
-                "👉 *Join both channels below and tap 'Try Again / Verified':*"
+                "To access CineVerse Bot search, you **MUST** join our official channel:\n\n"
+                "◈ **Required Channel:**\n"
+                "└─ 🍿 **CineVerse Official** (`@CineVerseFlimSearch`)\n\n"
+                "👉 *Join below and tap 'Try Again / Verified':*"
             )
             fsub_markup = build_force_join_markup("cb_check_join")
             pm_msg = await message.reply_text(
@@ -2383,14 +2370,13 @@ async def auto_filter_handler(client: Client, message: Message):
         fsub_text = (
             "┌──────────────────────────────────────────┐\n"
             "│   🔒  A C C E S S   R E Q U I R E D      │\n"
-            "│    CineVerse Dual Channel Verification   │\n"
+            "│     CineVerse Force Subscribe Gate       │\n"
             "└──────────────────────────────────────────┘\n\n"
             f"👋 Hello {user_name},\n\n"
-            "You **MUST** be a member of both channels to search and download movies!\n\n"
-            "◈ **Required Channels:**\n"
-            "├─ 🍿 **CineVerse Request Group**\n"
-            "└─ 📢 **CineVerse Backup Channel**\n\n"
-            "👉 *Join both channels below and tap 'Try Again / Verified':*"
+            "You **MUST** be a member of CineVerse to search and download movies!\n\n"
+            "◈ **Required Channel:**\n"
+            "└─ 🍿 **CineVerse Official** (`@CineVerseFlimSearch`)\n\n"
+            "👉 *Join below and tap 'Try Again / Verified':*"
         )
         fsub_markup = build_force_join_markup("cb_check_join")
         block_msg = await message.reply_text(
@@ -2505,7 +2491,7 @@ async def callback_router(client: Client, query: CallbackQuery):
                     "│       Membership Verified & Unlocked     │\n"
                     "└──────────────────────────────────────────┘\n\n"
                     "🎉 **Welcome to CineVerse Search Network!**\n\n"
-                    "Your membership in both required channels has been verified successfully.\n\n"
+                    "Your membership in CineVerse Channel has been verified successfully.\n\n"
                     "◈ **Next Step:**\n"
                     "💬 Search any movie title directly in CineVerse Search Group below!",
                     reply_markup=InlineKeyboardMarkup([
@@ -2515,7 +2501,7 @@ async def callback_router(client: Client, query: CallbackQuery):
             except Exception:
                 pass
         else:
-            await query.answer("❌ You must join BOTH required channels first!", show_alert=True)
+            await query.answer("❌ You must join CineVerse Channel first!", show_alert=True)
         return
 
     elif data == "cb_close":
@@ -2823,16 +2809,16 @@ async def callback_router(client: Client, query: CallbackQuery):
 
         # Strict Force Join Check (Request Group & Backup Channel)
         if not await is_user_fully_joined(client, user_id):
-            await query.answer("❌ You must join both Request Group and Backup Channel first!", show_alert=True)
+            await query.answer("❌ You must join CineVerse Channel first!", show_alert=True)
             user_name = query.from_user.first_name if query.from_user else "Friend"
             fsub_text = (
                 "┌──────────────────────────────────────────┐\n"
                 "│   🔒  A C C E S S   R E Q U I R E D      │\n"
-                "│      Join Both Channels to Continue      │\n"
+                "│     CineVerse Force Subscribe Gate       │\n"
                 "└──────────────────────────────────────────┘\n\n"
                 f"👋 Hello **{user_name}**,\n\n"
-                "You **MUST** be a member of both our **Request Group** and **Backup Channel** to download files!\n\n"
-                "👉 *Please join both channels using the buttons below, then tap Verified:* \n"
+                "You **MUST** be a member of **CineVerse Official** (`@CineVerseFlimSearch`) to download files!\n\n"
+                "👉 *Please join using the button below, then tap Verified:* \n"
             )
             fsub_markup = build_force_join_markup(f"get_{msg_id}")
             try:

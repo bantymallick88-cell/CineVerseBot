@@ -2049,8 +2049,8 @@ async def index_handler(client: Client, message: Message):
                 wait_time = int(getattr(fw, "value", getattr(fw, "x", 30)))
                 logger.warning(f"FloodWait during batch indexing: sleeping {wait_time}s")
                 await asyncio.sleep(wait_time)
-            except PeerIdInvalid:
-                logger.warning(f"PeerIdInvalid encountered for batch {msg_ids[0]}-{msg_ids[-1]}. Forcing entity resolution...")
+            except (PeerIdInvalid, RPCError) as rpc_err:
+                logger.warning(f"RPC Error / PeerIdInvalid encountered on batch {msg_ids[0]}-{msg_ids[-1]}: {rpc_err}. Re-resolving channel peer...")
                 try:
                     resolved_chat = await client.get_chat(DB_CHANNEL)
                     if resolved_chat and resolved_chat.id:
@@ -2071,10 +2071,10 @@ async def index_handler(client: Client, message: Message):
                                 if file_id and file_name:
                                     batch_buffer.append((file_id, str(file_name).strip(), file_size, msg.id))
                 except Exception as inner_e:
-                    logger.error(f"Error fetching batch after PeerIdInvalid resolution: {inner_e}")
+                    logger.error(f"Error fetching batch after RPC error recovery: {inner_e}")
                 await asyncio.sleep(0.2)
             except Exception as e:
-                logger.error(f"Error fetching batch: {e}")
+                logger.error(f"Error fetching batch {msg_ids[0]}-{msg_ids[-1]}: {e}")
 
             # Live progress update every 3 seconds
             if time.time() - last_update > 3:
@@ -3199,4 +3199,6 @@ def run_bot_safely():
 
 if __name__ == "__main__":
     run_bot_safely()
+
+# CineVerse Patch v2
 

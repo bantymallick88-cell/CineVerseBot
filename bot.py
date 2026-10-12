@@ -713,7 +713,7 @@ get_arolinks_short_url = get_gplinks_short_url
 async def get_file_download_short_url(file_msg_id: int) -> str:
     """
     Generates or retrieves cached GPLinks short URL for a file download button.
-    Encodes payload 'file_{file_msg_id}' to Base64, wraps via /redirect endpoint,
+    Constructs destination_url = f"https://cineversebot.onrender.com/redirect?file_id={file_msg_id}"
     and calls GPLinks shortener to enforce 1-page ad verification.
     Strictly wraps EVERY download button URL with GPLinks short URL.
     NEVER attaches raw target bot deep-links (https://t.me/...) directly to inline keyboard buttons.
@@ -721,9 +721,7 @@ async def get_file_download_short_url(file_msg_id: int) -> str:
     if file_msg_id in SHORT_URL_CACHE:
         return SHORT_URL_CACHE[file_msg_id]
 
-    raw_payload = f"file_{file_msg_id}"
-    base64_payload = base64.urlsafe_b64encode(raw_payload.encode("utf-8")).decode("utf-8")
-    destination_url = f"{get_redirect_base_url()}/redirect?payload={base64_payload}"
+    destination_url = f"https://cineversebot.onrender.com/redirect?file_id={file_msg_id}"
 
     short_url = await get_gplinks_short_url(destination_url)
     if short_url:
@@ -2538,83 +2536,31 @@ if flask_app:
 
     @flask_app.route("/redirect")
     def web_redirect_handler():
-        raw_payload = (request.args.get("payload") or "").strip() if request else ""
-        if raw_payload:
-            try:
-                padding = len(raw_payload) % 4
-                if padding:
-                    raw_payload += "=" * (4 - padding)
-                decoded_payload = base64.urlsafe_b64decode(raw_payload.encode("utf-8")).decode("utf-8").strip()
-            except Exception:
-                try:
-                    decoded_payload = base64.b64decode(raw_payload.encode("utf-8")).decode("utf-8").strip()
-                except Exception:
-                    decoded_payload = raw_payload
+        file_id = request.args.get("file_id") or request.args.get("payload") or ""
+        # Clean Base64 or direct parameter
+        if file_id.startswith("file_"):
+            start_param = file_id
         else:
-            file_id = (request.args.get("file_id") or request.args.get("id") or "").strip() if request else ""
-            decoded_payload = f"file_{file_id}" if file_id else ""
-
-        html = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Redirecting to CineVerse Bot...</title>
-    <script>
-        var decoded_payload = "{decoded_payload}";
-        window.location.href = "intent://t.me/CineVerseFilterBot?start=" + decoded_payload + "#Intent;scheme=tg;package=org.telegram.messenger;end";
-        setTimeout(function() {{
-            window.location.href = "https://t.me/CineVerseFilterBot?start=" + decoded_payload;
-        }}, 600);
-    </script>
-    <style>
-        body {{
-            background: #070a12;
-            color: #f8fafc;
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            height: 100vh;
-            margin: 0;
-            padding: 20px;
-            box-sizing: border-box;
-        }}
-        .card {{
-            background: rgba(14, 20, 32, 0.85);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            border-radius: 20px;
-            padding: 32px 24px;
-            text-align: center;
-            max-width: 440px;
-            width: 100%;
-            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6);
-        }}
-        h2 {{ margin: 0 0 12px 0; font-size: 1.3rem; color: #fff; }}
-        p {{ margin: 0 0 20px 0; font-size: 0.95rem; color: #94a3b8; line-height: 1.5; }}
-        .btn {{
-            display: inline-block;
-            background: linear-gradient(135deg, #00f0ff 0%, #3b82f6 50%, #9d4edd 100%);
-            color: #070a12;
-            font-weight: 700;
-            padding: 14px 28px;
-            border-radius: 12px;
-            text-decoration: none;
-            font-size: 1rem;
-            transition: transform 0.2s;
-        }}
-        .btn:hover {{ transform: scale(1.02); }}
-    </style>
-</head>
-<body>
-    <div class="card">
-        <h2>⚡ Returning to CineVerse Bot...</h2>
-        <p>Opening Telegram to deliver your requested movie file.</p>
-        <a class="btn" href="https://t.me/CineVerseFilterBot?start={decoded_payload}">Click here if not redirected automatically</a>
-    </div>
-</body>
-</html>"""
-        return html, 200, {"Content-Type": "text/html; charset=utf-8"}
+            start_param = f"file_{file_id}"
+            
+        # Return clean HTML that forces browser intent launch & manual button fallback
+        html_content = f'''
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta http-equiv="refresh" content="0;url=https://t.me/CineVerseFilterBot?start={start_param}">
+            <script type="text/javascript">
+                window.location.href = "https://t.me/CineVerseFilterBot?start={start_param}";
+            </script>
+        </head>
+        <body style="background:#0f172a; color:#fff; font-family:sans-serif; text-align:center; padding-top:50px;">
+            <h2>Redirecting to CineVerse Bot...</h2>
+            <p>If not redirected automatically, tap below:</p>
+            <a href="https://t.me/CineVerseFilterBot?start={start_param}" style="background:#22c55e; color:#fff; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; margin-top:15px; font-weight:bold;">Open File in Telegram</a>
+        </body>
+        </html>
+        '''
+        return html_content, 200, {'Content-Type': 'text/html'}
 
     @flask_app.route("/verify")
     @flask_app.route("/verification")
@@ -2656,85 +2602,32 @@ def start_flask_server():
                     if self.path.startswith("/redirect"):
                         parsed = urllib.parse.urlparse(self.path)
                         qs = urllib.parse.parse_qs(parsed.query)
-                        raw_payload = (qs.get("payload", [""])[0]).strip()
-                        if raw_payload:
-                            try:
-                                padding = len(raw_payload) % 4
-                                if padding:
-                                    raw_payload += "=" * (4 - padding)
-                                decoded_payload = base64.urlsafe_b64decode(raw_payload.encode("utf-8")).decode("utf-8").strip()
-                            except Exception:
-                                try:
-                                    decoded_payload = base64.b64decode(raw_payload.encode("utf-8")).decode("utf-8").strip()
-                                except Exception:
-                                    decoded_payload = raw_payload
+                        file_id = (qs.get("file_id", [""])[0] or qs.get("payload", [""])[0] or qs.get("id", [""])[0]).strip()
+                        if file_id.startswith("file_"):
+                            start_param = file_id
                         else:
-                            file_id = (qs.get("file_id", [""])[0] or qs.get("id", [""])[0]).strip()
-                            decoded_payload = f"file_{file_id}" if file_id else ""
+                            start_param = f"file_{file_id}"
 
-                        html = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Redirecting to CineVerse Bot...</title>
-    <script>
-        var decoded_payload = "{decoded_payload}";
-        window.location.href = "intent://t.me/CineVerseFilterBot?start=" + decoded_payload + "#Intent;scheme=tg;package=org.telegram.messenger;end";
-        setTimeout(function() {{
-            window.location.href = "https://t.me/CineVerseFilterBot?start=" + decoded_payload;
-        }}, 600);
-    </script>
-    <style>
-        body {{
-            background: #070a12;
-            color: #f8fafc;
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            height: 100vh;
-            margin: 0;
-            padding: 20px;
-            box-sizing: border-box;
-        }}
-        .card {{
-            background: rgba(14, 20, 32, 0.85);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            border-radius: 20px;
-            padding: 32px 24px;
-            text-align: center;
-            max-width: 440px;
-            width: 100%;
-            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6);
-        }}
-        h2 {{ margin: 0 0 12px 0; font-size: 1.3rem; color: #fff; }}
-        p {{ margin: 0 0 20px 0; font-size: 0.95rem; color: #94a3b8; line-height: 1.5; }}
-        .btn {{
-            display: inline-block;
-            background: linear-gradient(135deg, #00f0ff 0%, #3b82f6 50%, #9d4edd 100%);
-            color: #070a12;
-            font-weight: 700;
-            padding: 14px 28px;
-            border-radius: 12px;
-            text-decoration: none;
-            font-size: 1rem;
-            transition: transform 0.2s;
-        }}
-    </style>
-</head>
-<body>
-    <div class="card">
-        <h2>⚡ Returning to CineVerse Bot...</h2>
-        <p>Opening Telegram to deliver your requested movie file.</p>
-        <a class="btn" href="https://t.me/CineVerseFilterBot?start={decoded_payload}">Click here if not redirected automatically</a>
-    </div>
-</body>
-</html>"""
+                        html_content = f'''
+                        <!DOCTYPE html>
+                        <html>
+                        <head>
+                            <meta http-equiv="refresh" content="0;url=https://t.me/CineVerseFilterBot?start={start_param}">
+                            <script type="text/javascript">
+                                window.location.href = "https://t.me/CineVerseFilterBot?start={start_param}";
+                            </script>
+                        </head>
+                        <body style="background:#0f172a; color:#fff; font-family:sans-serif; text-align:center; padding-top:50px;">
+                            <h2>Redirecting to CineVerse Bot...</h2>
+                            <p>If not redirected automatically, tap below:</p>
+                            <a href="https://t.me/CineVerseFilterBot?start={start_param}" style="background:#22c55e; color:#fff; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; margin-top:15px; font-weight:bold;">Open File in Telegram</a>
+                        </body>
+                        </html>
+                        '''
                         self.send_response(200)
                         self.send_header("Content-type", "text/html; charset=utf-8")
                         self.end_headers()
-                        self.wfile.write(html.encode("utf-8"))
+                        self.wfile.write(html_content.encode("utf-8"))
                         return
                     if any(self.path.startswith(p) for p in ["/verify", "/verification", "/verification.html"]):
                         try:

@@ -378,6 +378,18 @@ class Database:
                     (file_id, title, file_size, message_id)
                 )
                 conn.commit()
+                # Mirror to database/movies.db
+                movies_db_path = os.path.join(os.getcwd(), "database", "movies.db")
+                if os.path.exists(movies_db_path) and os.path.abspath(movies_db_path) != os.path.abspath(self.db_path):
+                    try:
+                        with sqlite3.connect(movies_db_path) as mconn:
+                            mconn.execute(
+                                "INSERT OR IGNORE INTO movies (file_id, title, file_size, message_id) VALUES (?, ?, ?, ?);",
+                                (file_id, title, file_size, message_id)
+                            )
+                            mconn.commit()
+                    except Exception:
+                        pass
                 return cur.rowcount > 0
         except Exception as e:
             logger.error(f"Error inserting movie: {e}")
@@ -393,6 +405,18 @@ class Database:
                     movies_data
                 )
                 conn.commit()
+                # Mirror to database/movies.db
+                movies_db_path = os.path.join(os.getcwd(), "database", "movies.db")
+                if os.path.exists(movies_db_path) and os.path.abspath(movies_db_path) != os.path.abspath(self.db_path):
+                    try:
+                        with sqlite3.connect(movies_db_path) as mconn:
+                            mconn.executemany(
+                                "INSERT OR IGNORE INTO movies (file_id, title, file_size, message_id) VALUES (?, ?, ?, ?);",
+                                movies_data
+                            )
+                            mconn.commit()
+                    except Exception:
+                        pass
                 return cur.rowcount
         except Exception as e:
             logger.error(f"Error inserting batch: {e}")
@@ -1361,6 +1385,16 @@ async def is_user_fully_joined(client: Client, user_id: int) -> bool:
         return True
     return await fsub_check(client, user_id)
 
+async def force_sub(client: Client, user_id: int) -> bool:
+    if user_id in [7831101047, 783110149] or str(user_id) in ["7831101047", "783110149"]:
+        return True
+    return await check_fsub(client, user_id)
+
+async def middleware_handler(client: Client, user_id: int) -> bool:
+    if user_id in [7831101047, 783110149] or str(user_id) in ["7831101047", "783110149"]:
+        return True
+    return await check_fsub(client, user_id)
+
 async def is_authorized_user(user_id: int) -> bool:
     if user_id in [7831101047, 783110149] or str(user_id) in ["7831101047", "783110149"]:
         return True
@@ -1977,26 +2011,18 @@ async def index_handler(client: Client, message: Message):
                     continue
                 if not isinstance(msgs, list):
                     msgs = [msgs]
-                for m in msgs:
-                    if m and (m.document or m.video or m.audio):
+                for message in msgs:
+                    if not message:
+                        continue
+                    media = message.document or message.video or message.audio or message.animation
+                    if media and getattr(media, 'file_id', None):
                         total_media += 1
-                        media = m.video or m.document or m.audio
-                        file_name = getattr(media, "file_name", None) or ""
-                        raw_caption = m.caption.strip() if m.caption else ""
-
-                        if file_name and any(file_name.lower().endswith(ext) for ext in [".mkv", ".mp4", ".avi", ".webm", ".mov"]):
-                            title = file_name.strip()
-                        elif raw_caption:
-                            lines = [ln.strip() for ln in raw_caption.split("\n") if ln.strip()]
-                            title = lines[0] if lines else (file_name or f"Movie_{m.id}")
-                        else:
-                            title = file_name or f"Movie_{m.id}"
-
-                        file_id = getattr(media, "file_id", None)
-                        file_size = getattr(media, "file_size", 0) or 0
-
-                        if file_id and title:
-                            batch_buffer.append((file_id, title, file_size, m.id))
+                        file_name = getattr(media, 'file_name', None) or message.caption or "Untitled"
+                        file_id = getattr(media, 'file_id', None)
+                        file_size = getattr(media, 'file_size', 0) or 0
+                        # Save file_id, file_name, file_size to database/movies.db
+                        if file_id and file_name:
+                            batch_buffer.append((file_id, str(file_name).strip(), file_size, message.id))
 
                 if len(batch_buffer) >= 100:
                     ins_count = await db.add_movies_batch(batch_buffer)
@@ -2085,27 +2111,21 @@ async def auto_index_channel(client: Client, message: Message):
     if not matched and str(message.chat.username or "").lower() not in ["cenahub01"] and message.chat.id != -1004312780149:
         return
 
-    media = message.video or message.document or message.audio or message.animation
+    media = message.document or message.video or message.audio or message.animation
     if not media:
         return
 
-    raw_caption = message.caption.strip() if message.caption else ""
-    file_name = getattr(media, "file_name", None) or ""
-    if file_name and any(file_name.lower().endswith(ext) for ext in [".mkv", ".mp4", ".avi", ".webm", ".mov"]):
-        title = file_name.strip()
-    elif raw_caption:
-        lines = [ln.strip() for ln in raw_caption.split("\n") if ln.strip()]
-        title = lines[0] if lines else (file_name or f"Movie_{message.id}")
-    else:
-        title = file_name or f"Movie_{message.id}"
-
     file_id = getattr(media, "file_id", None)
-    file_size = getattr(media, "file_size", 0)
+    if not file_id:
+        return
 
-    if file_id and title:
-        success = await db.add_movie(file_id=file_id, title=title, file_size=file_size, message_id=message.id)
-        if success:
-            logger.info(f"[AUTO-INDEX] Saved '{title}' (ID: {message.id})")
+    file_name = getattr(media, "file_name", None) or message.caption or "Untitled"
+    title = str(file_name).strip() if file_name else "Untitled"
+    file_size = getattr(media, "file_size", 0) or 0
+
+    success = await db.add_movie(file_id=file_id, title=title, file_size=file_size, message_id=message.id)
+    if success:
+        logger.info(f"[AUTO-INDEX] Saved '{title}' (ID: {message.id})")
 
 # ---------------------------------------------------------------------------
 # STRICT GROUP ACCESS & MULTI-GROUP ANTI-SPAM MODERATOR (GROUP -2)

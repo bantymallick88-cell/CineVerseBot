@@ -654,17 +654,97 @@ def format_search_text(query: str, total: int, page: int, total_pages: int) -> s
         "⚖️ *DMCA Notice: We index public channels. Use /dmca.*"
     )
 
-def build_pagination_markup(files: List[Dict[str, Any]], cache_id: str, current_page: int, total_pages: int, bot_username: Optional[str] = None) -> InlineKeyboardMarkup:
+# ---------------------------------------------------------------------------
+# GPLINKS SHORTENER ENGINE (STRICT 1 FILE = 1 AD VERIFICATION)
+# ---------------------------------------------------------------------------
+SHORT_URL_CACHE: Dict[int, str] = {}
+
+def get_redirect_base_url() -> str:
+    base = os.getenv("VERIFY_BASE_URL") or os.getenv("RENDER_EXTERNAL_URL") or "https://cineversebot.onrender.com"
+    return base.rstrip("/")
+
+def _fetch_gplinks_short_url(destination_url: str) -> str:
+    """
+    Calls GPLinks API synchronously (run in worker thread via asyncio.to_thread).
+    Endpoint: https://api.gplinks.com/api?api={GPLINKS_API_KEY}&url={DESTINATION_URL}
+    """
+    api_key = (os.getenv("GPLINKS_API_KEY") or GPLINKS_API_KEY or "").strip()
+    if not api_key:
+        return destination_url
+
+    encoded_url = urllib.parse.quote(destination_url, safe="")
+    endpoints = [
+        f"https://api.gplinks.com/api?api={api_key}&url={encoded_url}",
+        f"https://gplinks.in/api?api={api_key}&url={encoded_url}"
+    ]
+    for api_url in endpoints:
+        try:
+            req = urllib.request.Request(
+                api_url,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) CineVerseBot/2.0"}
+            )
+            with urllib.request.urlopen(req, timeout=10) as response:
+                if response.status == 200:
+                    body = response.read().decode("utf-8").strip()
+                    try:
+                        data = json.loads(body)
+                        if isinstance(data, dict):
+                            if data.get("status") == "success" and data.get("shortenedUrl"):
+                                return str(data["shortenedUrl"]).strip()
+                            for k in ["shortenedUrl", "short_url", "shorturl", "url"]:
+                                if data.get(k):
+                                    return str(data[k]).strip()
+                    except Exception:
+                        if body.startswith("http://") or body.startswith("https://"):
+                            return body
+        except Exception as e:
+            logger.warning(f"GPLinks API request error on {api_url}: {e}")
+
+    return destination_url
+
+async def get_gplinks_short_url(destination_url: str) -> str:
+    return await asyncio.to_thread(_fetch_gplinks_short_url, destination_url)
+
+# Aliases for backwards compatibility
+_fetch_arolinks_short_url = _fetch_gplinks_short_url
+get_arolinks_short_url = get_gplinks_short_url
+
+async def get_file_download_short_url(file_msg_id: int) -> str:
+    """
+    Generates or retrieves cached GPLinks short URL for a file download button.
+    Encodes payload 'file_{file_msg_id}' to Base64, wraps via /redirect endpoint,
+    and calls GPLinks shortener to enforce 1-page ad verification.
+    Strictly wraps EVERY download button URL with GPLinks short URL.
+    NEVER attaches raw target bot deep-links (https://t.me/...) directly to inline keyboard buttons.
+    """
+    if file_msg_id in SHORT_URL_CACHE:
+        return SHORT_URL_CACHE[file_msg_id]
+
+    raw_payload = f"file_{file_msg_id}"
+    base64_payload = base64.urlsafe_b64encode(raw_payload.encode("utf-8")).decode("utf-8")
+    destination_url = f"{get_redirect_base_url()}/redirect?payload={base64_payload}"
+
+    short_url = await get_gplinks_short_url(destination_url)
+    if short_url:
+        SHORT_URL_CACHE[file_msg_id] = short_url
+        return short_url
+
+    return destination_url
+
+async def build_pagination_markup(files: List[Dict[str, Any]], cache_id: str, current_page: int, total_pages: int, bot_username: Optional[str] = None) -> InlineKeyboardMarkup:
     buttons = []
     
+    # Strictly wrap EVERY download button URL with GPLinks shortened URL
+    # Resolve short URLs concurrently via asyncio.gather for ultra-fast response
+    tasks = [get_file_download_short_url(f["message_id"]) for f in files]
+    short_urls = await asyncio.gather(*tasks)
+
     # File download buttons formatted with modern luxury badge: 📥 [ 1080p FHD │ 1.45 GB ] ▷ {Title}
-    for f in files:
+    for f, btn_url in zip(files, short_urls):
         name = f.get("title", "Movie")
         size_str = format_size(f.get("file_size", 0))
         meta = extract_movie_metadata(name)
         display_name = (meta["clean_title"][:26] + "...") if len(meta["clean_title"]) > 29 else meta["clean_title"]
-        target_bot = bot_username or os.getenv("BOT_USERNAME", "CineVerseFilterBot")
-        btn_url = f"https://t.me/{target_bot}?start=get_{f['message_id']}"
         btn_text = f"📥 [ {meta['quality']} │ {size_str} ] ▷ {display_name}"
         buttons.append([InlineKeyboardButton(text=btn_text, url=btn_url)])
 
@@ -871,57 +951,6 @@ async def deliver_movie_file(client: Client, user_id: int, msg_id: int):
     except Exception as e:
         logger.error(f"Error delivering file {msg_id} to user {user_id}: {e}")
 
-# ---------------------------------------------------------------------------
-# GPLINKS SHORTENER ENGINE (STRICT 1 FILE = 1 AD VERIFICATION)
-# ---------------------------------------------------------------------------
-# GPLINKS SHORTENER & 1-PAGE VERIFICATION ENGINE
-# ---------------------------------------------------------------------------
-def _fetch_gplinks_short_url(destination_url: str) -> str:
-    """
-    Calls GPLinks API synchronously (run in worker thread via asyncio.to_thread).
-    Endpoint: https://api.gplinks.com/api?api={GPLINKS_API_KEY}&url={DESTINATION_URL}
-    """
-    api_key = (os.getenv("GPLINKS_API_KEY") or GPLINKS_API_KEY or "").strip()
-    if not api_key:
-        return destination_url
-
-    encoded_url = urllib.parse.quote(destination_url, safe="")
-    endpoints = [
-        f"https://api.gplinks.com/api?api={api_key}&url={encoded_url}",
-        f"https://gplinks.in/api?api={api_key}&url={encoded_url}"
-    ]
-    for api_url in endpoints:
-        try:
-            req = urllib.request.Request(
-                api_url,
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) CineVerseBot/2.0"}
-            )
-            with urllib.request.urlopen(req, timeout=10) as response:
-                if response.status == 200:
-                    body = response.read().decode("utf-8").strip()
-                    try:
-                        data = json.loads(body)
-                        if isinstance(data, dict):
-                            if data.get("status") == "success" and data.get("shortenedUrl"):
-                                return str(data["shortenedUrl"]).strip()
-                            for k in ["shortenedUrl", "short_url", "shorturl", "url"]:
-                                if data.get(k):
-                                    return str(data[k]).strip()
-                    except Exception:
-                        if body.startswith("http://") or body.startswith("https://"):
-                            return body
-        except Exception as e:
-            logger.warning(f"GPLinks API request error on {api_url}: {e}")
-
-    return destination_url
-
-async def get_gplinks_short_url(destination_url: str) -> str:
-    return await asyncio.to_thread(_fetch_gplinks_short_url, destination_url)
-
-# Aliases for backwards compatibility
-_fetch_arolinks_short_url = _fetch_gplinks_short_url
-get_arolinks_short_url = get_gplinks_short_url
-
 def get_verification_landing_url(file_msg_id: int, bot_uname: str, title: str = "", quality: str = "", size_str: str = "") -> str:
     """
     Constructs the 1-page verification landing URL.
@@ -959,12 +988,7 @@ async def send_gplinks_verification_card(client: Client, target_chat: Any, user_
     size_str = format_size(file_info.get("file_size", 0)) if file_info else "N/A"
     meta = extract_movie_metadata(title)
 
-    # Base64 Encoded Target Payload:
-    # Convert target deep link payload "file_{file_msg_id}" into Base64 encoding:
-    raw_payload = f"file_{file_msg_id}"
-    base64_payload = base64.urlsafe_b64encode(raw_payload.encode("utf-8")).decode("utf-8")
-    destination_url = f"https://cineversebot.onrender.com/redirect?payload={base64_payload}"
-    short_url = await get_gplinks_short_url(destination_url)
+    short_url = await get_file_download_short_url(file_msg_id)
 
     verify_text = (
         "┌──────────────────────────────────────────┐\n"
@@ -1991,7 +2015,7 @@ async def auto_filter_handler(client: Client, message: Message):
     SEARCH_CACHE[cache_id] = text
     total_pages = math.ceil(total / PAGE_SIZE)
     bot_uname = await get_bot_username(client)
-    markup = build_pagination_markup(files, cache_id, 1, total_pages, bot_username=bot_uname)
+    markup = await build_pagination_markup(files, cache_id, 1, total_pages, bot_username=bot_uname)
     response_text = format_search_text(text, total, 1, total_pages)
 
     # Reply directly in group (Single message only, NO duplicate group notices)
@@ -2150,7 +2174,7 @@ async def callback_router(client: Client, query: CallbackQuery):
         SEARCH_CACHE[new_cache_id] = target_query
         total_pages = math.ceil(total / PAGE_SIZE)
         bot_uname = await get_bot_username(client)
-        markup = build_pagination_markup(files, new_cache_id, 1, total_pages, bot_username=bot_uname)
+        markup = await build_pagination_markup(files, new_cache_id, 1, total_pages, bot_username=bot_uname)
         response_text = format_search_text(target_query, total, 1, total_pages)
         try:
             await query.message.edit_text(response_text, reply_markup=markup)
@@ -2171,7 +2195,7 @@ async def callback_router(client: Client, query: CallbackQuery):
         total_pages = math.ceil(total / PAGE_SIZE) if total > 0 else 1
 
         bot_uname = await get_bot_username(client)
-        markup = build_pagination_markup(files, cache_id, 1, total_pages, bot_username=bot_uname)
+        markup = await build_pagination_markup(files, cache_id, 1, total_pages, bot_username=bot_uname)
         response_text = format_search_text(search_query, total, 1, total_pages)
         try:
             await query.message.edit_text(response_text, reply_markup=markup)
@@ -2484,7 +2508,7 @@ async def callback_router(client: Client, query: CallbackQuery):
             return
 
         bot_uname = await get_bot_username(client)
-        markup = build_pagination_markup(files, cache_id, page, total_pages, bot_username=bot_uname)
+        markup = await build_pagination_markup(files, cache_id, page, total_pages, bot_username=bot_uname)
         response_text = format_search_text(search_query, total, page, total_pages)
         try:
             await query.message.edit_text(response_text, reply_markup=markup)

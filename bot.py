@@ -1950,48 +1950,15 @@ async def index_handler(client: Client, message: Message):
     asyncio.create_task(auto_delete(message, 60))
     await db.add_user(user_id)
 
-    DB_CHANNEL = -1004312780149
+    DB_CHANNEL = int("-1004312780149")
     status_msg = await message.reply_text(
         "⏳ **Starting Channel Indexing...**\n\n"
         f"• **Target Channel:** `{DB_CHANNEL}`\n"
-        "• Resolving channel peer directly...",
+        "• Direct Bot API batch scanning in progress...",
         quote=True
     )
 
-    target_chat = None
-    max_id = 0
-    try:
-        target_chat = await client.get_chat(-1004312780149)
-    except Exception as e:
-        logger.warning(f"Direct get_chat(-1004312780149) notice: {e}")
-
-    try:
-        async for dialog in client.get_dialogs():
-            if dialog.chat and dialog.chat.id == DB_CHANNEL:
-                if not target_chat:
-                    target_chat = dialog.chat
-                if getattr(dialog, "top_message", None):
-                    max_id = dialog.top_message.id
-                break
-    except Exception as e2:
-        logger.warning(f"Dialog lookup notice: {e2}")
-
-    if not target_chat:
-        try:
-            target_chat = await client.get_chat("cenahub01")
-        except Exception:
-            pass
-
-    if not target_chat:
-        await status_msg.edit_text(
-            f"❌ **Failed to resolve database channel:** `{DB_CHANNEL}`\n\n"
-            "Please ensure the bot is added to channel `-1004312780149` as an Administrator."
-        )
-        return
-
-    # Direct resolution without sending probe message to prevent FloodWait
-    if max_id <= 0:
-        max_id = 20000
+    max_id = 20000
 
     # Iterate message IDs in batches of 100 backwards from max_id down to 1
     added = 0
@@ -2005,7 +1972,7 @@ async def index_handler(client: Client, message: Message):
             msg_ids = list(range(max(1, i - 99), i + 1))
             total_scanned += len(msg_ids)
             try:
-                msgs = await client.get_messages(-1004312780149, msg_ids)
+                msgs = await client.get_messages(DB_CHANNEL, msg_ids)
                 if not msgs:
                     continue
                 if not isinstance(msgs, list):

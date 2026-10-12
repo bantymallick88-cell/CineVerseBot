@@ -658,12 +658,9 @@ def build_pagination_markup(files: List[Dict[str, Any]], cache_id: str, current_
         size_str = format_size(f.get("file_size", 0))
         meta = extract_movie_metadata(name)
         display_name = (meta["clean_title"][:26] + "...") if len(meta["clean_title"]) > 29 else meta["clean_title"]
-        btn_text = f"📥 [ {meta['quality']} │ {size_str} ] ▷ {display_name}"
-        if bot_username:
-            btn_url = f"https://t.me/{bot_username}?start=file_{f['message_id']}"
-            buttons.append([InlineKeyboardButton(btn_text, url=btn_url)])
-        else:
-            buttons.append([InlineKeyboardButton(btn_text, callback_data=f"get_{f['message_id']}")])
+        target_bot = bot_username or os.getenv("BOT_USERNAME", "CineVerseFilterBot")
+        btn_url = f"https://t.me/{target_bot}?start=get_{f['message_id']}"
+        buttons.append([InlineKeyboardButton(btn_text, url=btn_url)])
 
     # Row 1: Interactive filter submenus
     filter_row = [
@@ -811,7 +808,7 @@ async def get_bot_username(client: Client) -> str:
             return BOT_USERNAME
     except Exception as e:
         logger.warning(f"Error fetching bot username: {e}")
-    return os.getenv("BOT_USERNAME", "CineVerse_SearchBot")
+    return os.getenv("BOT_USERNAME", "CineVerseFilterBot")
 
 async def deliver_movie_file(client: Client, user_id: int, msg_id: int):
     # Code-Level Deduplication Lock: Ignore duplicate delivery within 5 seconds
@@ -923,12 +920,8 @@ async def send_gplinks_verification_card(client: Client, target_chat: Any, user_
     size_str = format_size(file_info.get("file_size", 0)) if file_info else "N/A"
     meta = extract_movie_metadata(title)
 
-    # Generate single-use token for strictly 1 File = 1 Ad verification
-    token = uuid.uuid4().hex[:12]
-    await db.create_file_token(token, user_id, file_msg_id)
-
-    bot_uname = await get_bot_username(client)
-    destination_url = f"https://t.me/{bot_uname}?start=verify_{token}"
+    bot_uname = (await get_bot_username(client)) or os.getenv("BOT_USERNAME", "CineVerseFilterBot")
+    destination_url = f"https://t.me/{bot_uname}?start=file_{file_msg_id}"
     short_url = await get_gplinks_short_url(destination_url)
 
     verify_text = (
@@ -1151,16 +1144,20 @@ async def start_handler(client: Client, message: Message):
     command_parts = message.text.split() if message.text else []
     file_msg_id = None
     verify_token = None
+    is_get_flow = False
     if len(command_parts) > 1:
         param = command_parts[1].strip()
         if param.startswith("verify_"):
             verify_token = param[7:].strip()
-        elif param.startswith("file_") and param[5:].isdigit():
-            file_msg_id = int(param[5:])
         elif param.startswith("get_") and param[4:].isdigit():
             file_msg_id = int(param[4:])
+            is_get_flow = True
+        elif param.startswith("file_") and param[5:].isdigit():
+            file_msg_id = int(param[5:])
+            is_get_flow = False
         elif param.isdigit():
             file_msg_id = int(param)
+            is_get_flow = False
 
     # A. User completed 1-page GPLinks ad verification and returned to PM:
     if verify_token:
@@ -1227,7 +1224,7 @@ async def start_handler(client: Client, message: Message):
                 asyncio.create_task(auto_delete(invalid_msg, 60, reply_to_message=message))
             return
 
-    # B. User arrived for a specific file from Search Group:
+    # B. User arrived for a specific file (from Search Group /start get_{id} or GPLinks redirect /start file_{id}):
     if file_msg_id:
         if not await is_user_joined_group(client, user_id):
             user_name = message.from_user.first_name if message.from_user and message.from_user.first_name else "Friend"
@@ -1253,12 +1250,13 @@ async def start_handler(client: Client, message: Message):
                 asyncio.create_task(auto_delete(fsub_msg, 60, reply_to_message=message))
             return
 
-        # Enforce GPLinks 1 File = 1 Ad flow (if configured and not owner/admin):
-        if GPLINKS_API_KEY and user_id != OWNER_ID and user_id not in ADMIN_IDS:
+        # If user initiates download from group via /start get_{file_id}, enforce GPLinks ad verification:
+        if is_get_flow and GPLINKS_API_KEY and user_id != OWNER_ID and user_id not in ADMIN_IDS:
             await send_gplinks_verification_card(client, message, user_id, file_msg_id, reply_to_message=message)
             return
 
-        # Direct delivery (fallback or owner/admin)
+        # User completed GPLinks ad and returned via deep-link (https://t.me/CineVerseFilterBot?start=file_{file_id}):
+        # Deliver movie file instantly!
         await deliver_movie_file(client, user_id, file_msg_id)
         return
 

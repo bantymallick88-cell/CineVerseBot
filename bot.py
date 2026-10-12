@@ -2135,15 +2135,15 @@ async def index_handler(client: Client, message: Message):
     last_update = time.time()
 
     try:
-        for ch in target_channels:
-            target_peer = ch
+        for cid in target_channels:
+            target_peer = cid
             try:
-                resolved_chat = await client.get_chat(ch)
+                resolved_chat = await client.get_chat(cid)
                 if resolved_chat and resolved_chat.id:
                     target_peer = resolved_chat.id
                     logger.info(f"✅ Pre-resolved channel entity for index_handler: {target_peer}")
             except Exception as e:
-                logger.warning(f"Pre-resolving channel {ch} encountered: {e}")
+                logger.warning(f"⚠️ Pre-resolving channel {cid} encountered: {e} (proceeding safely with fallback peer ID)")
 
             for i in range(max_id, 0, -100):
                 msg_ids = list(range(max(1, i - 99), i + 1))
@@ -2160,24 +2160,23 @@ async def index_handler(client: Client, message: Message):
                         media = msg.video or msg.document or msg.audio or msg.animation
                         if media and getattr(media, 'file_id', None):
                             total_media += 1
-                            # Extract title from msg.document.file_name or msg.caption
+                            # Extract title from document.file_name or caption
                             file_name = None
                             if msg.document and getattr(msg.document, 'file_name', None):
                                 file_name = msg.document.file_name
-                            elif getattr(media, 'file_name', None):
-                                file_name = media.file_name
                             elif msg.caption:
                                 file_name = msg.caption
+                            elif getattr(media, 'file_name', None):
+                                file_name = media.file_name
                             else:
                                 file_name = "Untitled"
 
                             file_id = getattr(media, 'file_id', None)
                             file_size = getattr(media, 'file_size', 0) or 0
                             caption = msg.caption or file_name
-                            cid = target_peer
 
                             if file_id and file_name:
-                                batch_buffer.append((file_id, str(file_name).strip(), int(file_size), int(msg.id), cid, str(caption).strip()))
+                                batch_buffer.append((file_id, str(file_name).strip(), int(file_size), int(msg.id), target_peer, str(caption).strip()))
 
                     if len(batch_buffer) >= 100:
                         ins_count = await db.add_movies_batch(batch_buffer)
@@ -2193,9 +2192,12 @@ async def index_handler(client: Client, message: Message):
                 except (PeerIdInvalid, RPCError) as rpc_err:
                     logger.warning(f"RPC Error / PeerIdInvalid encountered on batch {msg_ids[0]}-{msg_ids[-1]}: {rpc_err}. Re-resolving channel peer...")
                     try:
-                        resolved_chat = await client.get_chat(ch)
-                        if resolved_chat and resolved_chat.id:
-                            target_peer = resolved_chat.id
+                        try:
+                            resolved_chat = await client.get_chat(cid)
+                            if resolved_chat and resolved_chat.id:
+                                target_peer = resolved_chat.id
+                        except Exception as get_chat_err:
+                            logger.warning(f"Note: get_chat({cid}) during recovery: {get_chat_err}")
                         msgs = await client.get_messages(target_peer, msg_ids)
                         if msgs:
                             if not isinstance(msgs, list):
@@ -2209,22 +2211,21 @@ async def index_handler(client: Client, message: Message):
                                     file_name = None
                                     if msg.document and getattr(msg.document, 'file_name', None):
                                         file_name = msg.document.file_name
-                                    elif getattr(media, 'file_name', None):
-                                        file_name = media.file_name
                                     elif msg.caption:
                                         file_name = msg.caption
+                                    elif getattr(media, 'file_name', None):
+                                        file_name = media.file_name
                                     else:
                                         file_name = "Untitled"
 
                                     file_id = getattr(media, 'file_id', None)
                                     file_size = getattr(media, 'file_size', 0) or 0
                                     caption = msg.caption or file_name
-                                    cid = target_peer
 
                                     if file_id and file_name:
-                                        batch_buffer.append((file_id, str(file_name).strip(), int(file_size), int(msg.id), cid, str(caption).strip()))
+                                        batch_buffer.append((file_id, str(file_name).strip(), int(file_size), int(msg.id), target_peer, str(caption).strip()))
                     except Exception as inner_e:
-                        logger.error(f"Error fetching batch after RPC error recovery: {inner_e}")
+                        logger.warning(f"Could not fetch batch after RPC/PeerIdInvalid: {inner_e}")
                     await asyncio.sleep(0.2)
                 except Exception as e:
                     logger.error(f"Error fetching batch {msg_ids[0]}-{msg_ids[-1]}: {e}")
@@ -3262,6 +3263,15 @@ async def _start_pyrogram_client():
             await app.start()
             logger.info("✅ Pyrogram bot client connected and authenticated successfully!")
             await set_bot_commands(app)
+
+            # Populate Pyrogram peer cache automatically using get_dialogs()
+            try:
+                logger.info("📡 Populating Pyrogram peer cache via get_dialogs()...")
+                async for dialog in app.get_dialogs():
+                    pass
+                logger.info("✅ Peer cache successfully populated from dialogs.")
+            except Exception as e:
+                logger.warning(f"Note on populating dialogs peer cache: {e}")
 
             # Multi-channel peer resolution at bot startup to pre-cache channel entities
             for cid in DB_CHANNEL_IDS:

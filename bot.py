@@ -36,6 +36,7 @@ from pyrogram.types import (
     Message,
     BotCommand,
     BotCommandScopeDefault,
+    BotCommandScopeChat,
     WebAppInfo
 )
 from pyrogram.errors import (
@@ -108,11 +109,12 @@ def parse_db_channel_ids() -> List[Any]:
 DB_CHANNEL_IDS = parse_db_channel_ids()
 DB_CHANNEL_ID = DB_CHANNEL_IDS[0] if DB_CHANNEL_IDS else -1004312780149
 
-OWNER_ID = get_env_int("OWNER_ID", 7831101047)
+ADMIN_ID = 783110149
+OWNER_ID = 783110149
 
 def parse_admin_ids() -> set:
-    raw_admin = os.getenv("ADMIN_ID", "7831101047")
-    ids = {OWNER_ID}
+    raw_admin = os.getenv("ADMIN_ID", "783110149,7831101047")
+    ids = {ADMIN_ID, OWNER_ID, 783110149, 7831101047}
     for item in raw_admin.replace(",", " ").split():
         item = item.strip()
         try:
@@ -122,7 +124,6 @@ def parse_admin_ids() -> set:
     return ids
 
 ADMIN_IDS = parse_admin_ids()
-ADMIN_ID = OWNER_ID
 
 # GPLinks Shortener API Configuration (Strict 1 File = 1 Ad Flow)
 GPLINKS_API_KEY = os.getenv("GPLINKS_API_KEY") or get_env_str("GPLINKS_API_KEY", get_env_str("AROLINKS_API_KEY", ""))
@@ -1667,7 +1668,7 @@ async def stats_handler(client: Client, message: Message):
     if is_duplicate_message(message):
         return
     user_id = message.from_user.id if message.from_user else None
-    if user_id != ADMIN_ID:
+    if user_id != ADMIN_ID and user_id not in ADMIN_IDS:
         denied_msg = await message.reply_text(
             "⚠️ Unauthorized command. This command is restricted to the Owner.",
             quote=True
@@ -1916,7 +1917,7 @@ async def index_handler(client: Client, message: Message):
     if is_duplicate_message(message):
         return
     user_id = message.from_user.id if message.from_user else None
-    if user_id != ADMIN_ID:
+    if user_id != ADMIN_ID and user_id not in ADMIN_IDS:
         denied_msg = await message.reply_text(
             "⚠️ Unauthorized command. This command is restricted to the Owner.",
             quote=True
@@ -1927,167 +1928,124 @@ async def index_handler(client: Client, message: Message):
         return
 
     asyncio.create_task(auto_delete(message, 60))
-    await db.add_user(message.from_user.id)
+    await db.add_user(user_id)
 
-    # Determine channels to scan (supports single or multiple channels)
-    channels_to_scan = []
+    target_channel_id = -1004312780149
     if len(message.command) > 1:
         custom_target = message.command[1].strip()
         try:
-            channels_to_scan.append(int(custom_target))
+            target_channel_id = int(custom_target)
         except ValueError:
-            channels_to_scan.append(custom_target)
-    else:
-        channels_to_scan = list(DB_CHANNEL_IDS)
+            target_channel_id = custom_target
 
-    # Ensure target channel -1004312780149 is included
-    if -1004312780149 not in channels_to_scan and "-1004312780149" not in channels_to_scan:
-        channels_to_scan.insert(0, -1004312780149)
+    status_msg = await message.reply_text(
+        f"⏳ **Starting Full Channel Indexing...**\n\n"
+        f"• **Channel ID:** `{target_channel_id}`\n"
+        f"• **Method:** `Direct History Stream (client.get_chat_history)`\n"
+        f"• Streaming and syncing media files into database...",
+        quote=True
+    )
 
-    status_msg = await message.reply_text("⏳ **Initializing Deep Channel Indexing...**", quote=True)
-
+    total_scanned = 0
+    total_media = 0
     total_new = 0
-    scanned_channels = 0
+    batch_buffer: List[Tuple[str, str, int, int]] = []
     last_update = time.time()
 
-    for ch in channels_to_scan:
-        scanned_channels += 1
-        try:
-            peer = await resolve_channel_peer(client, ch)
-            chat_obj = None
-            try:
-                chat_obj = await client.get_chat(peer)
-            except Exception:
-                pass
+    try:
+        peer = await resolve_channel_peer(client, target_channel_id)
 
-            chat_title = getattr(chat_obj, "title", str(peer))
+        # Directly stream all historical messages from the channel without message ID guessing
+        async for msg in client.get_chat_history(chat_id=peer):
+            total_scanned += 1
+            if not msg or getattr(msg, "empty", False):
+                continue
 
-            # 1. Determine latest message ID in channel
-            latest_id = 0
-            try:
-                async for latest_m in client.get_chat_history(chat_id=peer, limit=1):
-                    if latest_m and latest_m.id:
-                        latest_id = latest_m.id
-                        break
-            except Exception as e:
-                logger.warning(f"Could not get latest message id from {peer} via get_chat_history: {e}")
+            media = msg.video or msg.document or msg.audio or msg.animation
+            if media:
+                total_media += 1
+                raw_caption = msg.caption.strip() if msg.caption else ""
+                file_name = getattr(media, "file_name", None) or ""
 
-            if latest_id == 0:
-                try:
-                    test_m = await client.send_message(peer, "🔄 Testing indexing connection...")
-                    latest_id = test_m.id
-                    await test_m.delete()
-                except Exception:
-                    pass
-
-            target_max = latest_id if latest_id > 0 else 50000
-            target_display = str(latest_id) if latest_id > 0 else "Auto-Detecting"
-
-            try:
-                await status_msg.edit_text(
-                    f"⏳ **Starting Channel Scan [{scanned_channels}/{len(channels_to_scan)}]**\n\n"
-                    f"• **Channel:** `{chat_title}` (`{peer}`)\n"
-                    f"• **Latest Message ID:** `{target_display}`\n"
-                    f"• **Scanning:** IDs 1 to `{target_max}` without stopping..."
-                )
-            except MessageNotModified:
-                pass
-
-            current_id = 1
-            batch_size = 200
-            empty_streak = 0
-
-            # Scan loop: loops through message IDs from 1 up to target_max
-            while current_id <= target_max:
-                batch_end = min(current_id + batch_size - 1, target_max) if target_max > 0 else (current_id + batch_size - 1)
-                msg_ids = list(range(current_id, batch_end + 1))
-                if not msg_ids:
-                    break
-
-                try:
-                    batch = await client.get_messages(chat_id=peer, message_ids=msg_ids)
-                except FloodWait as e:
-                    wait_time = int(getattr(e, "value", getattr(e, "x", 30)))
-                    logger.warning(f"FloodWait during indexing: sleeping {wait_time}s")
-                    await asyncio.sleep(wait_time)
-                    continue  # retry same batch
-                except Exception as e:
-                    logger.warning(f"Error fetching batch {current_id}-{batch_end} in {peer}: {e}")
-                    current_id = batch_end + 1
-                    continue  # Do NOT stop early! Continue to next batch!
-
-                found_count = 0
-                to_insert = []
-
-                if batch:
-                    if not isinstance(batch, list):
-                        batch = [batch]
-                    for msg in batch:
-                        if msg and not getattr(msg, "empty", False):
-                            found_count += 1
-                            media = msg.video or msg.document or msg.audio or msg.animation
-                            if media:
-                                raw_caption = msg.caption.strip() if msg.caption else ""
-                                file_name = getattr(media, "file_name", None) or ""
-
-                                # Proper title extraction preserving resolution & quality
-                                if file_name and any(file_name.lower().endswith(ext) for ext in [".mkv", ".mp4", ".avi", ".webm", ".mov"]):
-                                    title = file_name.strip()
-                                elif raw_caption:
-                                    lines = [ln.strip() for ln in raw_caption.split("\n") if ln.strip()]
-                                    title = lines[0] if lines else (file_name or f"Movie_{msg.id}")
-                                else:
-                                    title = file_name or f"Movie_{msg.id}"
-
-                                file_id = getattr(media, "file_id", None)
-                                file_size = getattr(media, "file_size", 0)
-                                if file_id and title:
-                                    to_insert.append((file_id, title, file_size, msg.id))
-
-                if to_insert:
-                    added = await db.add_movies_batch(to_insert)
-                    total_new += added
-
-                if found_count > 0:
-                    empty_streak = 0
+                if file_name and any(file_name.lower().endswith(ext) for ext in [".mkv", ".mp4", ".avi", ".webm", ".mov"]):
+                    title = file_name.strip()
+                elif raw_caption:
+                    lines = [ln.strip() for ln in raw_caption.split("\n") if ln.strip()]
+                    title = lines[0] if lines else (file_name or f"Movie_{msg.id}")
                 else:
-                    empty_streak += 1
+                    title = file_name or f"Movie_{msg.id}"
 
-                # If latest_id was unknown (0), stop only after 50 consecutive empty batches (10,000 IDs)
-                if latest_id == 0 and empty_streak >= 50:
-                    logger.info(f"Reached 50 empty batches with unknown latest_id in {peer}, stopping.")
-                    break
+                file_id = getattr(media, "file_id", None)
+                file_size = getattr(media, "file_size", 0)
 
-                current_id = batch_end + 1
+                if file_id and title:
+                    batch_buffer.append((file_id, title, file_size, msg.id))
 
-                # Update progress in telegram every 3 seconds
-                if time.time() - last_update > 3:
-                    stats = await db.get_stats()
-                    pct_str = f" ({int((current_id / target_max) * 100)}%)" if target_max > 0 else ""
-                    try:
-                        await status_msg.edit_text(
-                            f"⏳ **Indexing in Progress [{scanned_channels}/{len(channels_to_scan)}]**\n\n"
-                            f"• **Channel:** `{chat_title}` (`{peer}`)\n"
-                            f"• **Scanned:** `{current_id}` / `{target_max}`{pct_str}\n"
-                            f"• **Newly Added:** `{total_new}`\n"
-                            f"🎬 **Total Movies in DB:** `{stats['movies']}`"
-                        )
-                    except MessageNotModified:
-                        pass
-                    last_update = time.time()
+                if len(batch_buffer) >= 100:
+                    added = await db.add_movies_batch(batch_buffer)
+                    total_new += added
+                    batch_buffer.clear()
 
-        except Exception as e:
-            logger.error(f"Error scanning channel {ch}: {e}", exc_info=True)
+            # Live progress update every 3 seconds
+            if time.time() - last_update > 3:
+                stats = await db.get_stats()
+                try:
+                    await status_msg.edit_text(
+                        f"⏳ **Indexing in Progress...**\n\n"
+                        f"• **Target Channel:** `{peer}`\n"
+                        f"• **Messages Scanned:** `{total_scanned}`\n"
+                        f"• **Media Found:** `{total_media}`\n"
+                        f"• **Newly Imported:** `{total_new}`\n"
+                        f"🎬 **Total Movies in DB:** `{stats['movies']}`"
+                    )
+                except MessageNotModified:
+                    pass
+                last_update = time.time()
 
-    stats = await db.get_stats()
-    await status_msg.edit_text(
-        f"✅ **Indexing Complete!**\n\n"
-        f"• **Channels Scanned:** `{scanned_channels}`\n"
-        f"• **New Files Added:** `{total_new}`\n"
-        f"🎬 **Total Movies in Database:** `{stats['movies']}`"
-    )
-    if status_msg:
-        asyncio.create_task(auto_delete(status_msg, 60, reply_to_message=message))
+        # Flush remaining buffer
+        if batch_buffer:
+            added = await db.add_movies_batch(batch_buffer)
+            total_new += added
+            batch_buffer.clear()
+
+        stats = await db.get_stats()
+        await status_msg.edit_text(
+            f"✅ **Full Channel Indexing Complete!**\n\n"
+            f"• **Channel:** `{peer}`\n"
+            f"• **Total Messages Scanned:** `{total_scanned}`\n"
+            f"• **Media Files Identified:** `{total_media}`\n"
+            f"• **New Titles Imported:** `{total_new}`\n"
+            f"🎬 **Total Movies in Database:** `{stats['movies']}`"
+        )
+        if status_msg:
+            asyncio.create_task(auto_delete(status_msg, 60, reply_to_message=message))
+
+    except FloodWait as e:
+        wait_time = int(getattr(e, "value", getattr(e, "x", 30)))
+        logger.warning(f"FloodWait during indexing: sleeping {wait_time}s")
+        if batch_buffer:
+            await db.add_movies_batch(batch_buffer)
+            batch_buffer.clear()
+        await asyncio.sleep(wait_time)
+        stats = await db.get_stats()
+        await status_msg.edit_text(
+            f"⚠️ **Indexing Paused (FloodWait):** {wait_time}s\n\n"
+            f"• **Messages Scanned:** `{total_scanned}`\n"
+            f"• **New Imported:** `{total_new}`\n"
+            f"🎬 **Total Movies in Database:** `{stats['movies']}`"
+        )
+    except Exception as e:
+        logger.error(f"Error streaming channel history for {target_channel_id}: {e}", exc_info=True)
+        if batch_buffer:
+            await db.add_movies_batch(batch_buffer)
+            batch_buffer.clear()
+        stats = await db.get_stats()
+        await status_msg.edit_text(
+            f"⚠️ **Indexing Notice:** {e}\n\n"
+            f"• **Messages Scanned:** `{total_scanned}`\n"
+            f"• **New Titles Added:** `{total_new}`\n"
+            f"🎬 **Total Movies in Database:** `{stats['movies']}`"
+        )
 
 # ---------------------------------------------------------------------------
 # AUTO-INDEX NEW UPLOADS IN CHANNEL
@@ -3052,19 +3010,34 @@ def start_flask_server():
 # ---------------------------------------------------------------------------
 async def set_bot_commands(client: Client):
     """
-    Sets official bot commands visible in public Telegram client menu.
-    Public users ONLY see: /start, /help, /about, /dmca via BotCommandScopeDefault().
-    /index and /stats are strictly removed from public suggestions and restricted to OWNER_ID.
+    Sets official bot commands:
+    1. Default public scope (BotCommandScopeDefault): /start, /help, /about, /dmca.
+    2. Owner scope (BotCommandScopeChat for 783110149): includes /index and /stats.
     """
     try:
-        commands = [
+        public_commands = [
             BotCommand("start", "Initialize bot & access main portal"),
             BotCommand("help", "How to search and download"),
             BotCommand("about", "About CineVerse bot & developer"),
             BotCommand("dmca", "DMCA takedown & copyright notice"),
         ]
-        await client.set_bot_commands(commands, scope=BotCommandScopeDefault())
-        logger.info("✅ Bot commands updated: only /start, /help, /about, /dmca visible in public menu (BotCommandScopeDefault)")
+        await client.set_bot_commands(public_commands, scope=BotCommandScopeDefault())
+        logger.info("✅ Public bot commands updated: /start, /help, /about, /dmca visible in default public menu")
+
+        # Owner Menu: Only Owner 783110149 sees /index and /stats
+        owner_commands = [
+            BotCommand("start", "Initialize bot & access main portal"),
+            BotCommand("help", "How to search and download"),
+            BotCommand("about", "About CineVerse bot & developer"),
+            BotCommand("dmca", "DMCA takedown & copyright notice"),
+            BotCommand("stats", "Live database and telemetry metrics"),
+            BotCommand("index", "Full database channel sync (Owner)"),
+        ]
+        try:
+            await client.set_bot_commands(owner_commands, scope=BotCommandScopeChat(chat_id=ADMIN_ID))
+            logger.info(f"✅ Owner bot commands updated with /index for chat {ADMIN_ID}")
+        except Exception as e:
+            logger.warning(f"Could not set owner scope commands for {ADMIN_ID}: {e}")
     except Exception as e:
         logger.warning(f"Failed to set bot commands: {e}")
 

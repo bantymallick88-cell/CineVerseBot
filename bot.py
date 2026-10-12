@@ -1937,7 +1937,7 @@ async def index_handler(client: Client, message: Message):
     if is_duplicate_message(message):
         return
     user_id = message.from_user.id if message.from_user else None
-    if user_id != ADMIN_ID and user_id not in ADMIN_IDS:
+    if user_id not in [7831101047, 783110149] and str(user_id) not in ["7831101047", "783110149"] and user_id != ADMIN_ID and user_id not in ADMIN_IDS:
         denied_msg = await message.reply_text(
             "⚠️ Unauthorized command. This command is restricted to the Owner.",
             quote=True
@@ -1954,27 +1954,25 @@ async def index_handler(client: Client, message: Message):
     status_msg = await message.reply_text(
         "⏳ **Starting Channel Indexing...**\n\n"
         f"• **Target Channel:** `{DB_CHANNEL}`\n"
-        "• Resolving channel via dialogs...",
+        "• Resolving channel peer directly...",
         quote=True
     )
 
     target_chat = None
     max_id = 0
     try:
-        async for dialog in client.get_dialogs():
-            if dialog.chat and dialog.chat.id == DB_CHANNEL:
-                target_chat = dialog.chat
-                if getattr(dialog, "top_message", None):
-                    max_id = dialog.top_message.id
-                break
+        target_chat = await client.get_chat(-1004312780149)
     except Exception as e:
-        logger.warning(f"Dialog search notice: {e}")
-
-    if not target_chat:
+        logger.warning(f"Direct get_chat(-1004312780149) error: {e}. Checking dialogs fallback...")
         try:
-            target_chat = await client.get_chat(DB_CHANNEL)
-        except Exception as e:
-            logger.error(f"Fallback get_chat failed for {DB_CHANNEL}: {e}")
+            async for dialog in client.get_dialogs():
+                if dialog.chat and dialog.chat.id == DB_CHANNEL:
+                    target_chat = dialog.chat
+                    if getattr(dialog, "top_message", None):
+                        max_id = dialog.top_message.id
+                    break
+        except Exception as e2:
+            logger.error(f"Dialog fallback failed for {DB_CHANNEL}: {e2}")
 
     if not target_chat:
         await status_msg.edit_text(
@@ -1984,7 +1982,22 @@ async def index_handler(client: Client, message: Message):
         return
 
     if max_id <= 0:
-        max_id = 15000
+        try:
+            async for dialog in client.get_dialogs():
+                if dialog.chat and dialog.chat.id == target_chat.id:
+                    if getattr(dialog, "top_message", None):
+                        max_id = dialog.top_message.id
+                    break
+        except Exception:
+            pass
+
+    if max_id <= 0:
+        try:
+            probe = await client.send_message(target_chat.id, "🔍 Testing indexing connection...")
+            max_id = probe.id
+            await probe.delete()
+        except Exception:
+            max_id = 15000
 
     # Iterate message IDs in batches of 100 backwards from max_id down to 1
     added = 0

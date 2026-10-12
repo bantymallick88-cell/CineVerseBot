@@ -140,6 +140,8 @@ REQUEST_LOCK_EXPIRY = 5.0  # 5-second deduplication lock window
 DB_FILE = os.path.join(os.getcwd(), "database.db")
 TARGET_RESOLVED_CHAT_ID: Optional[Any] = None
 FSUB_RESOLVED_CHAT_ID: Optional[Any] = None
+USER_DOWNLOAD_CACHE: Dict[int, float] = {}
+FILE_COOLDOWN_SECONDS: int = 25200  # 7 hours = 7 * 3600 seconds
 
 # ---------------------------------------------------------------------------
 # DATABASE MANAGER (WAL MODE, PERSISTENT & SAFE)
@@ -209,6 +211,12 @@ class Database:
                 "INSERT OR IGNORE INTO authorized_groups (group_id, added_by) VALUES (?, ?);",
                 (SEARCH_GROUP_ID, OWNER_ID)
             )
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS user_downloads (
+                    user_id INTEGER PRIMARY KEY,
+                    last_download_timestamp REAL
+                );
+            """)
             # Clean up existing exact duplicates so only 1 unique record remains per (title, file_size)
             try:
                 conn.execute("""
@@ -222,6 +230,39 @@ class Database:
             except Exception as e:
                 logger.warning(f"Note on deduplicating movies table: {e}")
             conn.commit()
+
+    def _get_user_last_download(self, user_id: int) -> float:
+        if user_id in USER_DOWNLOAD_CACHE:
+            return USER_DOWNLOAD_CACHE[user_id]
+        try:
+            with self._get_connection() as conn:
+                row = conn.execute("SELECT last_download_timestamp FROM user_downloads WHERE user_id = ?;", (user_id,)).fetchone()
+                if row:
+                    val = float(row["last_download_timestamp"])
+                    USER_DOWNLOAD_CACHE[user_id] = val
+                    return val
+        except Exception as e:
+            logger.error(f"Error reading user_downloads for {user_id}: {e}")
+        return 0.0
+
+    async def get_user_last_download(self, user_id: int) -> float:
+        return await asyncio.to_thread(self._get_user_last_download, user_id)
+
+    def _set_user_last_download(self, user_id: int, timestamp: float):
+        USER_DOWNLOAD_CACHE[user_id] = timestamp
+        try:
+            with self._get_connection() as conn:
+                conn.execute("""
+                    INSERT INTO user_downloads (user_id, last_download_timestamp)
+                    VALUES (?, ?)
+                    ON CONFLICT(user_id) DO UPDATE SET last_download_timestamp = excluded.last_download_timestamp;
+                """, (user_id, timestamp))
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Error updating user_downloads for {user_id}: {e}")
+
+    async def set_user_last_download(self, user_id: int, timestamp: float):
+        await asyncio.to_thread(self._set_user_last_download, user_id, timestamp)
 
     def _add_user(self, user_id: int):
         try:
@@ -732,18 +773,15 @@ async def get_file_download_short_url(file_msg_id: int) -> str:
 
 async def build_pagination_markup(files: List[Dict[str, Any]], cache_id: str, current_page: int, total_pages: int, bot_username: Optional[str] = None) -> InlineKeyboardMarkup:
     buttons = []
+    target_bot = bot_username or os.getenv("BOT_USERNAME", "CineVerseFilterBot")
     
-    # Strictly wrap EVERY download button URL with GPLinks shortened URL
-    # Resolve short URLs concurrently via asyncio.gather for ultra-fast response
-    tasks = [get_file_download_short_url(f["message_id"]) for f in files]
-    short_urls = await asyncio.gather(*tasks)
-
-    # File download buttons formatted with modern luxury badge: 📥 [ 1080p FHD │ 1.45 GB ] ▷ {Title}
-    for f, btn_url in zip(files, short_urls):
+    # Direct Delivery (No Ads): Set download buttons directly to Telegram deep links
+    for f in files:
         name = f.get("title", "Movie")
         size_str = format_size(f.get("file_size", 0))
         meta = extract_movie_metadata(name)
         display_name = (meta["clean_title"][:26] + "...") if len(meta["clean_title"]) > 29 else meta["clean_title"]
+        btn_url = f"https://t.me/{target_bot}?start=file_{f['message_id']}"
         btn_text = f"📥 [ {meta['quality']} │ {size_str} ] ▷ {display_name}"
         buttons.append([InlineKeyboardButton(text=btn_text, url=btn_url)])
 
@@ -1315,13 +1353,34 @@ async def start_handler(client: Client, message: Message):
                 asyncio.create_task(auto_delete(fsub_msg, 60, reply_to_message=message))
             return
 
-        # If user initiates download from group via /start get_{file_id}, enforce GPLinks ad verification:
-        if is_get_flow and GPLINKS_API_KEY and user_id != OWNER_ID and user_id not in ADMIN_IDS:
-            await send_gplinks_verification_card(client, message, user_id, file_msg_id, reply_to_message=message)
+        # 7-Hour Rate Limit per User:
+        now = time.time()
+        last_dl = await db.get_user_last_download(user_id)
+        elapsed = now - last_dl
+        if not (user_id == OWNER_ID or user_id in ADMIN_IDS) and elapsed < FILE_COOLDOWN_SECONDS:
+            remaining = int(FILE_COOLDOWN_SECONDS - elapsed)
+            rem_hours = remaining // 3600
+            rem_mins = (remaining % 3600) // 60
+            cooldown_text = (
+                "┌──────────────────────────────────────────┐\n"
+                "│   ⚠️  C O O L D O W N   A C T I V E      │\n"
+                "└──────────────────────────────────────────┘\n\n"
+                f"⚠️ Cooldown Active! You can only request 1 file every 7 hours. Please wait {rem_hours} hours {rem_mins} minutes.\n\n"
+                "🍿 Search again later in CineVerse Search Group!"
+            )
+            cooldown_msg = await message.reply_text(
+                cooldown_text,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🍿 Open CineVerse Search Group", url=SEARCH_GROUP_LINK)]
+                ]),
+                quote=True
+            )
+            if cooldown_msg:
+                asyncio.create_task(auto_delete(cooldown_msg, 60, reply_to_message=message))
             return
 
-        # User completed GPLinks ad and returned via deep-link (https://t.me/CineVerseFilterBot?start=file_{file_id}):
-        # Deliver movie file instantly!
+        # Direct Delivery (No Ads): Deliver movie file instantly and record download timestamp
+        await db.set_user_last_download(user_id, now)
         await deliver_movie_file(client, user_id, file_msg_id)
         return
 
@@ -2411,15 +2470,20 @@ async def callback_router(client: Client, query: CallbackQuery):
             await query.answer("⏳ Request is already being processed!", show_alert=False)
             return
 
-        # GPLinks 1 File = 1 Ad Flow (if configured and not owner/admin)
-        if GPLINKS_API_KEY and user_id != OWNER_ID and user_id not in ADMIN_IDS:
-            await query.answer("⚡ Generating secure download link...", show_alert=False)
-            target_chat_id = query.message.chat.id if query.message and query.message.chat else user_id
-            await send_gplinks_verification_card(client, target_chat_id, user_id, msg_id, reply_to_message=query.message)
+        # 7-Hour Rate Limit per User (25200 seconds):
+        now = time.time()
+        last_dl = await db.get_user_last_download(user_id)
+        elapsed = now - last_dl
+        if not (user_id == OWNER_ID or user_id in ADMIN_IDS) and elapsed < FILE_COOLDOWN_SECONDS:
+            remaining = int(FILE_COOLDOWN_SECONDS - elapsed)
+            rem_hours = remaining // 3600
+            rem_mins = (remaining % 3600) // 60
+            await query.answer(f"⚠️ Cooldown Active! You can only request 1 file every 7 hours. Please wait {rem_hours} hours {rem_mins} minutes.", show_alert=True)
             return
 
-        # User is verified: Send file immediately in PM
-        await query.answer("✅ Verified! Delivering your file...", show_alert=False)
+        # Direct Delivery (No Ads): Deliver movie file instantly
+        await db.set_user_last_download(user_id, now)
+        await query.answer("✅ Delivering your file...", show_alert=False)
         try:
             await query.message.delete()
         except Exception:

@@ -1435,6 +1435,22 @@ async def start_handler(client: Client, message: Message):
             asyncio.create_task(auto_delete(start_grp, 60, reply_to_message=message))
         return
 
+    # Trigger set_bot_commands for Owner whenever Owner (783110149) sends /start in PM
+    if user_id == 783110149 and message.chat and message.chat.type == enums.ChatType.PRIVATE:
+        try:
+            await client.set_bot_commands(
+                [
+                    BotCommand("index", "Index Movies Database"),
+                    BotCommand("start", "Start Bot"),
+                    BotCommand("help", "Help Guide"),
+                    BotCommand("about", "About Bot")
+                ],
+                scope=BotCommandScopeChat(chat_id=783110149)
+            )
+            logger.info("✅ Owner menu refreshed on /start for chat 783110149")
+        except Exception as e:
+            logger.warning(f"Could not refresh owner menu on /start: {e}")
+
     # 2. Owner Permission Gate: Check if disapproved
     if await db.is_disapproved_user(user_id):
         denied_msg = await message.reply_text(
@@ -1936,134 +1952,128 @@ async def index_handler(client: Client, message: Message):
     status_msg = await message.reply_text(
         "⏳ **Starting Channel Indexing...**\n\n"
         f"• **Target Channel:** `{target_channel}`\n"
-        "• Resolving channel access...",
+        "• Fetching latest message ID in database channel...",
         quote=True
     )
 
-    chat = None
     try:
-        # Method 1: Integer ID direct fetch
-        chat = await client.get_chat(int(target_channel))
-    except Exception as e:
-        logger.warning(f"Direct get_chat failed for {target_channel}: {e}")
+        # Fetch latest message ID in database channel
+        latest_msg = await client.send_message(target_channel, ".")
+        max_id = latest_msg.id
         try:
-            # Method 2: Access via dialogs / cache refresh
-            async for dialog in client.get_dialogs():
-                if dialog.chat and dialog.chat.id == target_channel:
-                    chat = dialog.chat
-                    break
-        except Exception as e2:
-            logger.error(f"Dialog search failed: {e2}")
+            await latest_msg.delete()
+        except Exception:
+            pass
+    except Exception as e:
+        logger.error(f"Failed to fetch latest message ID from {target_channel}: {e}")
+        await status_msg.edit_text(
+            f"❌ **Failed to send probe message to channel:**\n`{e}`\n\n"
+            "Please ensure the bot is added to channel `-1004312780149` as an Administrator with 'Post Messages' and 'Delete Messages' permissions."
+        )
+        return
 
-    # Fallback to known username if still unresolved
-    if not chat:
-        for fallback_user in ["cenahub01", "@cenahub01"]:
-            try:
-                chat = await client.get_chat(fallback_user)
-                if chat:
-                    break
-            except Exception:
-                pass
-
-    channel_name = getattr(chat, "title", "Odia flim data base") if chat else "Odia flim data base"
-    scan_target = chat.id if chat else target_channel
-
+    # Iterate message IDs in batches of 100 backwards from max_id down to 1
+    added = 0
     total_scanned = 0
     total_media = 0
-    total_new = 0
     batch_buffer: List[Tuple[str, str, int, int]] = []
     last_update = time.time()
 
     try:
-        # Scan channel history once resolved
-        async for msg in client.get_chat_history(scan_target):
-            if not msg or getattr(msg, "empty", False):
-                continue
-            total_scanned += 1
+        for i in range(max_id, 0, -100):
+            msg_ids = list(range(max(1, i - 99), i + 1))
+            total_scanned += len(msg_ids)
+            try:
+                msgs = await client.get_messages(target_channel, msg_ids)
+                if not msgs:
+                    continue
+                if not isinstance(msgs, list):
+                    msgs = [msgs]
+                for m in msgs:
+                    if m and (m.document or m.video or m.audio):
+                        total_media += 1
+                        media = m.video or m.document or m.audio
+                        file_name = getattr(media, "file_name", None) or ""
+                        raw_caption = m.caption.strip() if m.caption else ""
 
-            if msg.media or msg.document or msg.video:
-                total_media += 1
-                media = msg.video or msg.document or msg.audio or msg.animation
-                raw_caption = msg.caption.strip() if msg.caption else ""
-                file_name = getattr(media, "file_name", None) or ""
+                        if file_name and any(file_name.lower().endswith(ext) for ext in [".mkv", ".mp4", ".avi", ".webm", ".mov"]):
+                            title = file_name.strip()
+                        elif raw_caption:
+                            lines = [ln.strip() for ln in raw_caption.split("\n") if ln.strip()]
+                            title = lines[0] if lines else (file_name or f"Movie_{m.id}")
+                        else:
+                            title = file_name or f"Movie_{m.id}"
 
-                if file_name and any(file_name.lower().endswith(ext) for ext in [".mkv", ".mp4", ".avi", ".webm", ".mov"]):
-                    title = file_name.strip()
-                elif raw_caption:
-                    lines = [ln.strip() for ln in raw_caption.split("\n") if ln.strip()]
-                    title = lines[0] if lines else (file_name or f"Movie_{msg.id}")
-                else:
-                    title = file_name or f"Movie_{msg.id}"
+                        file_id = getattr(media, "file_id", None)
+                        file_size = getattr(media, "file_size", 0) or 0
 
-                file_id = getattr(media, "file_id", None)
-                file_size = getattr(media, "file_size", 0)
-
-                if file_id and title:
-                    batch_buffer.append((file_id, title, file_size, msg.id))
+                        if file_id and title:
+                            batch_buffer.append((file_id, title, file_size, m.id))
 
                 if len(batch_buffer) >= 100:
-                    added = await db.add_movies_batch(batch_buffer)
-                    total_new += added
+                    ins_count = await db.add_movies_batch(batch_buffer)
+                    added += ins_count
                     batch_buffer.clear()
+
+            except FloodWait as fw:
+                wait_time = int(getattr(fw, "value", getattr(fw, "x", 30)))
+                logger.warning(f"FloodWait during batch indexing: sleeping {wait_time}s")
+                await asyncio.sleep(wait_time)
+            except Exception as e:
+                logger.error(f"Error fetching batch: {e}")
 
             # Live progress update every 3 seconds
             if time.time() - last_update > 3:
+                if batch_buffer:
+                    ins_count = await db.add_movies_batch(batch_buffer)
+                    added += ins_count
+                    batch_buffer.clear()
                 stats = await db.get_stats()
                 try:
                     await status_msg.edit_text(
-                        f"⏳ **Indexing in Progress...**\n\n"
-                        f"• **Channel:** `{channel_name}` (`{scan_target}`)\n"
+                        f"⏳ **Indexing in Progress (Bot API Batch Mode)...**\n\n"
+                        f"• **Channel:** `{target_channel}`\n"
+                        f"• **Scanning Range:** IDs `{msg_ids[0]}` - `{msg_ids[-1]}` (of `{max_id}`)\n"
                         f"• **Messages Scanned:** `{total_scanned}`\n"
                         f"• **Videos/Files Found:** `{total_media}`\n"
-                        f"• **Newly Added:** `{total_new}`\n"
+                        f"• **Newly Added:** `{added}`\n"
                         f"🎬 **Total Movies in DB:** `{stats['movies']}`"
                     )
                 except MessageNotModified:
+                    pass
+                except Exception:
                     pass
                 last_update = time.time()
 
         # Flush remaining buffer
         if batch_buffer:
-            added = await db.add_movies_batch(batch_buffer)
-            total_new += added
+            ins_count = await db.add_movies_batch(batch_buffer)
+            added += ins_count
             batch_buffer.clear()
 
         stats = await db.get_stats()
         await status_msg.edit_text(
             f"✅ **Full Channel Indexing Complete!**\n\n"
-            f"• **Channel:** `{channel_name}` (`{scan_target}`)\n"
+            f"• **Channel:** `{target_channel}`\n"
             f"• **Total Messages Scanned:** `{total_scanned}`\n"
             f"• **Total Videos/Files Identified:** `{total_media}`\n"
-            f"• **New Titles Imported:** `{total_new}`\n"
+            f"• **New Titles Imported:** `{added}`\n"
             f"🎬 **Total Movies in Database:** `{stats['movies']}`"
         )
         if status_msg:
-            asyncio.create_task(auto_delete(status_msg, 60, reply_to_message=message))
+            asyncio.create_task(auto_delete(status_msg, 120, reply_to_message=message))
 
-    except FloodWait as e:
-        wait_time = int(getattr(e, "value", getattr(e, "x", 30)))
-        logger.warning(f"FloodWait during indexing: sleeping {wait_time}s")
-        if batch_buffer:
-            await db.add_movies_batch(batch_buffer)
-            batch_buffer.clear()
-        await asyncio.sleep(wait_time)
-        stats = await db.get_stats()
-        await status_msg.edit_text(
-            f"⚠️ **Indexing Paused (FloodWait):** {wait_time}s\n\n"
-            f"• **Messages Scanned:** `{total_scanned}`\n"
-            f"• **New Imported:** `{total_new}`\n"
-            f"🎬 **Total Movies in Database:** `{stats['movies']}`"
-        )
     except Exception as e:
-        logger.error(f"Error streaming channel history for {scan_target}: {e}", exc_info=True)
+        logger.error(f"Error in batch indexing for {target_channel}: {e}", exc_info=True)
         if batch_buffer:
-            await db.add_movies_batch(batch_buffer)
+            ins_count = await db.add_movies_batch(batch_buffer)
+            added += ins_count
             batch_buffer.clear()
         stats = await db.get_stats()
         await status_msg.edit_text(
             f"⚠️ **Indexing Notice:** {e}\n\n"
             f"• **Messages Scanned:** `{total_scanned}`\n"
-            f"• **New Titles Added:** `{total_new}`\n"
+            f"• **New Titles Added:** `{added}`\n"
             f"🎬 **Total Movies in Database:** `{stats['movies']}`"
         )
 
@@ -3049,7 +3059,7 @@ async def set_bot_commands(client: Client):
     try:
         await client.set_bot_commands(
             [
-                BotCommand("index", "Index All Movies (Owner)"),
+                BotCommand("index", "Index Movies Database"),
                 BotCommand("start", "Start Bot"),
                 BotCommand("help", "Help Guide"),
                 BotCommand("about", "About Bot")
@@ -3058,7 +3068,7 @@ async def set_bot_commands(client: Client):
         )
         logger.info("✅ Owner-specific menu registered for chat 783110149")
     except Exception as e:
-        logger.warning(f"Failed to set owner commands for 783110149: {e}")
+        logger.warning(f"Could not set owner menu on startup: {e}")
 
 async def _start_pyrogram_client():
     """

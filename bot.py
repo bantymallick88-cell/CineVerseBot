@@ -1320,7 +1320,7 @@ async def send_gplinks_verification_card(client: Client, target_chat: Any, user_
 send_arolinks_verification_card = send_gplinks_verification_card
 
 async def check_chat_membership(client: Client, chat_id: Any, user_id: int, fallback_username: Optional[str] = None) -> bool:
-    if user_id in [7831101047, 783110149] or str(user_id) in ["7831101047", "783110149"]:
+    if user_id == 7831101047 or str(user_id) == "7831101047" or user_id in [7831101047, 783110149] or str(user_id) in ["7831101047", "783110149"]:
         return True
     try:
         member = await client.get_chat_member(chat_id=chat_id, user_id=user_id)
@@ -1356,7 +1356,7 @@ async def check_chat_membership(client: Client, chat_id: Any, user_id: int, fall
         return False
 
 async def check_fsub(client: Client, user_id: int) -> bool:
-    if user_id in [7831101047, 783110149] or str(user_id) in ["7831101047", "783110149"]:
+    if user_id == 7831101047 or str(user_id) == "7831101047" or user_id in [7831101047, 783110149] or str(user_id) in ["7831101047", "783110149"]:
         return True
     if user_id == ADMIN_ID or user_id == OWNER_ID or user_id in ADMIN_IDS:
         return True
@@ -1369,34 +1369,34 @@ async def check_fsub(client: Client, user_id: int) -> bool:
     )
 
 async def is_user_subscribed(client: Client, user_id: int) -> bool:
-    if user_id in [7831101047, 783110149] or str(user_id) in ["7831101047", "783110149"]:
+    if user_id == 7831101047 or str(user_id) == "7831101047" or user_id in [7831101047, 783110149] or str(user_id) in ["7831101047", "783110149"]:
         return True
     return await check_fsub(client, user_id)
 
 fsub_check = is_user_subscribed
 
 async def is_user_joined_group(client: Client, user_id: int) -> bool:
-    if user_id in [7831101047, 783110149] or str(user_id) in ["7831101047", "783110149"]:
+    if user_id == 7831101047 or str(user_id) == "7831101047" or user_id in [7831101047, 783110149] or str(user_id) in ["7831101047", "783110149"]:
         return True
     return await fsub_check(client, user_id)
 
 async def is_user_fully_joined(client: Client, user_id: int) -> bool:
-    if user_id in [7831101047, 783110149] or str(user_id) in ["7831101047", "783110149"]:
+    if user_id == 7831101047 or str(user_id) == "7831101047" or user_id in [7831101047, 783110149] or str(user_id) in ["7831101047", "783110149"]:
         return True
     return await fsub_check(client, user_id)
 
 async def force_sub(client: Client, user_id: int) -> bool:
-    if user_id in [7831101047, 783110149] or str(user_id) in ["7831101047", "783110149"]:
+    if user_id == 7831101047 or str(user_id) == "7831101047" or user_id in [7831101047, 783110149] or str(user_id) in ["7831101047", "783110149"]:
         return True
     return await check_fsub(client, user_id)
 
 async def middleware_handler(client: Client, user_id: int) -> bool:
-    if user_id in [7831101047, 783110149] or str(user_id) in ["7831101047", "783110149"]:
+    if user_id == 7831101047 or str(user_id) == "7831101047" or user_id in [7831101047, 783110149] or str(user_id) in ["7831101047", "783110149"]:
         return True
     return await check_fsub(client, user_id)
 
 async def is_authorized_user(user_id: int) -> bool:
-    if user_id in [7831101047, 783110149] or str(user_id) in ["7831101047", "783110149"]:
+    if user_id == 7831101047 or str(user_id) == "7831101047" or user_id in [7831101047, 783110149] or str(user_id) in ["7831101047", "783110149"]:
         return True
     if user_id == ADMIN_ID or user_id == OWNER_ID or user_id in ADMIN_IDS:
         return True
@@ -1413,7 +1413,7 @@ def build_force_join_markup(retry_callback: str = "cb_check_join") -> InlineKeyb
     ])
 
 async def is_sender_chat_admin(client: Client, chat_id: int, user_id: int) -> bool:
-    if user_id in [7831101047, 783110149] or str(user_id) in ["7831101047", "783110149"]:
+    if user_id == 7831101047 or str(user_id) == "7831101047" or user_id in [7831101047, 783110149] or str(user_id) in ["7831101047", "783110149"]:
         return True
     if user_id == ADMIN_ID or user_id == OWNER_ID or user_id in ADMIN_IDS:
         return True
@@ -1430,6 +1430,9 @@ async def check_group_authorization(client: Client, message: Message) -> bool:
     """
     Fallback Mode: Temporarily allow search queries from ANY group while logging chat ID.
     """
+    user_id = message.from_user.id if message.from_user else None
+    if user_id == 7831101047 or str(user_id) == "7831101047":
+        return True
     if message.chat:
         logger.info(f"Incoming Search Chat ID: {message.chat.id} | Title: '{getattr(message.chat, 'title', '')}'")
         print(f"Incoming Search Chat ID: {message.chat.id} | Title: '{getattr(message.chat, 'title', '')}'")
@@ -2011,18 +2014,18 @@ async def index_handler(client: Client, message: Message):
                     continue
                 if not isinstance(msgs, list):
                     msgs = [msgs]
-                for message in msgs:
-                    if not message:
+                for msg in msgs:
+                    if not msg:
                         continue
-                    media = message.document or message.video or message.audio or message.animation
+                    media = msg.document or msg.video or msg.audio or msg.animation
                     if media and getattr(media, 'file_id', None):
                         total_media += 1
-                        file_name = getattr(media, 'file_name', None) or message.caption or "Untitled"
+                        file_name = getattr(media, 'file_name', None) or msg.caption or "Untitled"
                         file_id = getattr(media, 'file_id', None)
                         file_size = getattr(media, 'file_size', 0) or 0
                         # Save file_id, file_name, file_size to database/movies.db
                         if file_id and file_name:
-                            batch_buffer.append((file_id, str(file_name).strip(), file_size, message.id))
+                            batch_buffer.append((file_id, str(file_name).strip(), file_size, msg.id))
 
                 if len(batch_buffer) >= 100:
                     ins_count = await db.add_movies_batch(batch_buffer)

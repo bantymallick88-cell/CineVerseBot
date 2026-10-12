@@ -260,18 +260,7 @@ class Database:
                     PRIMARY KEY (user_id, chat_id)
                 );
             """)
-            # Clean up existing exact duplicates so only 1 unique record remains per (title, file_size)
-            try:
-                conn.execute("""
-                    DELETE FROM movies 
-                    WHERE rowid NOT IN (
-                        SELECT MIN(rowid) 
-                        FROM movies 
-                        GROUP BY title, file_size
-                    );
-                """)
-            except Exception as e:
-                logger.warning(f"Note on deduplicating movies table: {e}")
+            # Movie records preservation: never delete or truncate existing movie records
 
             # Ensure files VIEW or movies VIEW exists to support both files and movies tables interchangeably
             try:
@@ -1033,9 +1022,9 @@ async def build_pagination_markup(files: List[Dict[str, Any]], cache_id: str, cu
         nav_row.append(InlineKeyboardButton("NEXT ▶️", callback_data=f"nav_{cache_id}_{current_page + 1}"))
     buttons.append(nav_row)
 
-    # Row 3: Official CineVerse Search Group & Creator badge
+    # Row 3: Official CineVerse Channel & Creator badge
     buttons.append([
-        InlineKeyboardButton("🍿 Open CineVerse Search Group", url=SEARCH_GROUP_LINK),
+        InlineKeyboardButton("📢 Official Channel ↗", url=FSUB_CHANNEL_LINK),
         InlineKeyboardButton("⚡ By Banty ↗", url=DEVELOPER_LINK)
     ])
     
@@ -1289,7 +1278,7 @@ async def send_gplinks_verification_card(client: Client, target_chat: Any, user_
     verify_markup = InlineKeyboardMarkup([
         [InlineKeyboardButton("📥 Download / Get File", url=short_url)],
         [InlineKeyboardButton("❓ How to Open Link? / କେମିତି ଖୋଲିବେ?", callback_data="how_to_open_link")],
-        [InlineKeyboardButton("🍿 Open CineVerse Search Group", url=SEARCH_GROUP_LINK)]
+        [InlineKeyboardButton("📢 Official Channel ↗", url=FSUB_CHANNEL_LINK)]
     ])
 
     verify_msg = None
@@ -1574,7 +1563,7 @@ async def start_handler(client: Client, message: Message):
                 "├─ ⚡ Policy: Strictly 1 File = 1 Ad Verification.\n"
                 "└─ 🍿 Please search again in CineVerse Search Group to get a new download link.",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🍿 Open CineVerse Search Group", url=SEARCH_GROUP_LINK)]
+                    [InlineKeyboardButton("📢 Official Channel ↗", url=FSUB_CHANNEL_LINK)]
                 ]),
                 quote=True
             )
@@ -1588,9 +1577,9 @@ async def start_handler(client: Client, message: Message):
                 "└──────────────────────────────────────────┘\n\n"
                 "◈ **Invalid or Expired Link!**\n"
                 "├─ ⚠️ This verification link is invalid or has expired.\n"
-                "└─ 🍿 Please search for your movie again in CineVerse Search Group.",
+                "└─ 🍿 Please search for your movie again in CineVerse.",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🍿 Open CineVerse Search Group", url=SEARCH_GROUP_LINK)]
+                    [InlineKeyboardButton("📢 Official Channel ↗", url=FSUB_CHANNEL_LINK)]
                 ]),
                 quote=True
             )
@@ -1641,7 +1630,7 @@ async def start_handler(client: Client, message: Message):
             cooldown_msg = await message.reply_text(
                 cooldown_text,
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🍿 Open CineVerse Search Group", url=SEARCH_GROUP_LINK)]
+                    [InlineKeyboardButton("📢 Official Channel ↗", url=FSUB_CHANNEL_LINK)]
                 ]),
                 quote=True
             )
@@ -1703,7 +1692,8 @@ async def start_handler(client: Client, message: Message):
     )
     markup = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🍿 Open CineVerse Search Group", url=SEARCH_GROUP_LINK)
+            InlineKeyboardButton("📢 Official Channel ↗", url=FSUB_CHANNEL_LINK),
+            InlineKeyboardButton("➕ Add Me to Group ↗", url=f"https://t.me/{bot_me.username}?startgroup=true")
         ],
         [
             InlineKeyboardButton("📖 Guide & Help", callback_data="cb_help"),
@@ -1714,8 +1704,7 @@ async def start_handler(client: Client, message: Message):
             InlineKeyboardButton("📋 DMCA Takedown", callback_data="cb_dmca")
         ],
         [
-            InlineKeyboardButton("ℹ️ About CineVerse", callback_data="cb_about"),
-            InlineKeyboardButton("📢 Backup Channel ↗", url=BACKUP_CHANNEL_LINK)
+            InlineKeyboardButton("ℹ️ About CineVerse", callback_data="cb_about")
         ]
     ])
 
@@ -2292,9 +2281,6 @@ async def group_security_and_antispam_handler(client: Client, message: Message):
 # ---------------------------------------------------------------------------
 @app.on_message(group=-1)
 async def incoming_user_message_tracker(client: Client, message: Message):
-    if message.from_user and (message.from_user.id in [7831101047, 783110149] or str(message.from_user.id) in ["7831101047", "783110149"]):
-        # Skip subscription verification completely for owner
-        pass
     """
     Global 60-Second Auto-Delete Engine:
     Guarantees EVERY incoming user message in Group or PM (user search query,
@@ -2339,9 +2325,6 @@ async def incoming_user_message_tracker(client: Client, message: Message):
 # ---------------------------------------------------------------------------
 @app.on_message(filters.service & ~filters.private)
 async def service_message_cleaner(client: Client, message: Message):
-    if message.from_user and (message.from_user.id in [7831101047, 783110149] or str(message.from_user.id) in ["7831101047", "783110149"]):
-        # Skip subscription verification completely for owner
-        pass
     if is_duplicate_message(message):
         return
 
@@ -2408,70 +2391,16 @@ async def auto_filter_handler(client: Client, message: Message):
             asyncio.create_task(auto_delete(denied_msg, 60, reply_to_message=message))
         return
 
-    # 3. If query is in Private Chat (PM): Redirect to CineVerse Search Group
-    if message.chat.type == enums.ChatType.PRIVATE:
-        # Check Force Join first in PM
-        if not is_owner and not await is_user_fully_joined(client, user_id):
-            user_name = message.from_user.first_name if message.from_user and message.from_user.first_name else "Friend"
-            fsub_text = (
-                "┌──────────────────────────────────────────┐\n"
-                "│   🔒  A C C E S S   R E Q U I R E D      │\n"
-                "│     CineVerse Force Subscribe Gate       │\n"
-                "└──────────────────────────────────────────┘\n\n"
-                f"👋 Hello **{user_name}**,\n\n"
-                "To access CineVerse Bot search, you **MUST** join our official channel:\n\n"
-                "◈ **Required Channel:**\n"
-                "└─ 🍿 **CineVerse Official** (`@CineVerseFlimSearch`)\n\n"
-                "👉 *Join below and tap 'Try Again / Verified':*"
-            )
-            fsub_markup = build_force_join_markup("cb_check_join")
-            pm_msg = await message.reply_text(
-                fsub_text,
-                reply_markup=fsub_markup,
-                quote=True,
-                disable_web_page_preview=True
-            )
-            if pm_msg:
-                asyncio.create_task(auto_delete(pm_msg, 60, reply_to_message=message))
-            return
-
-        user_name = message.from_user.first_name if message.from_user and message.from_user.first_name else "Friend"
-        redirect_text = (
-            "┌──────────────────────────────────────────┐\n"
-            "│   🍿  C I N E V E R S E   S E A R C H    │\n"
-            "│        Search in Official Group          │\n"
-            "└──────────────────────────────────────────┘\n\n"
-            f"👋 Hello **{user_name}**,\n\n"
-            "Direct query processing is hosted in **CineVerse Search Group** (`-1004427640174`) for maximum speed & multi-user support!\n\n"
-            "◈ **How to Search:**\n"
-            "├─ 💬 Send your movie or series title in CineVerse Search Group\n"
-            "├─ 📥 Select your resolution & audio badge\n"
-            "└─ ⚡ Bot automatically delivers files directly to your PM!\n\n"
-            "👉 *Tap the button below to open CineVerse Search Group now!*"
-        )
-        redirect_markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🍿 Open CineVerse Search Group", url=SEARCH_GROUP_LINK)]
-        ])
-        pm_msg = await message.reply_text(
-            redirect_text,
-            reply_markup=redirect_markup,
-            quote=True,
-            disable_web_page_preview=True
-        )
-        if pm_msg:
-            asyncio.create_task(auto_delete(pm_msg, 60, reply_to_message=message))
-        return
-
-    # 4. Mandatory Group Member Check (Force-Sub)
+    # 3. Mandatory Force-Subscription Check for non-owner (Group and PM)
     if not is_owner and not await is_user_fully_joined(client, user_id):
-        user_name = message.from_user.mention if message.from_user else "Friend"
+        user_name = (message.from_user.first_name if (message.chat and message.chat.type == enums.ChatType.PRIVATE) else (message.from_user.mention if message.from_user else "Friend"))
         fsub_text = (
             "┌──────────────────────────────────────────┐\n"
             "│   🔒  A C C E S S   R E Q U I R E D      │\n"
             "│     CineVerse Force Subscribe Gate       │\n"
             "└──────────────────────────────────────────┘\n\n"
-            f"👋 Hello {user_name},\n\n"
-            "You **MUST** be a member of CineVerse to search and download movies!\n\n"
+            f"👋 Hello **{user_name}**,\n\n"
+            "To access CineVerse Bot search, you **MUST** join our official channel:\n\n"
             "◈ **Required Channel:**\n"
             "└─ 🍿 **CineVerse Official** (`@CineVerseFlimSearch`)\n\n"
             "👉 *Join below and tap 'Try Again / Verified':*"
@@ -2487,7 +2416,7 @@ async def auto_filter_handler(client: Client, message: Message):
             asyncio.create_task(auto_delete(block_msg, 60, reply_to_message=message))
         return
 
-    # 5. Group Search: Handle queries < 2 chars as invalid queries
+    # 4. Search Query Validation: Handle queries < 2 chars as invalid queries
     if len(text) < 2:
         short_msg = await message.reply_text(
             "┌──────────────────────────────────────────┐\n"
@@ -2513,7 +2442,7 @@ async def auto_filter_handler(client: Client, message: Message):
                 f"◈ **Searched:** `{text}`\n"
                 "├─ ⚠️ No matching file available in current vault.\n"
                 "├─ 💡 Tip: Check spelling or try searching with release year.\n"
-                f"└─ 🍿 Request new titles in our Request Group: {REQ_GROUP_LINK}",
+                f"└─ 🍿 Official Channel: {FSUB_CHANNEL_LINK}",
                 quote=True,
                 disable_web_page_preview=True
             )
@@ -2528,7 +2457,7 @@ async def auto_filter_handler(client: Client, message: Message):
         markup = await build_pagination_markup(files, cache_id, 1, total_pages, bot_username=bot_uname)
         response_text = format_search_text(text, total, 1, total_pages)
 
-        # Reply directly in group (Single message only, NO duplicate group notices)
+        # Reply directly (Single message only, NO duplicate notices)
         sent_msg = await message.reply_text(response_text, reply_markup=markup, quote=True)
         if sent_msg:
             asyncio.create_task(auto_delete(sent_msg, 60, reply_to_message=message))
@@ -2543,7 +2472,7 @@ async def auto_filter_handler(client: Client, message: Message):
                 f"◈ **Searched:** `{text}`\n"
                 "├─ ⚠️ No matching file available in current vault.\n"
                 "├─ 💡 Tip: Check spelling or try searching with release year.\n"
-                f"└─ 🍿 Request new titles in our Request Group: {REQ_GROUP_LINK}",
+                f"└─ 🍿 Official Channel: {FSUB_CHANNEL_LINK}",
                 quote=True,
                 disable_web_page_preview=True
             )
@@ -2595,9 +2524,9 @@ async def callback_router(client: Client, query: CallbackQuery):
                     "🎉 **Welcome to CineVerse Search Network!**\n\n"
                     "Your membership in CineVerse Channel has been verified successfully.\n\n"
                     "◈ **Next Step:**\n"
-                    "💬 Search any movie title directly in CineVerse Search Group below!",
+                    "💬 Search any movie title directly in CineVerse!",
                     reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🍿 Open CineVerse Search Group ↗", url=SEARCH_GROUP_LINK)]
+                        [InlineKeyboardButton("📢 Official Channel ↗", url=FSUB_CHANNEL_LINK)]
                     ])
                 )
             except Exception:
@@ -2882,7 +2811,8 @@ async def callback_router(client: Client, query: CallbackQuery):
         )
         markup = InlineKeyboardMarkup([
             [
-                InlineKeyboardButton("🍿 Open CineVerse Search Group", url=SEARCH_GROUP_LINK)
+                InlineKeyboardButton("📢 Official Channel ↗", url=FSUB_CHANNEL_LINK),
+                InlineKeyboardButton("➕ Add Me to Group ↗", url=f"https://t.me/{bot_me.username}?startgroup=true")
             ],
             [
                 InlineKeyboardButton("📖 Guide & Help", callback_data="cb_help"),
@@ -2893,8 +2823,7 @@ async def callback_router(client: Client, query: CallbackQuery):
                 InlineKeyboardButton("📋 DMCA Takedown", callback_data="cb_dmca")
             ],
             [
-                InlineKeyboardButton("ℹ️ About CineVerse", callback_data="cb_about"),
-                InlineKeyboardButton("➕ Add Me to Group ↗", url=f"https://t.me/{bot_me.username}?startgroup=true")
+                InlineKeyboardButton("ℹ️ About CineVerse", callback_data="cb_about")
             ]
         ])
         try:

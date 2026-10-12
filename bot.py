@@ -1445,6 +1445,9 @@ async def check_group_authorization(client: Client, message: Message) -> bool:
 # ---------------------------------------------------------------------------
 @app.on_message(filters.command("start"))
 async def start_handler(client: Client, message: Message):
+    if message.from_user and (message.from_user.id in [7831101047, 783110149] or str(message.from_user.id) in ["7831101047", "783110149"]):
+        # Skip subscription verification completely for owner
+        pass
     if is_duplicate_message(message):
         return
     if not message.from_user:
@@ -1528,9 +1531,11 @@ async def start_handler(client: Client, message: Message):
             file_msg_id = int(param)
             is_get_flow = False
 
+    is_owner = (user_id in [7831101047, 783110149] or str(user_id) in ["7831101047", "783110149"])
+
     # A. User completed 1-page GPLinks ad verification and returned to PM:
     if verify_token:
-        if not await is_user_joined_group(client, user_id):
+        if not is_owner and not await is_user_joined_group(client, user_id):
             user_name = message.from_user.first_name if message.from_user and message.from_user.first_name else "Friend"
             fsub_text = (
                 "┌──────────────────────────────────────────┐\n"
@@ -1595,7 +1600,7 @@ async def start_handler(client: Client, message: Message):
 
     # B. User arrived for a specific file (from Search Group /start file_{id} or WebApp gateway):
     if file_msg_id:
-        if not await is_user_fully_joined(client, user_id):
+        if not is_owner and not await is_user_fully_joined(client, user_id):
             user_name = message.from_user.first_name if message.from_user and message.from_user.first_name else "Friend"
             fsub_text = (
                 "┌──────────────────────────────────────────┐\n"
@@ -1650,7 +1655,7 @@ async def start_handler(client: Client, message: Message):
         return
 
     # 4. Normal /start command (no file parameter): Check Force Join
-    if not await is_user_fully_joined(client, user_id):
+    if not is_owner and not await is_user_fully_joined(client, user_id):
         user_name = message.from_user.first_name if message.from_user and message.from_user.first_name else "Friend"
         fsub_text = (
             "┌──────────────────────────────────────────┐\n"
@@ -1724,6 +1729,9 @@ async def start_handler(client: Client, message: Message):
 
 @app.on_message(filters.command("stats"))
 async def stats_handler(client: Client, message: Message):
+    if message.from_user and (message.from_user.id in [7831101047, 783110149] or str(message.from_user.id) in ["7831101047", "783110149"]):
+        # Skip subscription verification completely for owner
+        pass
     if is_duplicate_message(message):
         return
     user_id = message.from_user.id if message.from_user else None
@@ -1763,6 +1771,9 @@ async def stats_handler(client: Client, message: Message):
 
 @app.on_message(filters.command("help"))
 async def help_handler(client: Client, message: Message):
+    if message.from_user and (message.from_user.id in [7831101047, 783110149] or str(message.from_user.id) in ["7831101047", "783110149"]):
+        # Skip subscription verification completely for owner
+        pass
     if is_duplicate_message(message):
         return
     asyncio.create_task(auto_delete(message, 60))
@@ -1791,6 +1802,9 @@ async def help_handler(client: Client, message: Message):
 
 @app.on_message(filters.command("disclaimer"))
 async def disclaimer_handler(client: Client, message: Message):
+    if message.from_user and (message.from_user.id in [7831101047, 783110149] or str(message.from_user.id) in ["7831101047", "783110149"]):
+        # Skip subscription verification completely for owner
+        pass
     if is_duplicate_message(message):
         return
     asyncio.create_task(auto_delete(message, 60))
@@ -1814,6 +1828,9 @@ async def disclaimer_handler(client: Client, message: Message):
 
 @app.on_message(filters.command("dmca"))
 async def dmca_handler(client: Client, message: Message):
+    if message.from_user and (message.from_user.id in [7831101047, 783110149] or str(message.from_user.id) in ["7831101047", "783110149"]):
+        # Skip subscription verification completely for owner
+        pass
     if is_duplicate_message(message):
         return
     asyncio.create_task(auto_delete(message, 60))
@@ -1878,6 +1895,9 @@ async def dmca_handler(client: Client, message: Message):
 
 @app.on_message(filters.command("about"))
 async def about_handler(client: Client, message: Message):
+    if message.from_user and (message.from_user.id in [7831101047, 783110149] or str(message.from_user.id) in ["7831101047", "783110149"]):
+        # Skip subscription verification completely for owner
+        pass
     if is_duplicate_message(message):
         return
     asyncio.create_task(auto_delete(message, 60))
@@ -1904,6 +1924,9 @@ async def about_handler(client: Client, message: Message):
 
 @app.on_message(filters.command("approve"))
 async def approve_handler(client: Client, message: Message):
+    if message.from_user and (message.from_user.id in [7831101047, 783110149] or str(message.from_user.id) in ["7831101047", "783110149"]):
+        # Skip subscription verification completely for owner
+        pass
     if is_duplicate_message(message):
         return
     asyncio.create_task(auto_delete(message, 60))
@@ -1928,6 +1951,9 @@ async def approve_handler(client: Client, message: Message):
 
 @app.on_message(filters.command("disapprove"))
 async def disapprove_handler(client: Client, message: Message):
+    if message.from_user and (message.from_user.id in [7831101047, 783110149] or str(message.from_user.id) in ["7831101047", "783110149"]):
+        # Skip subscription verification completely for owner
+        pass
     if is_duplicate_message(message):
         return
     asyncio.create_task(auto_delete(message, 60))
@@ -1952,6 +1978,9 @@ async def disapprove_handler(client: Client, message: Message):
 
 @app.on_message(filters.command("approved"))
 async def list_approved_handler(client: Client, message: Message):
+    if message.from_user and (message.from_user.id in [7831101047, 783110149] or str(message.from_user.id) in ["7831101047", "783110149"]):
+        # Skip subscription verification completely for owner
+        pass
     if is_duplicate_message(message):
         return
     asyncio.create_task(auto_delete(message, 60))
@@ -1973,6 +2002,9 @@ async def list_approved_handler(client: Client, message: Message):
 
 @app.on_message(filters.command("index"))
 async def index_handler(client: Client, message: Message):
+    if message.from_user and (message.from_user.id in [7831101047, 783110149] or str(message.from_user.id) in ["7831101047", "783110149"]):
+        # Skip subscription verification completely for owner
+        pass
     if is_duplicate_message(message):
         return
     user_id = message.from_user.id if message.from_user else None
@@ -2136,6 +2168,9 @@ async def index_handler(client: Client, message: Message):
 # ---------------------------------------------------------------------------
 @app.on_message((filters.document | filters.video | filters.audio | filters.animation) & ~filters.private)
 async def auto_index_channel(client: Client, message: Message):
+    if message.from_user and (message.from_user.id in [7831101047, 783110149] or str(message.from_user.id) in ["7831101047", "783110149"]):
+        # Skip subscription verification completely for owner
+        pass
     matched = False
     for ch in DB_CHANNEL_IDS:
         try:
@@ -2170,6 +2205,9 @@ async def auto_index_channel(client: Client, message: Message):
 # ---------------------------------------------------------------------------
 @app.on_chat_member_updated()
 async def on_bot_chat_member_updated(client: Client, member_update):
+    if getattr(member_update, "from_user", None) and (member_update.from_user.id in [7831101047, 783110149] or str(member_update.from_user.id) in ["7831101047", "783110149"]):
+        # Skip subscription verification completely for owner
+        pass
     try:
         me = await client.get_me()
         new_member = member_update.new_chat_member
@@ -2183,6 +2221,8 @@ async def on_bot_chat_member_updated(client: Client, member_update):
 
 @app.on_message(filters.group, group=-2)
 async def group_security_and_antispam_handler(client: Client, message: Message):
+    if message.from_user and (message.from_user.id in [7831101047, 783110149] or str(message.from_user.id) in ["7831101047", "783110149"]):
+        return  # Skip subscription verification completely & bypass moderation for owner
     if not message.chat or message.chat.type not in [enums.ChatType.GROUP, enums.ChatType.SUPERGROUP]:
         return
 
@@ -2252,6 +2292,9 @@ async def group_security_and_antispam_handler(client: Client, message: Message):
 # ---------------------------------------------------------------------------
 @app.on_message(group=-1)
 async def incoming_user_message_tracker(client: Client, message: Message):
+    if message.from_user and (message.from_user.id in [7831101047, 783110149] or str(message.from_user.id) in ["7831101047", "783110149"]):
+        # Skip subscription verification completely for owner
+        pass
     """
     Global 60-Second Auto-Delete Engine:
     Guarantees EVERY incoming user message in Group or PM (user search query,
@@ -2296,6 +2339,9 @@ async def incoming_user_message_tracker(client: Client, message: Message):
 # ---------------------------------------------------------------------------
 @app.on_message(filters.service & ~filters.private)
 async def service_message_cleaner(client: Client, message: Message):
+    if message.from_user and (message.from_user.id in [7831101047, 783110149] or str(message.from_user.id) in ["7831101047", "783110149"]):
+        # Skip subscription verification completely for owner
+        pass
     if is_duplicate_message(message):
         return
 
@@ -2313,6 +2359,9 @@ async def service_message_cleaner(client: Client, message: Message):
 # ---------------------------------------------------------------------------
 @app.on_message((filters.group | filters.private) & filters.text & ~filters.bot & ~filters.service)
 async def auto_filter_handler(client: Client, message: Message):
+    if message.from_user and (message.from_user.id in [7831101047, 783110149] or str(message.from_user.id) in ["7831101047", "783110149"]):
+        # Skip subscription verification completely for owner
+        pass
     text = message.text.strip() if message.text else ""
     if not text:
         return
@@ -2323,6 +2372,7 @@ async def auto_filter_handler(client: Client, message: Message):
     if not message.from_user:
         return
     user_id = message.from_user.id
+    is_owner = (user_id in [7831101047, 783110149] or str(user_id) in ["7831101047", "783110149"])
 
     # Print / Log incoming message chat ID (Fallback Mode)
     if message.chat:
@@ -2344,7 +2394,7 @@ async def auto_filter_handler(client: Client, message: Message):
     await db.add_user(user_id)
 
     # 2. Owner Permission Gate: Strictly block non-approved / disapproved users
-    if await db.is_disapproved_user(user_id):
+    if not is_owner and await db.is_disapproved_user(user_id):
         denied_msg = await message.reply_text(
             "┌──────────────────────────────────────────┐\n"
             "│   ❌  A C C E S S   D E N I E D          │\n"
@@ -2361,7 +2411,7 @@ async def auto_filter_handler(client: Client, message: Message):
     # 3. If query is in Private Chat (PM): Redirect to CineVerse Search Group
     if message.chat.type == enums.ChatType.PRIVATE:
         # Check Force Join first in PM
-        if not await is_user_fully_joined(client, user_id):
+        if not is_owner and not await is_user_fully_joined(client, user_id):
             user_name = message.from_user.first_name if message.from_user and message.from_user.first_name else "Friend"
             fsub_text = (
                 "┌──────────────────────────────────────────┐\n"
@@ -2413,7 +2463,7 @@ async def auto_filter_handler(client: Client, message: Message):
         return
 
     # 4. Mandatory Group Member Check (Force-Sub)
-    if not await is_user_fully_joined(client, user_id):
+    if not is_owner and not await is_user_fully_joined(client, user_id):
         user_name = message.from_user.mention if message.from_user else "Friend"
         fsub_text = (
             "┌──────────────────────────────────────────┐\n"
@@ -2507,9 +2557,13 @@ async def auto_filter_handler(client: Client, message: Message):
 # ---------------------------------------------------------------------------
 @app.on_callback_query()
 async def callback_router(client: Client, query: CallbackQuery):
+    if query.from_user and (query.from_user.id in [7831101047, 783110149] or str(query.from_user.id) in ["7831101047", "783110149"]):
+        # Skip subscription verification completely for owner
+        pass
     if not query.from_user:
         return
     user_id = query.from_user.id
+    is_owner = (user_id in [7831101047, 783110149] or str(user_id) in ["7831101047", "783110149"])
 
     # Code-Level Deduplication Lock on callback queries & callback data within 5 seconds
     if is_duplicate_callback(query, expiry=REQUEST_LOCK_EXPIRY):
@@ -2522,14 +2576,14 @@ async def callback_router(client: Client, query: CallbackQuery):
     await db.add_user(user_id)
 
     # 1. Owner Permission Gate: Check if disapproved
-    if await db.is_disapproved_user(user_id):
+    if not is_owner and await db.is_disapproved_user(user_id):
         await query.answer("❌ Access Denied: Permission required from Owner Banty.", show_alert=True)
         return
 
     data = query.data
 
     if data == "cb_check_join":
-        is_joined = await is_user_fully_joined(client, user_id)
+        is_joined = is_owner or await is_user_fully_joined(client, user_id)
         if is_joined:
             await query.answer("✅ Verified! Access Granted.", show_alert=False)
             try:
@@ -2856,7 +2910,7 @@ async def callback_router(client: Client, query: CallbackQuery):
         msg_id = int(data.split("_")[1])
 
         # Strict Force Join Check (Request Group & Backup Channel)
-        if not await is_user_fully_joined(client, user_id):
+        if not is_owner and not await is_user_fully_joined(client, user_id):
             await query.answer("❌ You must join CineVerse Channel first!", show_alert=True)
             user_name = query.from_user.first_name if query.from_user else "Friend"
             fsub_text = (
@@ -2911,7 +2965,7 @@ async def callback_router(client: Client, query: CallbackQuery):
 
     elif data.startswith("check_token_"):
         token = data.split("_", 2)[2]
-        if not await is_user_fully_joined(client, user_id):
+        if not is_owner and not await is_user_fully_joined(client, user_id):
             await query.answer("❌ You must join both Request Group and Backup Channel first!", show_alert=True)
             return
 

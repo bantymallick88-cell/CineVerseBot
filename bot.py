@@ -515,7 +515,7 @@ class Database:
             if not clean_query:
                 return [], 0
 
-            raw_words = [w.strip() for w in re.split(r'[\s_]+', clean_query) if w.strip()]
+            raw_words = [w.strip() for w in re.split(r'[\s_.:,-]+', clean_query) if w.strip()]
             if not raw_words:
                 raw_words = [clean_query]
 
@@ -2123,11 +2123,10 @@ async def index_handler(client: Client, message: Message):
     status_msg = await message.reply_text(
         "⏳ **Starting Channel Indexing...**\n\n"
         f"• **Target Channels:** `{', '.join(str(c) for c in target_channels)}`\n"
-        "• Direct Bot API batch scanning in progress...",
+        "• Direct Bot API Chat History scanning in progress...",
         quote=True
     )
 
-    max_id = 20000
     added = 0
     total_scanned = 0
     total_media = 0
@@ -2137,121 +2136,84 @@ async def index_handler(client: Client, message: Message):
     try:
         for cid in target_channels:
             target_peer = cid
+            target_title = str(cid)
             try:
                 resolved_chat = await client.get_chat(cid)
                 if resolved_chat and resolved_chat.id:
                     target_peer = resolved_chat.id
-                    logger.info(f"✅ Pre-resolved channel entity for index_handler: {target_peer}")
-            except Exception as e:
+                    target_title = getattr(resolved_chat, "title", str(target_peer)) or str(target_peer)
+                    logger.info(f"✅ Resolved channel entity for index_handler: {target_peer} ('{target_title}')")
+            except (PeerIdInvalid, RPCError, Exception) as e:
                 logger.warning(f"⚠️ Pre-resolving channel {cid} encountered: {e} (proceeding safely with fallback peer ID)")
 
-            for i in range(max_id, 0, -100):
-                msg_ids = list(range(max(1, i - 99), i + 1))
-                total_scanned += len(msg_ids)
-                try:
-                    msgs = await client.get_messages(target_peer, msg_ids)
-                    if not msgs:
+            try:
+                async for msg in client.get_chat_history(target_peer):
+                    if not msg:
                         continue
-                    if not isinstance(msgs, list):
-                        msgs = [msgs]
-                    for msg in msgs:
-                        if not msg:
-                            continue
-                        media = msg.video or msg.document or msg.audio or msg.animation
-                        if media and getattr(media, 'file_id', None):
-                            total_media += 1
-                            # Extract title from document.file_name or caption
-                            file_name = None
-                            if msg.document and getattr(msg.document, 'file_name', None):
-                                file_name = msg.document.file_name
-                            elif msg.caption:
-                                file_name = msg.caption
-                            elif getattr(media, 'file_name', None):
-                                file_name = media.file_name
-                            else:
-                                file_name = "Untitled"
+                    total_scanned += 1
+                    media = msg.video or msg.document or msg.audio or msg.animation
+                    if media and getattr(media, 'file_id', None):
+                        total_media += 1
+                        # Extract title from document.file_name or caption
+                        file_name = None
+                        if msg.document and getattr(msg.document, 'file_name', None):
+                            file_name = msg.document.file_name
+                        elif msg.caption:
+                            file_name = msg.caption
+                        elif getattr(media, 'file_name', None):
+                            file_name = media.file_name
+                        else:
+                            file_name = "Untitled"
 
-                            file_id = getattr(media, 'file_id', None)
-                            file_size = getattr(media, 'file_size', 0) or 0
-                            caption = msg.caption or file_name
+                        file_id = getattr(media, 'file_id', None)
+                        file_size = getattr(media, 'file_size', 0) or 0
+                        caption = msg.caption or file_name
 
-                            if file_id and file_name:
-                                batch_buffer.append((file_id, str(file_name).strip(), int(file_size), int(msg.id), target_peer, str(caption).strip()))
+                        if file_id and file_name:
+                            batch_buffer.append((
+                                file_id,
+                                str(file_name).strip(),
+                                int(file_size),
+                                int(msg.id),
+                                target_peer,
+                                str(caption).strip()
+                            ))
 
                     if len(batch_buffer) >= 100:
                         ins_count = await db.add_movies_batch(batch_buffer)
                         added += ins_count
                         batch_buffer.clear()
 
-                    await asyncio.sleep(0.02)
-
-                except FloodWait as fw:
-                    wait_time = int(getattr(fw, "value", getattr(fw, "x", 30)))
-                    logger.warning(f"FloodWait during batch indexing: sleeping {wait_time}s")
-                    await asyncio.sleep(wait_time)
-                except (PeerIdInvalid, RPCError) as rpc_err:
-                    logger.warning(f"RPC Error / PeerIdInvalid encountered on batch {msg_ids[0]}-{msg_ids[-1]}: {rpc_err}. Re-resolving channel peer...")
-                    try:
+                    # Live progress update every 3 seconds
+                    if time.time() - last_update > 3:
+                        if batch_buffer:
+                            ins_count = await db.add_movies_batch(batch_buffer)
+                            added += ins_count
+                            batch_buffer.clear()
+                        stats = await db.get_stats()
                         try:
-                            resolved_chat = await client.get_chat(cid)
-                            if resolved_chat and resolved_chat.id:
-                                target_peer = resolved_chat.id
-                        except Exception as get_chat_err:
-                            logger.warning(f"Note: get_chat({cid}) during recovery: {get_chat_err}")
-                        msgs = await client.get_messages(target_peer, msg_ids)
-                        if msgs:
-                            if not isinstance(msgs, list):
-                                msgs = [msgs]
-                            for msg in msgs:
-                                if not msg:
-                                    continue
-                                media = msg.video or msg.document or msg.audio or msg.animation
-                                if media and getattr(media, 'file_id', None):
-                                    total_media += 1
-                                    file_name = None
-                                    if msg.document and getattr(msg.document, 'file_name', None):
-                                        file_name = msg.document.file_name
-                                    elif msg.caption:
-                                        file_name = msg.caption
-                                    elif getattr(media, 'file_name', None):
-                                        file_name = media.file_name
-                                    else:
-                                        file_name = "Untitled"
+                            await status_msg.edit_text(
+                                f"⏳ **Indexing in Progress (Chat History Mode)...**\n\n"
+                                f"• **Current Channel:** `{target_title}` (`{target_peer}`)\n"
+                                f"• **Messages Scanned:** `{total_scanned}`\n"
+                                f"• **Videos/Files Found:** `{total_media}`\n"
+                                f"• **Newly Added:** `{added}`\n"
+                                f"🎬 **Total Movies in DB:** `{stats['movies']}`"
+                            )
+                        except MessageNotModified:
+                            pass
+                        except Exception:
+                            pass
+                        last_update = time.time()
 
-                                    file_id = getattr(media, 'file_id', None)
-                                    file_size = getattr(media, 'file_size', 0) or 0
-                                    caption = msg.caption or file_name
-
-                                    if file_id and file_name:
-                                        batch_buffer.append((file_id, str(file_name).strip(), int(file_size), int(msg.id), target_peer, str(caption).strip()))
-                    except Exception as inner_e:
-                        logger.warning(f"Could not fetch batch after RPC/PeerIdInvalid: {inner_e}")
-                    await asyncio.sleep(0.2)
-                except Exception as e:
-                    logger.error(f"Error fetching batch {msg_ids[0]}-{msg_ids[-1]}: {e}")
-
-                # Live progress update every 3 seconds
-                if time.time() - last_update > 3:
-                    if batch_buffer:
-                        ins_count = await db.add_movies_batch(batch_buffer)
-                        added += ins_count
-                        batch_buffer.clear()
-                    stats = await db.get_stats()
-                    try:
-                        await status_msg.edit_text(
-                            f"⏳ **Indexing in Progress (Bot API Batch Mode)...**\n\n"
-                            f"• **Current Channel:** `{target_peer}`\n"
-                            f"• **Scanning Range:** IDs `{msg_ids[0]}` - `{msg_ids[-1]}` (of `{max_id}`)\n"
-                            f"• **Messages Scanned:** `{total_scanned}`\n"
-                            f"• **Videos/Files Found:** `{total_media}`\n"
-                            f"• **Newly Added:** `{added}`\n"
-                            f"🎬 **Total Movies in DB:** `{stats['movies']}`"
-                        )
-                    except MessageNotModified:
-                        pass
-                    except Exception:
-                        pass
-                    last_update = time.time()
+            except (PeerIdInvalid, RPCError) as rpc_err:
+                logger.warning(f"⚠️ PeerIdInvalid / RPCError during chat history for channel {cid}: {rpc_err}")
+            except FloodWait as fw:
+                wait_time = int(getattr(fw, "value", getattr(fw, "x", 30)))
+                logger.warning(f"FloodWait during indexing: sleeping {wait_time}s")
+                await asyncio.sleep(wait_time)
+            except Exception as e:
+                logger.warning(f"⚠️ Exception during chat history for channel {cid}: {e}")
 
             # Flush after each channel
             if batch_buffer:
@@ -2587,12 +2549,32 @@ async def auto_filter_handler(client: Client, message: Message):
         files, total = await db.search_files(text, offset=0, limit=PAGE_SIZE)
         logger.info(f"Database search for '{text}' in chat {message.chat.id} returned {total} results")
         if total == 0:
+            # On zero search results, forward user query directly to @FlimRequest_01
+            try:
+                user_info = f"@{message.from_user.username}" if (message.from_user and message.from_user.username) else (f"[{message.from_user.first_name}](tg://user?id={user_id})" if message.from_user else f"`{user_id}`")
+                chat_info = getattr(message.chat, "title", None) or "Private Chat"
+                req_text = (
+                    "🎬 **New Content Request**\n\n"
+                    f"◈ **Query:** `{text}`\n"
+                    f"◈ **User:** {user_info} (`{user_id}`)\n"
+                    f"◈ **Chat:** `{chat_info}` (`{message.chat.id}`)"
+                )
+                try:
+                    await client.send_message("@FlimRequest_01", req_text)
+                    logger.info(f"✅ Forwarded request '{text}' directly to @FlimRequest_01")
+                except Exception as send_err:
+                    logger.warning(f"send_message to @FlimRequest_01 failed: {send_err}, attempting forward_messages...")
+                    await message.forward("@FlimRequest_01")
+            except Exception as fwd_err:
+                logger.warning(f"Could not forward request to @FlimRequest_01: {fwd_err}")
+
             not_found_msg = await message.reply_text(
                 "┌──────────────────────────────────────────┐\n"
                 "│   ❌  F I L E   N O T   F O U N D        │\n"
                 "└──────────────────────────────────────────┘\n\n"
                 f"◈ **Searched:** `{text}`\n"
                 "├─ ⚠️ No matching file available in current vault.\n"
+                "├─ 🚀 Your request has been forwarded to @FlimRequest_01!\n"
                 "├─ 💡 Tip: Check spelling or try searching with release year.\n"
                 f"└─ 🍿 Official Channel: {FSUB_CHANNEL_LINK}",
                 quote=True,

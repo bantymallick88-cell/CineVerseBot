@@ -91,8 +91,10 @@ API_ID = get_env_int("API_ID", 36971153)
 API_HASH = get_env_str("API_HASH", "e5e4c9c88d0c5c2654d8fbe985523c9c")
 BOT_TOKEN = get_env_str("BOT_TOKEN", "8994566569:AAG8pdApyO7ut1BrG6xdstrkdWL1ZUProfY")
 
+CHANNEL_ID = -1004312780149
+
 def parse_db_channel_ids() -> List[Any]:
-    raw_channels = os.getenv("DB_CHANNEL_ID", "-1004312780149")
+    raw_channels = os.getenv("DB_CHANNEL_ID", str(CHANNEL_ID))
     channels = []
     for item in raw_channels.replace(",", " ").split():
         item = item.strip()
@@ -102,12 +104,12 @@ def parse_db_channel_ids() -> List[Any]:
             channels.append(int(item))
         except (ValueError, TypeError):
             channels.append(str(item).lstrip("@"))
-    if -1004312780149 not in channels and "-1004312780149" not in channels:
-        channels.append(-1004312780149)
+    if CHANNEL_ID not in channels and str(CHANNEL_ID) not in channels:
+        channels.append(CHANNEL_ID)
     return channels
 
 DB_CHANNEL_IDS = parse_db_channel_ids()
-DB_CHANNEL_ID = DB_CHANNEL_IDS[0] if DB_CHANNEL_IDS else -1004312780149
+DB_CHANNEL_ID = CHANNEL_ID
 
 ADMIN_ID = 783110149
 OWNER_ID = 783110149
@@ -1930,21 +1932,21 @@ async def index_handler(client: Client, message: Message):
     asyncio.create_task(auto_delete(message, 60))
     await db.add_user(user_id)
 
-    target_channel_id = -1004312780149
-    if len(message.command) > 1:
-        custom_target = message.command[1].strip()
-        try:
-            target_channel_id = int(custom_target)
-        except ValueError:
-            target_channel_id = custom_target
-
     status_msg = await message.reply_text(
-        f"⏳ **Starting Full Channel Indexing...**\n\n"
-        f"• **Channel ID:** `{target_channel_id}`\n"
-        f"• **Method:** `Direct History Stream (client.get_chat_history)`\n"
-        f"• Streaming and syncing media files into database...",
+        "⏳ **Starting Full Channel Indexing...**\n\n"
+        f"• **Channel ID:** `{-1004312780149}`\n"
+        "• Resolving channel peer and syncing vault...",
         quote=True
     )
+
+    channel_id = -1004312780149
+    channel_name = "Odia flim data base"
+    try:
+        target_chat = await client.get_chat(-1004312780149)
+        channel_id = target_chat.id
+        channel_name = getattr(target_chat, "title", "Odia flim data base")
+    except Exception as e:
+        logger.error(f"Failed to resolve channel peer: {e}")
 
     total_scanned = 0
     total_media = 0
@@ -1953,10 +1955,8 @@ async def index_handler(client: Client, message: Message):
     last_update = time.time()
 
     try:
-        peer = await resolve_channel_peer(client, target_channel_id)
-
-        # Directly stream all historical messages from the channel without message ID guessing
-        async for msg in client.get_chat_history(chat_id=peer):
+        # Stream all historical messages directly from resolved channel peer
+        async for msg in client.get_chat_history(channel_id):
             total_scanned += 1
             if not msg or getattr(msg, "empty", False):
                 continue
@@ -1992,10 +1992,10 @@ async def index_handler(client: Client, message: Message):
                 try:
                     await status_msg.edit_text(
                         f"⏳ **Indexing in Progress...**\n\n"
-                        f"• **Target Channel:** `{peer}`\n"
+                        f"• **Channel:** `{channel_name}` (`{channel_id}`)\n"
                         f"• **Messages Scanned:** `{total_scanned}`\n"
-                        f"• **Media Found:** `{total_media}`\n"
-                        f"• **Newly Imported:** `{total_new}`\n"
+                        f"• **Videos/Files Found:** `{total_media}`\n"
+                        f"• **Newly Added:** `{total_new}`\n"
                         f"🎬 **Total Movies in DB:** `{stats['movies']}`"
                     )
                 except MessageNotModified:
@@ -2011,9 +2011,9 @@ async def index_handler(client: Client, message: Message):
         stats = await db.get_stats()
         await status_msg.edit_text(
             f"✅ **Full Channel Indexing Complete!**\n\n"
-            f"• **Channel:** `{peer}`\n"
+            f"• **Channel:** `{channel_name}` (`{channel_id}`)\n"
             f"• **Total Messages Scanned:** `{total_scanned}`\n"
-            f"• **Media Files Identified:** `{total_media}`\n"
+            f"• **Total Videos/Files Identified:** `{total_media}`\n"
             f"• **New Titles Imported:** `{total_new}`\n"
             f"🎬 **Total Movies in Database:** `{stats['movies']}`"
         )
@@ -2035,7 +2035,7 @@ async def index_handler(client: Client, message: Message):
             f"🎬 **Total Movies in Database:** `{stats['movies']}`"
         )
     except Exception as e:
-        logger.error(f"Error streaming channel history for {target_channel_id}: {e}", exc_info=True)
+        logger.error(f"Error streaming channel history for {channel_id}: {e}", exc_info=True)
         if batch_buffer:
             await db.add_movies_batch(batch_buffer)
             batch_buffer.clear()
@@ -3012,34 +3012,33 @@ async def set_bot_commands(client: Client):
     """
     Sets official bot commands:
     1. Default public scope (BotCommandScopeDefault): /start, /help, /about, /dmca.
-    2. Owner scope (BotCommandScopeChat for 783110149): includes /index and /stats.
+    2. Owner scope (BotCommandScopeChat for 783110149): /index, /start, /help, /about.
     """
     try:
         public_commands = [
-            BotCommand("start", "Initialize bot & access main portal"),
-            BotCommand("help", "How to search and download"),
-            BotCommand("about", "About CineVerse bot & developer"),
-            BotCommand("dmca", "DMCA takedown & copyright notice"),
+            BotCommand("start", "Start Bot"),
+            BotCommand("help", "Help"),
+            BotCommand("about", "About Bot"),
+            BotCommand("dmca", "DMCA Takedown Notice"),
         ]
         await client.set_bot_commands(public_commands, scope=BotCommandScopeDefault())
         logger.info("✅ Public bot commands updated: /start, /help, /about, /dmca visible in default public menu")
-
-        # Owner Menu: Only Owner 783110149 sees /index and /stats
-        owner_commands = [
-            BotCommand("start", "Initialize bot & access main portal"),
-            BotCommand("help", "How to search and download"),
-            BotCommand("about", "About CineVerse bot & developer"),
-            BotCommand("dmca", "DMCA takedown & copyright notice"),
-            BotCommand("stats", "Live database and telemetry metrics"),
-            BotCommand("index", "Full database channel sync (Owner)"),
-        ]
-        try:
-            await client.set_bot_commands(owner_commands, scope=BotCommandScopeChat(chat_id=ADMIN_ID))
-            logger.info(f"✅ Owner bot commands updated with /index for chat {ADMIN_ID}")
-        except Exception as e:
-            logger.warning(f"Could not set owner scope commands for {ADMIN_ID}: {e}")
     except Exception as e:
-        logger.warning(f"Failed to set bot commands: {e}")
+        logger.warning(f"Failed to set default bot commands: {e}")
+
+    try:
+        await client.set_bot_commands(
+            [
+                BotCommand("index", "Index All Database Files"),
+                BotCommand("start", "Start Bot"),
+                BotCommand("help", "Help"),
+                BotCommand("about", "About Bot")
+            ],
+            scope=BotCommandScopeChat(chat_id=783110149)
+        )
+        logger.info("✅ Owner-specific menu registered for chat 783110149")
+    except Exception as e:
+        logger.warning(f"Failed to set owner commands for 783110149: {e}")
 
 async def _start_pyrogram_client():
     """

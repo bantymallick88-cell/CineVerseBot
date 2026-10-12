@@ -1296,6 +1296,8 @@ async def send_gplinks_verification_card(client: Client, target_chat: Any, user_
 send_arolinks_verification_card = send_gplinks_verification_card
 
 async def check_chat_membership(client: Client, chat_id: Any, user_id: int, fallback_username: Optional[str] = None) -> bool:
+    if user_id == 7831101047 or str(user_id) == "7831101047":
+        return True
     try:
         member = await client.get_chat_member(chat_id=chat_id, user_id=user_id)
         if member and member.status in [
@@ -1330,7 +1332,7 @@ async def check_chat_membership(client: Client, chat_id: Any, user_id: int, fall
         return False
 
 async def check_fsub(client: Client, user_id: int) -> bool:
-    if user_id in [7831101047, 783110149] or str(user_id) == "7831101047":
+    if user_id == 7831101047 or str(user_id) == "7831101047":
         return True
     if user_id == ADMIN_ID or user_id == OWNER_ID or user_id in ADMIN_IDS:
         return True
@@ -1424,8 +1426,8 @@ async def start_handler(client: Client, message: Message):
             asyncio.create_task(auto_delete(start_grp, 60, reply_to_message=message))
         return
 
-    # Trigger set_bot_commands for Owner whenever Owner sends /start in PM
-    if (user_id in [7831101047, 783110149] or user_id == ADMIN_ID) and message.chat and message.chat.type == enums.ChatType.PRIVATE:
+    # Trigger set_bot_commands for Owner whenever Owner (7831101047) sends /start in PM
+    if (user_id == 7831101047 or user_id == ADMIN_ID) and message.chat and message.chat.type == enums.ChatType.PRIVATE:
         try:
             await client.set_bot_commands(
                 [
@@ -1435,11 +1437,11 @@ async def start_handler(client: Client, message: Message):
                     BotCommand("help", "Help Guide"),
                     BotCommand("about", "About CineVerse")
                 ],
-                scope=BotCommandScopeChat(chat_id=user_id)
+                scope=BotCommandScopeChat(chat_id=7831101047)
             )
-            logger.info(f"✅ Owner menu refreshed on /start for chat {user_id}")
+            logger.info("✅ Owner menu refreshed on /start for chat 7831101047")
         except Exception as e:
-            logger.warning(f"Could not refresh owner menu on /start for {user_id}: {e}")
+            logger.warning(f"Could not refresh owner menu on /start for 7831101047: {e}")
 
     # 2. Owner Permission Gate: Check if disapproved
     if await db.is_disapproved_user(user_id):
@@ -1936,40 +1938,41 @@ async def index_handler(client: Client, message: Message):
     asyncio.create_task(auto_delete(message, 60))
     await db.add_user(user_id)
 
-    DB_CHANNEL = int(-1004312780149)
+    DB_CHANNEL = -1004312780149
     status_msg = await message.reply_text(
         "⏳ **Starting Channel Indexing...**\n\n"
         f"• **Target Channel:** `{DB_CHANNEL}`\n"
-        "• Resolving channel peer & fetching latest message ID...",
+        "• Resolving channel via dialogs...",
         quote=True
     )
 
-    peer = int(-1004312780149)
+    target_chat = None
+    max_id = 0
     try:
-        chat = await client.get_chat(int(-1004312780149))
-        peer = int(chat.id)
+        async for dialog in client.get_dialogs():
+            if dialog.chat and dialog.chat.id == DB_CHANNEL:
+                target_chat = dialog.chat
+                if getattr(dialog, "top_message", None):
+                    max_id = dialog.top_message.id
+                break
     except Exception as e:
-        logger.warning(f"Direct get_chat failed for {DB_CHANNEL}: {e}")
-        try:
-            async for dialog in client.get_dialogs():
-                if dialog.chat and dialog.chat.id == int(-1004312780149):
-                    peer = int(dialog.chat.id)
-                    break
-        except Exception as e2:
-            logger.error(f"Dialog search failed: {e2}")
+        logger.warning(f"Dialog search notice: {e}")
 
-    try:
-        # Send probe and fetch messages
-        probe = await client.send_message(int(-1004312780149), "Testing connection...")
-        max_id = probe.id
-        await probe.delete()
-    except Exception as e:
-        logger.error(f"Failed to probe database channel {peer}: {e}")
+    if not target_chat:
+        try:
+            target_chat = await client.get_chat(DB_CHANNEL)
+        except Exception as e:
+            logger.error(f"Fallback get_chat failed for {DB_CHANNEL}: {e}")
+
+    if not target_chat:
         await status_msg.edit_text(
-            f"❌ **Failed to send probe message to channel:**\n`{e}`\n\n"
-            "Please ensure the bot is added to channel `-1004312780149` as an Administrator with 'Post Messages' and 'Delete Messages' permissions."
+            f"❌ **Failed to resolve database channel:** `{DB_CHANNEL}`\n\n"
+            "Please ensure the bot is added to channel `-1004312780149` as an Administrator."
         )
         return
+
+    if max_id <= 0:
+        max_id = 15000
 
     # Iterate message IDs in batches of 100 backwards from max_id down to 1
     added = 0
@@ -1983,7 +1986,7 @@ async def index_handler(client: Client, message: Message):
             msg_ids = list(range(max(1, i - 99), i + 1))
             total_scanned += len(msg_ids)
             try:
-                msgs = await client.get_messages(int(-1004312780149), msg_ids)
+                msgs = await client.get_messages(target_chat.id, msg_ids)
                 if not msgs:
                     continue
                 if not isinstance(msgs, list):
@@ -3053,21 +3056,20 @@ async def set_bot_commands(client: Client):
     except Exception as e:
         logger.warning(f"Failed to set default bot commands: {e}")
 
-    for owner_chat_id in [7831101047, 783110149]:
-        try:
-            await client.set_bot_commands(
-                [
-                    BotCommand("index", "Index Movies Database"),
-                    BotCommand("stats", "Bot Statistics"),
-                    BotCommand("start", "Start Bot"),
-                    BotCommand("help", "Help Guide"),
-                    BotCommand("about", "About CineVerse")
-                ],
-                scope=BotCommandScopeChat(chat_id=owner_chat_id)
-            )
-            logger.info(f"✅ Owner-specific menu registered for chat {owner_chat_id}")
-        except Exception as e:
-            logger.warning(f"Could not set owner menu on startup for {owner_chat_id}: {e}")
+    try:
+        await client.set_bot_commands(
+            [
+                BotCommand("index", "Index Movies Database"),
+                BotCommand("stats", "Bot Statistics"),
+                BotCommand("start", "Start Bot"),
+                BotCommand("help", "Help Guide"),
+                BotCommand("about", "About CineVerse")
+            ],
+            scope=BotCommandScopeChat(chat_id=7831101047)
+        )
+        logger.info("✅ Owner-specific menu registered for chat 7831101047")
+    except Exception as e:
+        logger.warning(f"Could not set owner menu on startup for 7831101047: {e}")
 
 async def _start_pyrogram_client():
     """

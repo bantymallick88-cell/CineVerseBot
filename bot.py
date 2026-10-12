@@ -91,12 +91,12 @@ API_ID = get_env_int("API_ID", 36971153)
 API_HASH = get_env_str("API_HASH", "e5e4c9c88d0c5c2654d8fbe985523c9c")
 BOT_TOKEN = get_env_str("BOT_TOKEN", "8994566569:AAG8pdApyO7ut1BrG6xdstrkdWL1ZUProfY")
 
-CHANNEL_ID = int(-1004312780149)
+DEFAULT_DB_CHANNELS = [-1004312780149, -1004391530222]
 
 def parse_db_channel_ids() -> List[Any]:
-    raw_channels = os.getenv("DB_CHANNEL_ID", str(CHANNEL_ID))
+    raw_channels = os.getenv("DB_CHANNEL_ID", "-1004312780149, -1004391530222")
     channels = []
-    for item in raw_channels.replace(",", " ").split():
+    for item in raw_channels.split(","):
         item = item.strip()
         if not item:
             continue
@@ -104,12 +104,14 @@ def parse_db_channel_ids() -> List[Any]:
             channels.append(int(item))
         except (ValueError, TypeError):
             channels.append(str(item).lstrip("@"))
-    if CHANNEL_ID not in channels and str(CHANNEL_ID) not in channels:
-        channels.append(CHANNEL_ID)
+    for def_ch in DEFAULT_DB_CHANNELS:
+        if def_ch not in channels and str(def_ch) not in channels:
+            channels.append(def_ch)
     return channels
 
 DB_CHANNEL_IDS = parse_db_channel_ids()
-DB_CHANNEL_ID = CHANNEL_ID
+DB_CHANNEL_ID = DB_CHANNEL_IDS[0] if DB_CHANNEL_IDS else -1004312780149
+CHANNEL_ID = DB_CHANNEL_ID
 
 ADMIN_ID = 7831101047
 OWNER_ID = 7831101047
@@ -200,9 +202,30 @@ class Database:
                     file_id TEXT PRIMARY KEY,
                     title TEXT,
                     file_size INTEGER,
-                    message_id INTEGER
+                    message_id INTEGER,
+                    channel_id INTEGER,
+                    file_name TEXT,
+                    caption TEXT
                 );
             """)
+            # Ensure columns exist via ALTER TABLE
+            try:
+                cols = [r[1].lower() for r in conn.execute("PRAGMA table_info(movies);").fetchall()]
+                if "channel_id" not in cols:
+                    conn.execute("ALTER TABLE movies ADD COLUMN channel_id INTEGER;")
+                if "file_name" not in cols:
+                    conn.execute("ALTER TABLE movies ADD COLUMN file_name TEXT;")
+                if "caption" not in cols:
+                    conn.execute("ALTER TABLE movies ADD COLUMN caption TEXT;")
+                conn.execute("UPDATE movies SET file_name = title WHERE file_name IS NULL OR file_name = '';")
+                conn.execute("UPDATE movies SET caption = title WHERE caption IS NULL OR caption = '';")
+                conn.execute("UPDATE movies SET channel_id = -1004312780149 WHERE channel_id IS NULL;")
+            except Exception as e:
+                logger.warning(f"Note migrating movies schema columns: {e}")
+
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_file_name ON movies(file_name);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_caption ON movies(caption);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_channel_id ON movies(channel_id);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_title ON movies(title);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_msg_id ON movies(message_id);")
             conn.execute("""
@@ -262,21 +285,14 @@ class Database:
             """)
             # Movie records preservation: never delete or truncate existing movie records
 
-            # Ensure files VIEW or movies VIEW exists to support both files and movies tables interchangeably
+            # Ensure files VIEW exists to support both files and movies tables interchangeably
             try:
-                tables_info = [r[0].lower() for r in conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'view');").fetchall()]
-                if "files" not in tables_info and "movies" in tables_info:
-                    conn.execute("""
-                        CREATE VIEW IF NOT EXISTS files AS 
-                        SELECT file_id, title AS file_name, file_size, message_id, title AS caption 
-                        FROM movies;
-                    """)
-                elif "files" in tables_info and "movies" not in tables_info:
-                    conn.execute("""
-                        CREATE VIEW IF NOT EXISTS movies AS 
-                        SELECT file_id, file_name AS title, file_size, message_id 
-                        FROM files;
-                    """)
+                conn.execute("DROP VIEW IF EXISTS files;")
+                conn.execute("""
+                    CREATE VIEW IF NOT EXISTS files AS 
+                    SELECT file_id, COALESCE(file_name, title) AS file_name, file_size, message_id, channel_id, COALESCE(caption, title) AS caption, COALESCE(title, file_name) AS title 
+                    FROM movies;
+                """)
             except Exception as e:
                 logger.warning(f"Note checking files/movies view: {e}")
             conn.commit()
@@ -359,12 +375,27 @@ class Database:
         except Exception as e:
             logger.error(f"Error saving user {user_id}: {e}")
 
-    def _add_movie(self, file_id: str, title: str, file_size: int, message_id: int) -> bool:
+    def _add_movie(
+        self,
+        file_id: str,
+        title: str,
+        file_size: int,
+        message_id: int,
+        channel_id: Optional[int] = None,
+        file_name: Optional[str] = None,
+        caption: Optional[str] = None
+    ) -> bool:
         try:
+            fname = file_name or title
+            cap = caption or fname
+            cid = channel_id or DB_CHANNEL_ID
             with self._get_connection() as conn:
                 cur = conn.execute(
-                    "INSERT OR IGNORE INTO movies (file_id, title, file_size, message_id) VALUES (?, ?, ?, ?);",
-                    (file_id, title, file_size, message_id)
+                    """
+                    INSERT OR IGNORE INTO movies (file_id, title, file_size, message_id, channel_id, file_name, caption)
+                    VALUES (?, ?, ?, ?, ?, ?, ?);
+                    """,
+                    (file_id, fname, file_size, message_id, cid, fname, cap)
                 )
                 conn.commit()
                 # Mirror to database/movies.db
@@ -373,8 +404,11 @@ class Database:
                     try:
                         with sqlite3.connect(movies_db_path) as mconn:
                             mconn.execute(
-                                "INSERT OR IGNORE INTO movies (file_id, title, file_size, message_id) VALUES (?, ?, ?, ?);",
-                                (file_id, title, file_size, message_id)
+                                """
+                                INSERT OR IGNORE INTO movies (file_id, title, file_size, message_id, channel_id, file_name, caption)
+                                VALUES (?, ?, ?, ?, ?, ?, ?);
+                                """,
+                                (file_id, fname, file_size, message_id, cid, fname, cap)
                             )
                             mconn.commit()
                     except Exception:
@@ -384,14 +418,43 @@ class Database:
             logger.error(f"Error inserting movie: {e}")
             return False
 
-    def _add_movies_batch(self, movies_data: List[Tuple[str, str, int, int]]) -> int:
+    def _add_movies_batch(self, movies_data: List[Any]) -> int:
         if not movies_data:
             return 0
+        normalized = []
+        for item in movies_data:
+            if len(item) == 4:
+                f_id, f_name, f_sz, m_id = item
+                cid = DB_CHANNEL_ID
+                cap = f_name
+            elif len(item) == 5:
+                f_id, f_name, f_sz, m_id, cid = item
+                cap = f_name
+            elif len(item) == 6:
+                f_id, f_name, f_sz, m_id, cid, cap = item
+            elif len(item) >= 7:
+                f_id, f_name, f_sz, m_id, cid, _, cap = item[:7]
+            else:
+                continue
+            fname_str = str(f_name).strip() if f_name else "Untitled"
+            cap_str = str(cap).strip() if cap else fname_str
+            try:
+                cid_int = int(cid) if cid is not None else DB_CHANNEL_ID
+            except (ValueError, TypeError):
+                cid_int = DB_CHANNEL_ID
+            normalized.append((f_id, fname_str, int(f_sz or 0), int(m_id or 0), cid_int, fname_str, cap_str))
+
+        if not normalized:
+            return 0
+
         try:
             with self._get_connection() as conn:
                 cur = conn.executemany(
-                    "INSERT OR IGNORE INTO movies (file_id, title, file_size, message_id) VALUES (?, ?, ?, ?);",
-                    movies_data
+                    """
+                    INSERT OR IGNORE INTO movies (file_id, title, file_size, message_id, channel_id, file_name, caption)
+                    VALUES (?, ?, ?, ?, ?, ?, ?);
+                    """,
+                    normalized
                 )
                 conn.commit()
                 # Mirror to database/movies.db
@@ -400,8 +463,11 @@ class Database:
                     try:
                         with sqlite3.connect(movies_db_path) as mconn:
                             mconn.executemany(
-                                "INSERT OR IGNORE INTO movies (file_id, title, file_size, message_id) VALUES (?, ?, ?, ?);",
-                                movies_data
+                                """
+                                INSERT OR IGNORE INTO movies (file_id, title, file_size, message_id, channel_id, file_name, caption)
+                                VALUES (?, ?, ?, ?, ?, ?, ?);
+                                """,
+                                normalized
                             )
                             mconn.commit()
                     except Exception:
@@ -411,106 +477,115 @@ class Database:
             logger.error(f"Error inserting batch: {e}")
             return 0
 
-    def _detect_table_and_columns(self, conn: sqlite3.Connection) -> Tuple[str, str, str, Optional[str], Optional[str]]:
+    def _detect_table_and_columns(self, conn: sqlite3.Connection):
         try:
             cur = conn.cursor()
             tables = [r[0].lower() for r in cur.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'view');").fetchall()]
 
-            # Prefer 'files' table/view if available, else 'movies'
-            if "files" in tables:
-                target_table = "files"
-            elif "movies" in tables:
+            # Prefer 'movies' table if available, else 'files'
+            if "movies" in tables:
                 target_table = "movies"
+            elif "files" in tables:
+                target_table = "files"
             else:
                 user_tables = [t for t in tables if not t.startswith("sqlite_") and t not in (
                     "users", "approved_users", "disapproved_users", "file_tokens", "authorized_groups", "user_downloads", "group_warnings"
                 )]
-                target_table = user_tables[0] if user_tables else "files"
+                target_table = user_tables[0] if user_tables else "movies"
 
             col_info = cur.execute(f"PRAGMA table_info({target_table});").fetchall()
             col_names = [c[1] for c in col_info]
             col_names_lower = [c.lower() for c in col_names]
 
-            # Detect title / file_name column
-            if "file_name" in col_names_lower:
-                title_col = col_names[col_names_lower.index("file_name")]
-            elif "title" in col_names_lower:
-                title_col = col_names[col_names_lower.index("title")]
-            elif "caption" in col_names_lower:
-                title_col = col_names[col_names_lower.index("caption")]
-            elif "name" in col_names_lower:
-                title_col = col_names[col_names_lower.index("name")]
-            else:
-                title_col = col_names[1] if len(col_names) > 1 else "file_name"
+            title_col = "file_name" if "file_name" in col_names_lower else ("title" if "title" in col_names_lower else col_names[1])
+            file_id_col = "file_id" if "file_id" in col_names_lower else ("id" if "id" in col_names_lower else col_names[0])
+            size_col = "file_size" if "file_size" in col_names_lower else ("size" if "size" in col_names_lower else None)
+            msg_id_col = "message_id" if "message_id" in col_names_lower else ("msg_id" if "msg_id" in col_names_lower else None)
+            channel_id_col = "channel_id" if "channel_id" in col_names_lower else None
+            caption_col = "caption" if "caption" in col_names_lower else None
 
-            # Detect file_id column
-            if "file_id" in col_names_lower:
-                file_id_col = col_names[col_names_lower.index("file_id")]
-            elif "id" in col_names_lower:
-                file_id_col = col_names[col_names_lower.index("id")]
-            else:
-                file_id_col = col_names[0] if col_names else "file_id"
-
-            # Detect file_size column
-            if "file_size" in col_names_lower:
-                size_col = col_names[col_names_lower.index("file_size")]
-            elif "size" in col_names_lower:
-                size_col = col_names[col_names_lower.index("size")]
-            else:
-                size_col = None
-
-            # Detect message_id column
-            if "message_id" in col_names_lower:
-                msg_id_col = col_names[col_names_lower.index("message_id")]
-            elif "msg_id" in col_names_lower:
-                msg_id_col = col_names[col_names_lower.index("msg_id")]
-            else:
-                msg_id_col = None
-
-            return target_table, title_col, file_id_col, size_col, msg_id_col
+            return target_table, title_col, file_id_col, size_col, msg_id_col, channel_id_col, caption_col
         except Exception as e:
             logger.error(f"Error detecting table columns: {e}")
-            return "files", "file_name", "file_id", "file_size", "message_id"
+            return "movies", "file_name", "file_id", "file_size", "message_id", "channel_id", "caption"
 
     def _search_files(self, query: str, offset: int = 0, limit: int = PAGE_SIZE) -> Tuple[List[Dict[str, Any]], int]:
         try:
-            words = [w.strip() for w in query.split() if w.strip()]
-            if not words:
+            clean_query = query.strip()
+            if not clean_query:
                 return [], 0
 
+            raw_words = [w.strip() for w in re.split(r'[\s_]+', clean_query) if w.strip()]
+            if not raw_words:
+                raw_words = [clean_query]
+
             with self._get_connection() as conn:
-                target_table, title_col, file_id_col, size_col, msg_id_col = self._detect_table_and_columns(conn)
+                target_table, title_col, file_id_col, size_col, msg_id_col, channel_id_col, caption_col = self._detect_table_and_columns(conn)
+
+                col_info = [r[1].lower() for r in conn.execute(f"PRAGMA table_info({target_table});").fetchall()]
+                search_cols = []
+                for c in ["file_name", "caption", "title"]:
+                    if c in col_info and c not in search_cols:
+                        search_cols.append(c)
+                if not search_cols:
+                    search_cols = [title_col]
 
                 conditions = []
                 params: List[Any] = []
-                for w in words:
+                for w in raw_words:
                     if w.upper().startswith("S") and len(w) == 3 and w[1:].isdigit():
                         season_num = int(w[1:])
-                        conditions.append(f"({title_col} LIKE ? OR {title_col} LIKE ? OR {title_col} LIKE ? OR {title_col} LIKE ?)")
-                        params.extend([
+                        s_patterns = [
                             f"%S{season_num:02d}%",
                             f"%S{season_num}%",
                             f"%Season {season_num}%",
                             f"%Season {season_num:02d}%"
-                        ])
+                        ]
+                        sub_conds = []
+                        for col in search_cols:
+                            for pat in s_patterns:
+                                sub_conds.append(f"{col} LIKE ?")
+                                params.append(pat)
+                        conditions.append(f"({' OR '.join(sub_conds)})")
                     elif w.upper() in ["S15+", "S15"]:
-                        conditions.append(f"({title_col} LIKE ? OR {title_col} LIKE ? OR {title_col} LIKE ? OR {title_col} LIKE ?)")
-                        params.extend(["%S15%", "%Season 15%", "%S16%", "%Season 16%"])
+                        sub_conds = []
+                        for col in search_cols:
+                            for pat in ["%S15%", "%Season 15%", "%S16%", "%Season 16%"]:
+                                sub_conds.append(f"{col} LIKE ?")
+                                params.append(pat)
+                        conditions.append(f"({' OR '.join(sub_conds)})")
                     elif w.upper() == "4K":
-                        conditions.append(f"({title_col} LIKE ? OR {title_col} LIKE ? OR {title_col} LIKE ?)")
-                        params.extend(["%4K%", "%2160p%", "%UHD%"])
+                        sub_conds = []
+                        for col in search_cols:
+                            for pat in ["%4K%", "%2160p%", "%UHD%"]:
+                                sub_conds.append(f"{col} LIKE ?")
+                                params.append(pat)
+                        conditions.append(f"({' OR '.join(sub_conds)})")
                     elif w.upper() == "HEVC":
-                        conditions.append(f"({title_col} LIKE ? OR {title_col} LIKE ?)")
-                        params.extend(["%HEVC%", "%x265%"])
+                        sub_conds = []
+                        for col in search_cols:
+                            for pat in ["%HEVC%", "%x265%"]:
+                                sub_conds.append(f"{col} LIKE ?")
+                                params.append(pat)
+                        conditions.append(f"({' OR '.join(sub_conds)})")
                     elif w.lower() == "odia":
-                        conditions.append(f"({title_col} LIKE ? OR {title_col} LIKE ?)")
-                        params.extend(["%Odia%", "%Oriya%"])
+                        sub_conds = []
+                        for col in search_cols:
+                            for pat in ["%Odia%", "%Oriya%"]:
+                                sub_conds.append(f"{col} LIKE ?")
+                                params.append(pat)
+                        conditions.append(f"({' OR '.join(sub_conds)})")
                     elif w.lower() == "bengali":
-                        conditions.append(f"({title_col} LIKE ? OR {title_col} LIKE ?)")
-                        params.extend(["%Bengali%", "%Bangla%"])
+                        sub_conds = []
+                        for col in search_cols:
+                            for pat in ["%Bengali%", "%Bangla%"]:
+                                sub_conds.append(f"{col} LIKE ?")
+                                params.append(pat)
+                        conditions.append(f"({' OR '.join(sub_conds)})")
                     else:
-                        conditions.append(f"{title_col} LIKE ?")
-                        params.append(f"%{w}%")
+                        sub_conds = [f"{col} LIKE ?" for col in search_cols]
+                        conditions.append(f"({' OR '.join(sub_conds)})")
+                        params.extend([f"%{w}%" for _ in search_cols])
 
                 where_sql = " AND ".join(conditions)
 
@@ -521,18 +596,26 @@ class Database:
                 if total == 0:
                     return [], 0
 
-                order_clause = f"ORDER BY {msg_id_col} DESC" if msg_id_col else ""
+                primary_col = "file_name" if "file_name" in search_cols else title_col
+                cap_col = "caption" if "caption" in search_cols else primary_col
+                order_params = [f"%{clean_query}%", f"%{clean_query}%"]
+                if msg_id_col:
+                    order_clause = f"ORDER BY (CASE WHEN {primary_col} LIKE ? THEN 1 WHEN {cap_col} LIKE ? THEN 2 ELSE 3 END), {msg_id_col} DESC"
+                else:
+                    order_clause = f"ORDER BY (CASE WHEN {primary_col} LIKE ? THEN 1 WHEN {cap_col} LIKE ? THEN 2 ELSE 3 END)"
+
                 search_sql = f"SELECT * FROM {target_table} WHERE {where_sql} {order_clause} LIMIT ? OFFSET ?;"
-                cursor.execute(search_sql, params + [limit, offset])
+                cursor.execute(search_sql, params + order_params + [limit, offset])
                 raw_rows = cursor.fetchall()
 
                 normalized_rows: List[Dict[str, Any]] = []
                 for row in raw_rows:
                     r = dict(row)
-                    name = str(r.get(title_col) or r.get("file_name") or r.get("title") or r.get("caption") or "Movie")
+                    name = str(r.get("file_name") or r.get(title_col) or r.get("title") or r.get("caption") or "Movie")
                     f_id = str(r.get(file_id_col) or r.get("file_id") or r.get("id") or "")
                     f_size = int(r.get(size_col) if size_col else (r.get("file_size") or 0))
                     m_id = int(r.get(msg_id_col) if msg_id_col else (r.get("message_id") or r.get("msg_id") or 0))
+                    cid = r.get("channel_id") or DB_CHANNEL_ID
                     cap = str(r.get("caption") or name)
 
                     normalized_rows.append({
@@ -541,6 +624,7 @@ class Database:
                         "file_name": name,
                         "file_size": f_size,
                         "message_id": m_id,
+                        "channel_id": cid,
                         "caption": cap
                     })
 
@@ -552,16 +636,17 @@ class Database:
     def _get_file_by_msg_id(self, message_id: int) -> Optional[Dict[str, Any]]:
         try:
             with self._get_connection() as conn:
-                target_table, title_col, file_id_col, size_col, msg_id_col = self._detect_table_and_columns(conn)
+                target_table, title_col, file_id_col, size_col, msg_id_col, channel_id_col, caption_col = self._detect_table_and_columns(conn)
                 msg_col = msg_id_col or "message_id"
                 row = conn.execute(f"SELECT * FROM {target_table} WHERE {msg_col} = ? LIMIT 1;", (message_id,)).fetchone()
                 if not row:
                     return None
                 r = dict(row)
-                name = str(r.get(title_col) or r.get("file_name") or r.get("title") or r.get("caption") or "Movie")
+                name = str(r.get("file_name") or r.get(title_col) or r.get("title") or r.get("caption") or "Movie")
                 f_id = str(r.get(file_id_col) or r.get("file_id") or r.get("id") or "")
                 f_size = int(r.get(size_col) if size_col else (r.get("file_size") or 0))
                 m_id = int(r.get(msg_col) or message_id)
+                cid = r.get("channel_id") or DB_CHANNEL_ID
                 cap = str(r.get("caption") or name)
                 return {
                     "file_id": f_id,
@@ -569,6 +654,7 @@ class Database:
                     "file_name": name,
                     "file_size": f_size,
                     "message_id": m_id,
+                    "channel_id": cid,
                     "caption": cap
                 }
         except Exception as e:
@@ -695,10 +781,19 @@ class Database:
     async def add_user(self, user_id: int):
         await asyncio.to_thread(self._add_user, user_id)
 
-    async def add_movie(self, file_id: str, title: str, file_size: int, message_id: int) -> bool:
-        return await asyncio.to_thread(self._add_movie, file_id, title, file_size, message_id)
+    async def add_movie(
+        self,
+        file_id: str,
+        title: str,
+        file_size: int,
+        message_id: int,
+        channel_id: Optional[int] = None,
+        file_name: Optional[str] = None,
+        caption: Optional[str] = None
+    ) -> bool:
+        return await asyncio.to_thread(self._add_movie, file_id, title, file_size, message_id, channel_id, file_name, caption)
 
-    async def add_movies_batch(self, movies_data: List[Tuple[str, str, int, int]]) -> int:
+    async def add_movies_batch(self, movies_data: List[Any]) -> int:
         return await asyncio.to_thread(self._add_movies_batch, movies_data)
 
     async def search_files(self, query: str, offset: int = 0, limit: int = PAGE_SIZE) -> Tuple[List[Dict[str, Any]], int]:
@@ -1202,7 +1297,8 @@ async def deliver_movie_file(client: Client, user_id: int, msg_id: int):
                 sent_file = None
 
         if not sent_file:
-            peer = await resolve_channel_peer(client)
+            channel_target = file_info.get("channel_id") if file_info else None
+            peer = await resolve_channel_peer(client, channel_target)
             sent_file = await client.copy_message(
                 chat_id=user_id,
                 from_chat_id=peer,
@@ -2010,126 +2106,162 @@ async def index_handler(client: Client, message: Message):
     asyncio.create_task(auto_delete(message, 60))
     await db.add_user(user_id)
 
-    DB_CHANNEL = int("-1004312780149")
-    target_peer = DB_CHANNEL
-    try:
-        resolved_chat = await client.get_chat(DB_CHANNEL)
-        if resolved_chat and resolved_chat.id:
-            target_peer = resolved_chat.id
-            logger.info(f"✅ Pre-resolved channel entity for index_handler: {target_peer}")
-    except Exception as e:
-        logger.warning(f"Pre-resolving channel {DB_CHANNEL} encountered: {e}")
+    # Determine channels to index
+    target_channels = []
+    if message.command and len(message.command) > 1:
+        for arg in message.command[1:]:
+            arg = arg.strip()
+            if not arg:
+                continue
+            try:
+                target_channels.append(int(arg))
+            except (ValueError, TypeError):
+                target_channels.append(arg)
+    if not target_channels:
+        target_channels = list(DB_CHANNEL_IDS) if DB_CHANNEL_IDS else [-1004312780149, -1004391530222]
 
     status_msg = await message.reply_text(
         "⏳ **Starting Channel Indexing...**\n\n"
-        f"• **Target Channel:** `{target_peer}`\n"
+        f"• **Target Channels:** `{', '.join(str(c) for c in target_channels)}`\n"
         "• Direct Bot API batch scanning in progress...",
         quote=True
     )
 
     max_id = 20000
-
-    # Iterate message IDs in batches of 100 backwards from max_id down to 1
     added = 0
     total_scanned = 0
     total_media = 0
-    batch_buffer: List[Tuple[str, str, int, int]] = []
+    batch_buffer: List[Any] = []
     last_update = time.time()
 
     try:
-        for i in range(max_id, 0, -100):
-            msg_ids = list(range(max(1, i - 99), i + 1))
-            total_scanned += len(msg_ids)
+        for ch in target_channels:
+            target_peer = ch
             try:
-                msgs = await client.get_messages(target_peer, msg_ids)
-                if not msgs:
-                    continue
-                if not isinstance(msgs, list):
-                    msgs = [msgs]
-                for msg in msgs:
-                    if not msg:
-                        continue
-                    media = msg.document or msg.video or msg.audio or msg.animation
-                    if media and getattr(media, 'file_id', None):
-                        total_media += 1
-                        file_name = getattr(media, 'file_name', None) or msg.caption or "Untitled"
-                        file_id = getattr(media, 'file_id', None)
-                        file_size = getattr(media, 'file_size', 0) or 0
-                        # Save file_id, file_name, file_size to database/movies.db
-                        if file_id and file_name:
-                            batch_buffer.append((file_id, str(file_name).strip(), file_size, msg.id))
-
-                if len(batch_buffer) >= 100:
-                    ins_count = await db.add_movies_batch(batch_buffer)
-                    added += ins_count
-                    batch_buffer.clear()
-
-                await asyncio.sleep(0.02)
-
-            except FloodWait as fw:
-                wait_time = int(getattr(fw, "value", getattr(fw, "x", 30)))
-                logger.warning(f"FloodWait during batch indexing: sleeping {wait_time}s")
-                await asyncio.sleep(wait_time)
-            except (PeerIdInvalid, RPCError) as rpc_err:
-                logger.warning(f"RPC Error / PeerIdInvalid encountered on batch {msg_ids[0]}-{msg_ids[-1]}: {rpc_err}. Re-resolving channel peer...")
-                try:
-                    resolved_chat = await client.get_chat(DB_CHANNEL)
-                    if resolved_chat and resolved_chat.id:
-                        target_peer = resolved_chat.id
-                    msgs = await client.get_messages(target_peer, msg_ids)
-                    if msgs:
-                        if not isinstance(msgs, list):
-                            msgs = [msgs]
-                        for msg in msgs:
-                            if not msg:
-                                continue
-                            media = msg.document or msg.video or msg.audio or msg.animation
-                            if media and getattr(media, 'file_id', None):
-                                total_media += 1
-                                file_name = getattr(media, 'file_name', None) or msg.caption or "Untitled"
-                                file_id = getattr(media, 'file_id', None)
-                                file_size = getattr(media, 'file_size', 0) or 0
-                                if file_id and file_name:
-                                    batch_buffer.append((file_id, str(file_name).strip(), file_size, msg.id))
-                except Exception as inner_e:
-                    logger.error(f"Error fetching batch after RPC error recovery: {inner_e}")
-                await asyncio.sleep(0.2)
+                resolved_chat = await client.get_chat(ch)
+                if resolved_chat and resolved_chat.id:
+                    target_peer = resolved_chat.id
+                    logger.info(f"✅ Pre-resolved channel entity for index_handler: {target_peer}")
             except Exception as e:
-                logger.error(f"Error fetching batch {msg_ids[0]}-{msg_ids[-1]}: {e}")
+                logger.warning(f"Pre-resolving channel {ch} encountered: {e}")
 
-            # Live progress update every 3 seconds
-            if time.time() - last_update > 3:
-                if batch_buffer:
-                    ins_count = await db.add_movies_batch(batch_buffer)
-                    added += ins_count
-                    batch_buffer.clear()
-                stats = await db.get_stats()
+            for i in range(max_id, 0, -100):
+                msg_ids = list(range(max(1, i - 99), i + 1))
+                total_scanned += len(msg_ids)
                 try:
-                    await status_msg.edit_text(
-                        f"⏳ **Indexing in Progress (Bot API Batch Mode)...**\n\n"
-                        f"• **Channel:** `{DB_CHANNEL}`\n"
-                        f"• **Scanning Range:** IDs `{msg_ids[0]}` - `{msg_ids[-1]}` (of `{max_id}`)\n"
-                        f"• **Messages Scanned:** `{total_scanned}`\n"
-                        f"• **Videos/Files Found:** `{total_media}`\n"
-                        f"• **Newly Added:** `{added}`\n"
-                        f"🎬 **Total Movies in DB:** `{stats['movies']}`"
-                    )
-                except MessageNotModified:
-                    pass
-                except Exception:
-                    pass
-                last_update = time.time()
+                    msgs = await client.get_messages(target_peer, msg_ids)
+                    if not msgs:
+                        continue
+                    if not isinstance(msgs, list):
+                        msgs = [msgs]
+                    for msg in msgs:
+                        if not msg:
+                            continue
+                        media = msg.video or msg.document or msg.audio or msg.animation
+                        if media and getattr(media, 'file_id', None):
+                            total_media += 1
+                            # Extract title from msg.document.file_name or msg.caption
+                            file_name = None
+                            if msg.document and getattr(msg.document, 'file_name', None):
+                                file_name = msg.document.file_name
+                            elif getattr(media, 'file_name', None):
+                                file_name = media.file_name
+                            elif msg.caption:
+                                file_name = msg.caption
+                            else:
+                                file_name = "Untitled"
 
-        # Flush remaining buffer
-        if batch_buffer:
-            ins_count = await db.add_movies_batch(batch_buffer)
-            added += ins_count
-            batch_buffer.clear()
+                            file_id = getattr(media, 'file_id', None)
+                            file_size = getattr(media, 'file_size', 0) or 0
+                            caption = msg.caption or file_name
+                            cid = target_peer
+
+                            if file_id and file_name:
+                                batch_buffer.append((file_id, str(file_name).strip(), int(file_size), int(msg.id), cid, str(caption).strip()))
+
+                    if len(batch_buffer) >= 100:
+                        ins_count = await db.add_movies_batch(batch_buffer)
+                        added += ins_count
+                        batch_buffer.clear()
+
+                    await asyncio.sleep(0.02)
+
+                except FloodWait as fw:
+                    wait_time = int(getattr(fw, "value", getattr(fw, "x", 30)))
+                    logger.warning(f"FloodWait during batch indexing: sleeping {wait_time}s")
+                    await asyncio.sleep(wait_time)
+                except (PeerIdInvalid, RPCError) as rpc_err:
+                    logger.warning(f"RPC Error / PeerIdInvalid encountered on batch {msg_ids[0]}-{msg_ids[-1]}: {rpc_err}. Re-resolving channel peer...")
+                    try:
+                        resolved_chat = await client.get_chat(ch)
+                        if resolved_chat and resolved_chat.id:
+                            target_peer = resolved_chat.id
+                        msgs = await client.get_messages(target_peer, msg_ids)
+                        if msgs:
+                            if not isinstance(msgs, list):
+                                msgs = [msgs]
+                            for msg in msgs:
+                                if not msg:
+                                    continue
+                                media = msg.video or msg.document or msg.audio or msg.animation
+                                if media and getattr(media, 'file_id', None):
+                                    total_media += 1
+                                    file_name = None
+                                    if msg.document and getattr(msg.document, 'file_name', None):
+                                        file_name = msg.document.file_name
+                                    elif getattr(media, 'file_name', None):
+                                        file_name = media.file_name
+                                    elif msg.caption:
+                                        file_name = msg.caption
+                                    else:
+                                        file_name = "Untitled"
+
+                                    file_id = getattr(media, 'file_id', None)
+                                    file_size = getattr(media, 'file_size', 0) or 0
+                                    caption = msg.caption or file_name
+                                    cid = target_peer
+
+                                    if file_id and file_name:
+                                        batch_buffer.append((file_id, str(file_name).strip(), int(file_size), int(msg.id), cid, str(caption).strip()))
+                    except Exception as inner_e:
+                        logger.error(f"Error fetching batch after RPC error recovery: {inner_e}")
+                    await asyncio.sleep(0.2)
+                except Exception as e:
+                    logger.error(f"Error fetching batch {msg_ids[0]}-{msg_ids[-1]}: {e}")
+
+                # Live progress update every 3 seconds
+                if time.time() - last_update > 3:
+                    if batch_buffer:
+                        ins_count = await db.add_movies_batch(batch_buffer)
+                        added += ins_count
+                        batch_buffer.clear()
+                    stats = await db.get_stats()
+                    try:
+                        await status_msg.edit_text(
+                            f"⏳ **Indexing in Progress (Bot API Batch Mode)...**\n\n"
+                            f"• **Current Channel:** `{target_peer}`\n"
+                            f"• **Scanning Range:** IDs `{msg_ids[0]}` - `{msg_ids[-1]}` (of `{max_id}`)\n"
+                            f"• **Messages Scanned:** `{total_scanned}`\n"
+                            f"• **Videos/Files Found:** `{total_media}`\n"
+                            f"• **Newly Added:** `{added}`\n"
+                            f"🎬 **Total Movies in DB:** `{stats['movies']}`"
+                        )
+                    except MessageNotModified:
+                        pass
+                    except Exception:
+                        pass
+                    last_update = time.time()
+
+            # Flush after each channel
+            if batch_buffer:
+                ins_count = await db.add_movies_batch(batch_buffer)
+                added += ins_count
+                batch_buffer.clear()
 
         stats = await db.get_stats()
         await status_msg.edit_text(
             f"✅ **Full Channel Indexing Complete!**\n\n"
-            f"• **Channel:** `{DB_CHANNEL}`\n"
+            f"• **Channels Indexed:** `{', '.join(str(c) for c in target_channels)}`\n"
             f"• **Total Messages Scanned:** `{total_scanned}`\n"
             f"• **Total Videos/Files Identified:** `{total_media}`\n"
             f"• **New Titles Imported:** `{added}`\n"
@@ -2139,7 +2271,7 @@ async def index_handler(client: Client, message: Message):
             asyncio.create_task(auto_delete(status_msg, 120, reply_to_message=message))
 
     except Exception as e:
-        logger.error(f"Error in batch indexing for {DB_CHANNEL}: {e}", exc_info=True)
+        logger.error(f"Error in batch indexing: {e}", exc_info=True)
         if batch_buffer:
             ins_count = await db.add_movies_batch(batch_buffer)
             added += ins_count
@@ -2170,7 +2302,7 @@ async def auto_index_channel(client: Client, message: Message):
         except Exception:
             pass
 
-    if not matched and str(message.chat.username or "").lower() not in ["cenahub01"] and message.chat.id != -1004312780149:
+    if not matched and str(message.chat.username or "").lower() not in ["cenahub01"] and message.chat.id not in DB_CHANNEL_IDS:
         return
 
     media = message.document or message.video or message.audio or message.animation
@@ -2181,13 +2313,32 @@ async def auto_index_channel(client: Client, message: Message):
     if not file_id:
         return
 
-    file_name = getattr(media, "file_name", None) or message.caption or "Untitled"
-    title = str(file_name).strip() if file_name else "Untitled"
-    file_size = getattr(media, "file_size", 0) or 0
+    file_name = None
+    if message.document and getattr(message.document, "file_name", None):
+        file_name = message.document.file_name
+    elif getattr(media, "file_name", None):
+        file_name = media.file_name
+    elif message.caption:
+        file_name = message.caption
+    else:
+        file_name = "Untitled"
 
-    success = await db.add_movie(file_id=file_id, title=title, file_size=file_size, message_id=message.id)
+    title = str(file_name).strip() if file_name else "Untitled"
+    caption = str(message.caption).strip() if message.caption else title
+    file_size = getattr(media, "file_size", 0) or 0
+    cid = message.chat.id
+
+    success = await db.add_movie(
+        file_id=file_id,
+        title=title,
+        file_size=file_size,
+        message_id=message.id,
+        channel_id=cid,
+        file_name=title,
+        caption=caption
+    )
     if success:
-        logger.info(f"[AUTO-INDEX] Saved '{title}' (ID: {message.id})")
+        logger.info(f"[AUTO-INDEX] Saved '{title}' from chat {cid} (ID: {message.id})")
 
 # ---------------------------------------------------------------------------
 # STRICT GROUP ACCESS & MULTI-GROUP ANTI-SPAM MODERATOR (GROUP -2)
@@ -3112,14 +3263,15 @@ async def _start_pyrogram_client():
             logger.info("✅ Pyrogram bot client connected and authenticated successfully!")
             await set_bot_commands(app)
 
-            # Force resolve channel peer -1004312780149 at bot startup so Pyrogram caches the entity properly
-            try:
-                logger.info("Force resolving channel peer -1004312780149 at bot startup...")
-                cached_chat = await app.get_chat(-1004312780149)
-                if cached_chat and cached_chat.id:
-                    logger.info(f"✅ Cached channel peer: {cached_chat.id} ({getattr(cached_chat, 'title', '')})")
-            except Exception as e:
-                logger.warning(f"⚠️ Could not cache channel -1004312780149 on startup: {e}")
+            # Multi-channel peer resolution at bot startup to pre-cache channel entities
+            for cid in DB_CHANNEL_IDS:
+                try:
+                    logger.info(f"Pre-caching channel peer {cid} at bot startup...")
+                    cached_chat = await app.get_chat(cid)
+                    if cached_chat and cached_chat.id:
+                        logger.info(f"✅ Cached channel peer: {cached_chat.id} ({getattr(cached_chat, 'title', '')})")
+                except Exception as e:
+                    logger.warning(f"⚠️ Could not cache channel {cid} on startup: {e}")
 
             break
         except FloodWait as e:

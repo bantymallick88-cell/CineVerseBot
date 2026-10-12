@@ -111,12 +111,12 @@ def parse_db_channel_ids() -> List[Any]:
 DB_CHANNEL_IDS = parse_db_channel_ids()
 DB_CHANNEL_ID = CHANNEL_ID
 
-ADMIN_ID = 783110149
-OWNER_ID = 783110149
+ADMIN_ID = 7831101047
+OWNER_ID = 7831101047
 
 def parse_admin_ids() -> set:
-    raw_admin = os.getenv("ADMIN_ID", "783110149,7831101047")
-    ids = {ADMIN_ID, OWNER_ID, 783110149, 7831101047}
+    raw_admin = os.getenv("ADMIN_ID", "7831101047")
+    ids = {ADMIN_ID, OWNER_ID, 7831101047}
     for item in raw_admin.replace(",", " ").split():
         item = item.strip()
         try:
@@ -1435,19 +1435,20 @@ async def start_handler(client: Client, message: Message):
             asyncio.create_task(auto_delete(start_grp, 60, reply_to_message=message))
         return
 
-    # Trigger set_bot_commands for Owner whenever Owner (783110149) sends /start in PM
-    if user_id == 783110149 and message.chat and message.chat.type == enums.ChatType.PRIVATE:
+    # Trigger set_bot_commands for Owner whenever Owner (7831101047) sends /start in PM
+    if user_id == 7831101047 and message.chat and message.chat.type == enums.ChatType.PRIVATE:
         try:
             await client.set_bot_commands(
                 [
                     BotCommand("index", "Index Movies Database"),
+                    BotCommand("stats", "Bot Statistics"),
                     BotCommand("start", "Start Bot"),
                     BotCommand("help", "Help Guide"),
-                    BotCommand("about", "About Bot")
+                    BotCommand("about", "About CineVerse")
                 ],
-                scope=BotCommandScopeChat(chat_id=783110149)
+                scope=BotCommandScopeChat(chat_id=7831101047)
             )
-            logger.info("✅ Owner menu refreshed on /start for chat 783110149")
+            logger.info("✅ Owner menu refreshed on /start for chat 7831101047")
         except Exception as e:
             logger.warning(f"Could not refresh owner menu on /start: {e}")
 
@@ -1948,24 +1949,37 @@ async def index_handler(client: Client, message: Message):
     asyncio.create_task(auto_delete(message, 60))
     await db.add_user(user_id)
 
-    target_channel = -1004312780149
+    DB_CHANNEL = -1004312780149
     status_msg = await message.reply_text(
         "⏳ **Starting Channel Indexing...**\n\n"
-        f"• **Target Channel:** `{target_channel}`\n"
-        "• Fetching latest message ID in database channel...",
+        f"• **Target Channel:** `{DB_CHANNEL}`\n"
+        "• Resolving channel peer & fetching latest message ID...",
         quote=True
     )
 
+    channel_peer = DB_CHANNEL
     try:
-        # Fetch latest message ID in database channel
-        latest_msg = await client.send_message(target_channel, ".")
-        max_id = latest_msg.id
+        target_chat = await client.get_chat(DB_CHANNEL)
+        channel_peer = target_chat.id
+    except Exception as e:
+        logger.warning(f"Direct get_chat failed for {DB_CHANNEL}: {e}")
         try:
-            await latest_msg.delete()
+            async for dialog in client.get_dialogs():
+                if dialog.chat and dialog.chat.id == DB_CHANNEL:
+                    channel_peer = dialog.chat.id
+                    break
+        except Exception as e2:
+            logger.error(f"Dialog search failed: {e2}")
+
+    try:
+        probe = await client.send_message(channel_peer, "Probe...")
+        max_id = probe.id
+        try:
+            await probe.delete()
         except Exception:
             pass
     except Exception as e:
-        logger.error(f"Failed to fetch latest message ID from {target_channel}: {e}")
+        logger.error(f"Failed to probe database channel {channel_peer}: {e}")
         await status_msg.edit_text(
             f"❌ **Failed to send probe message to channel:**\n`{e}`\n\n"
             "Please ensure the bot is added to channel `-1004312780149` as an Administrator with 'Post Messages' and 'Delete Messages' permissions."
@@ -1984,7 +1998,7 @@ async def index_handler(client: Client, message: Message):
             msg_ids = list(range(max(1, i - 99), i + 1))
             total_scanned += len(msg_ids)
             try:
-                msgs = await client.get_messages(target_channel, msg_ids)
+                msgs = await client.get_messages(channel_peer, msg_ids)
                 if not msgs:
                     continue
                 if not isinstance(msgs, list):
@@ -2020,7 +2034,7 @@ async def index_handler(client: Client, message: Message):
                 logger.warning(f"FloodWait during batch indexing: sleeping {wait_time}s")
                 await asyncio.sleep(wait_time)
             except Exception as e:
-                logger.error(f"Error fetching batch: {e}")
+                logger.error(f"Batch fetch error: {e}")
 
             # Live progress update every 3 seconds
             if time.time() - last_update > 3:
@@ -2032,7 +2046,7 @@ async def index_handler(client: Client, message: Message):
                 try:
                     await status_msg.edit_text(
                         f"⏳ **Indexing in Progress (Bot API Batch Mode)...**\n\n"
-                        f"• **Channel:** `{target_channel}`\n"
+                        f"• **Channel:** `{DB_CHANNEL}`\n"
                         f"• **Scanning Range:** IDs `{msg_ids[0]}` - `{msg_ids[-1]}` (of `{max_id}`)\n"
                         f"• **Messages Scanned:** `{total_scanned}`\n"
                         f"• **Videos/Files Found:** `{total_media}`\n"
@@ -2054,7 +2068,7 @@ async def index_handler(client: Client, message: Message):
         stats = await db.get_stats()
         await status_msg.edit_text(
             f"✅ **Full Channel Indexing Complete!**\n\n"
-            f"• **Channel:** `{target_channel}`\n"
+            f"• **Channel:** `{DB_CHANNEL}`\n"
             f"• **Total Messages Scanned:** `{total_scanned}`\n"
             f"• **Total Videos/Files Identified:** `{total_media}`\n"
             f"• **New Titles Imported:** `{added}`\n"
@@ -2064,7 +2078,7 @@ async def index_handler(client: Client, message: Message):
             asyncio.create_task(auto_delete(status_msg, 120, reply_to_message=message))
 
     except Exception as e:
-        logger.error(f"Error in batch indexing for {target_channel}: {e}", exc_info=True)
+        logger.error(f"Error in batch indexing for {DB_CHANNEL}: {e}", exc_info=True)
         if batch_buffer:
             ins_count = await db.add_movies_batch(batch_buffer)
             added += ins_count
@@ -3042,7 +3056,7 @@ async def set_bot_commands(client: Client):
     """
     Sets official bot commands:
     1. Default public scope (BotCommandScopeDefault): /start, /help, /about, /dmca.
-    2. Owner scope (BotCommandScopeChat for 783110149): /index, /start, /help, /about.
+    2. Owner scope (BotCommandScopeChat for 7831101047): /index, /stats, /start, /help, /about.
     """
     try:
         public_commands = [
@@ -3060,13 +3074,14 @@ async def set_bot_commands(client: Client):
         await client.set_bot_commands(
             [
                 BotCommand("index", "Index Movies Database"),
+                BotCommand("stats", "Bot Statistics"),
                 BotCommand("start", "Start Bot"),
                 BotCommand("help", "Help Guide"),
-                BotCommand("about", "About Bot")
+                BotCommand("about", "About CineVerse")
             ],
-            scope=BotCommandScopeChat(chat_id=783110149)
+            scope=BotCommandScopeChat(chat_id=7831101047)
         )
-        logger.info("✅ Owner-specific menu registered for chat 783110149")
+        logger.info("✅ Owner-specific menu registered for chat 7831101047")
     except Exception as e:
         logger.warning(f"Could not set owner menu on startup: {e}")
 

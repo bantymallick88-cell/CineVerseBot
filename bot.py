@@ -91,7 +91,7 @@ API_ID = get_env_int("API_ID", 36971153)
 API_HASH = get_env_str("API_HASH", "e5e4c9c88d0c5c2654d8fbe985523c9c")
 BOT_TOKEN = get_env_str("BOT_TOKEN", "8994566569:AAG8pdApyO7ut1BrG6xdstrkdWL1ZUProfY")
 
-CHANNEL_ID = -1004312780149
+CHANNEL_ID = int("-1004312780149")
 
 def parse_db_channel_ids() -> List[Any]:
     raw_channels = os.getenv("DB_CHANNEL_ID", str(CHANNEL_ID))
@@ -1949,7 +1949,7 @@ async def index_handler(client: Client, message: Message):
     asyncio.create_task(auto_delete(message, 60))
     await db.add_user(user_id)
 
-    DB_CHANNEL = -1004312780149
+    DB_CHANNEL = int("-1004312780149")
     status_msg = await message.reply_text(
         "⏳ **Starting Channel Indexing...**\n\n"
         f"• **Target Channel:** `{DB_CHANNEL}`\n"
@@ -1957,29 +1957,27 @@ async def index_handler(client: Client, message: Message):
         quote=True
     )
 
-    channel_peer = DB_CHANNEL
+    peer = DB_CHANNEL
     try:
-        target_chat = await client.get_chat(DB_CHANNEL)
-        channel_peer = target_chat.id
+        chat = await client.get_chat(DB_CHANNEL)
+        peer = chat.id
     except Exception as e:
         logger.warning(f"Direct get_chat failed for {DB_CHANNEL}: {e}")
         try:
             async for dialog in client.get_dialogs():
                 if dialog.chat and dialog.chat.id == DB_CHANNEL:
-                    channel_peer = dialog.chat.id
+                    peer = dialog.chat.id
                     break
         except Exception as e2:
             logger.error(f"Dialog search failed: {e2}")
 
     try:
-        probe = await client.send_message(channel_peer, "Probe...")
+        # Send probe and fetch messages
+        probe = await client.send_message(peer, "Testing connection...")
         max_id = probe.id
-        try:
-            await probe.delete()
-        except Exception:
-            pass
+        await probe.delete()
     except Exception as e:
-        logger.error(f"Failed to probe database channel {channel_peer}: {e}")
+        logger.error(f"Failed to probe database channel {peer}: {e}")
         await status_msg.edit_text(
             f"❌ **Failed to send probe message to channel:**\n`{e}`\n\n"
             "Please ensure the bot is added to channel `-1004312780149` as an Administrator with 'Post Messages' and 'Delete Messages' permissions."
@@ -1998,7 +1996,7 @@ async def index_handler(client: Client, message: Message):
             msg_ids = list(range(max(1, i - 99), i + 1))
             total_scanned += len(msg_ids)
             try:
-                msgs = await client.get_messages(channel_peer, msg_ids)
+                msgs = await client.get_messages(peer, msg_ids)
                 if not msgs:
                     continue
                 if not isinstance(msgs, list):
@@ -2034,7 +2032,7 @@ async def index_handler(client: Client, message: Message):
                 logger.warning(f"FloodWait during batch indexing: sleeping {wait_time}s")
                 await asyncio.sleep(wait_time)
             except Exception as e:
-                logger.error(f"Batch fetch error: {e}")
+                logger.error(f"Error fetching batch: {e}")
 
             # Live progress update every 3 seconds
             if time.time() - last_update > 3:

@@ -663,7 +663,8 @@ def build_pagination_markup(files: List[Dict[str, Any]], cache_id: str, current_
         display_name = (meta["clean_title"][:26] + "...") if len(meta["clean_title"]) > 29 else meta["clean_title"]
         target_bot = bot_username or os.getenv("BOT_USERNAME", "CineVerseFilterBot")
         btn_url = f"https://t.me/{target_bot}?start=get_{f['message_id']}"
-        buttons.append([InlineKeyboardButton(btn_text, url=btn_url)])
+        btn_text = f"📥 [ {meta['quality']} │ {size_str} ] ▷ {display_name}"
+        buttons.append([InlineKeyboardButton(text=btn_text, url=btn_url)])
 
     # Row 1: Interactive filter submenus
     filter_row = [

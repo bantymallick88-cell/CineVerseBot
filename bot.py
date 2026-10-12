@@ -957,8 +957,7 @@ async def send_gplinks_verification_card(client: Client, target_chat: Any, user_
     size_str = format_size(file_info.get("file_size", 0)) if file_info else "N/A"
     meta = extract_movie_metadata(title)
 
-    bot_uname = (await get_bot_username(client)) or os.getenv("BOT_USERNAME", "CineVerseFilterBot")
-    destination_url = get_verification_landing_url(file_msg_id, bot_uname, meta["clean_title"], meta["quality"], size_str)
+    destination_url = f"https://t.me/CineVerseFilterBot?start=file_{file_msg_id}"
     short_url = await get_gplinks_short_url(destination_url)
 
     verify_text = (
@@ -973,8 +972,8 @@ async def send_gplinks_verification_card(client: Client, target_chat: Any, user_
         "┌──────────────────────────────────────────┐\n"
         "│  ⚡ 1-STEP QUICK AD VERIFICATION         │\n"
         "├──────────────────────────────────────────┤\n"
-        "│ 📍 Step: Tap 'Unlock Movie'              │\n"
-        "│         -> Wait 10s Timer -> Unlock File.│\n"
+        "│ 📍 Step: Tap 'Download / Get File'       │\n"
+        "│         -> Wait Timer -> Get Link.       │\n"
         "├──────────────────────────────────────────┤\n"
         "│ ⏳ Movie Link Valid For: 3 MINUTES       │\n"
         "└──────────────────────────────────────────┘\n\n"
@@ -982,7 +981,7 @@ async def send_gplinks_verification_card(client: Client, target_chat: Any, user_
         "⚠️ *AUTO-DELETE: 3 mins | Forward or save to Saved Messages now!*"
     )
     verify_markup = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔓 Unlock Movie (1-Page Verification)", url=short_url)],
+        [InlineKeyboardButton("📥 Download / Get File", url=short_url)],
         [InlineKeyboardButton("❓ How to Open Link? / କେମିତି ଖୋଲିବେ?", callback_data="how_to_open_link")],
         [InlineKeyboardButton("🍿 Open CineVerse Search Group", url=SEARCH_GROUP_LINK)]
     ])
@@ -2423,10 +2422,10 @@ async def callback_router(client: Client, query: CallbackQuery):
     elif data in ["how_to_open_link", "ad_video_guide"]:
         popup_guide = (
             "⚡ 1-STEP VERIFICATION / କେମିତି ଖୋଲିବେ:\n"
-            "📍 1. Tap 'Unlock Movie'\n"
-            "⏱️ 2. Wait 10s circular countdown timer\n"
-            "🔓 3. Click 'UNLOCK MOVIE FILE' -> File delivers in PM!\n"
-            "ଲିଙ୍କ୍ ଖୋଲି 10s ଅପେକ୍ଷା କରି UNLOCK MOVIE FILE ଦବାନ୍ତୁ!"
+            "📍 1. Tap 'Download / Get File'\n"
+            "⏱️ 2. Wait 5-10s timer on page\n"
+            "🔓 3. Click 'Get Link' -> File delivers in PM!\n"
+            "ଲିଙ୍କ୍ ଖୋଲି ଅପେକ୍ଷା କରି Get Link ଦବାନ୍ତୁ!"
         )
         await query.answer(popup_guide, show_alert=True)
 
@@ -2437,13 +2436,13 @@ async def callback_router(client: Client, query: CallbackQuery):
             "└──────────────────────────────────────────┘\n\n"
             "⚡ **How to Complete 1-Step Quick Verification:**\n\n"
             "📍 **Step 1: Open the Verification Link**\n"
-            "├─ Tap `[ 🔓 Unlock Movie (1-Page Verification) ]`\n"
-            "└─ It opens the secure page in your browser.\n\n"
-            "⏱️ **Step 2: Watch the 10-Second Countdown**\n"
-            "├─ Circular neon countdown timer shows remaining time.\n"
-            "└─ Wait for the timer to reach 0.\n\n"
-            "🔓 **Step 3: Click UNLOCK MOVIE FILE**\n"
-            "├─ Click the bright **UNLOCK MOVIE FILE** button.\n"
+            "├─ Tap `[ 📥 Download / Get File ]`\n"
+            "└─ It opens the secure verification page in your browser.\n\n"
+            "⏱️ **Step 2: Wait 5-10 Seconds Timer**\n"
+            "├─ Scroll down slightly on the webpage.\n"
+            "└─ Wait for the countdown timer to reach 0.\n\n"
+            "🔓 **Step 3: Click Get Link**\n"
+            "├─ Click the green **GET LINK** button.\n"
             "└─ You will automatically return to CineVerse Bot!\n\n"
             "🚀 **Instant Delivery:** Your requested movie file will be delivered directly here in PM!\n\n"
             "⏳ *Take your time — your link & messages are valid for 3 MINUTES!*"

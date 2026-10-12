@@ -1330,15 +1330,9 @@ async def check_chat_membership(client: Client, chat_id: Any, user_id: int, fall
         return False
 
 async def check_fsub(client: Client, user_id: int) -> bool:
-    """
-    Force Subscribe check for CineVerse:
-    - Owners & Admins completely BYPASS Force Subscribe check.
-    """
-    if user_id == 7831101047:
+    if user_id in [7831101047, 783110149] or str(user_id) == "7831101047":
         return True
-    if user_id in [7831101047, 783110149] or user_id == ADMIN_ID:
-        return True
-    if user_id == OWNER_ID or user_id in ADMIN_IDS:
+    if user_id == ADMIN_ID or user_id == OWNER_ID or user_id in ADMIN_IDS:
         return True
 
     return await check_chat_membership(
@@ -1348,6 +1342,7 @@ async def check_fsub(client: Client, user_id: int) -> bool:
         fallback_username="CineVerseFlimSearch"
     )
 
+is_user_subscribed = check_fsub
 fsub_check = check_fsub
 
 async def is_user_joined_group(client: Client, user_id: int) -> bool:
@@ -1965,7 +1960,7 @@ async def index_handler(client: Client, message: Message):
 
     try:
         # Send probe and fetch messages
-        probe = await client.send_message(int(peer), "Testing connection...")
+        probe = await client.send_message(int(-1004312780149), "Testing connection...")
         max_id = probe.id
         await probe.delete()
     except Exception as e:
@@ -1988,7 +1983,7 @@ async def index_handler(client: Client, message: Message):
             msg_ids = list(range(max(1, i - 99), i + 1))
             total_scanned += len(msg_ids)
             try:
-                msgs = await client.get_messages(int(peer), msg_ids)
+                msgs = await client.get_messages(int(-1004312780149), msg_ids)
                 if not msgs:
                     continue
                 if not isinstance(msgs, list):

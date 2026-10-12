@@ -138,10 +138,10 @@ FSUB_GROUP_LINK = FSUB_CHANNEL_LINK
 
 MAIN_GROUP_ID = FSUB_GROUP_ID
 MAIN_GROUP_LINK = FSUB_CHANNEL_LINK
-REQUEST_GROUP_ID = get_env_int("REQUEST_GROUP_ID", get_env_int("REQ_GROUP_ID", -1003982672894))
-REQUEST_GROUP_LINK = get_env_str("REQUEST_GROUP_LINK", get_env_str("REQ_GROUP_LINK", "https://t.me/FlimRequest_01"))
-BACKUP_GROUP_ID = get_env_int("BACKUP_GROUP_ID", get_env_int("BACKUP_CHANNEL_ID", -1003423603865))
-BACKUP_GROUP_LINK = get_env_str("BACKUP_GROUP_LINK", get_env_str("BACKUP_CHANNEL_LINK", "https://t.me/CineVersebackup"))
+REQUEST_GROUP_ID = get_env_int("REQUEST_GROUP_ID", FSUB_GROUP_ID)
+REQUEST_GROUP_LINK = get_env_str("REQUEST_GROUP_LINK", FSUB_CHANNEL_LINK)
+BACKUP_GROUP_ID = get_env_int("BACKUP_GROUP_ID", FSUB_GROUP_ID)
+BACKUP_GROUP_LINK = get_env_str("BACKUP_GROUP_LINK", FSUB_CHANNEL_LINK)
 
 # Strict Allowed Chat Access List: Main Group, Request Group, Backup Group, DB Channels
 ALLOWED_CHAT_IDS = [MAIN_GROUP_ID, REQUEST_GROUP_ID, BACKUP_GROUP_ID] + [cid for cid in DB_CHANNEL_IDS if isinstance(cid, int)]
@@ -1329,14 +1329,14 @@ async def check_chat_membership(client: Client, chat_id: Any, user_id: int, fall
         logger.warning(f"Error checking chat membership for {chat_id} (user {user_id}): {e}")
         return False
 
-async def fsub_check(client: Client, user_id: int) -> bool:
+async def check_fsub(client: Client, user_id: int) -> bool:
     """
     Force Subscribe check for CineVerse:
-    - ADMIN_ID = 7831101047 and all admins completely BYPASS Force Subscribe check.
-    - Regular users are verified against official FSUB_GROUP_ID (-1004427640174) / CineVerseFlimSearch.
-    - Removed ALL hardcoded external spam/demo channels.
+    - Owners & Admins completely BYPASS Force Subscribe check.
     """
-    if user_id == 7831101047 or user_id == ADMIN_ID or user_id == OWNER_ID or user_id in ADMIN_IDS:
+    if user_id in [7831101047, 783110149] or user_id == ADMIN_ID:
+        return True
+    if user_id == OWNER_ID or user_id in ADMIN_IDS:
         return True
 
     return await check_chat_membership(
@@ -1345,6 +1345,8 @@ async def fsub_check(client: Client, user_id: int) -> bool:
         user_id,
         fallback_username="CineVerseFlimSearch"
     )
+
+fsub_check = check_fsub
 
 async def is_user_joined_group(client: Client, user_id: int) -> bool:
     return await fsub_check(client, user_id)
@@ -1425,8 +1427,8 @@ async def start_handler(client: Client, message: Message):
             asyncio.create_task(auto_delete(start_grp, 60, reply_to_message=message))
         return
 
-    # Trigger set_bot_commands for Owner whenever Owner (7831101047) sends /start in PM
-    if user_id == 7831101047 and message.chat and message.chat.type == enums.ChatType.PRIVATE:
+    # Trigger set_bot_commands for Owner whenever Owner sends /start in PM
+    if (user_id in [7831101047, 783110149] or user_id == ADMIN_ID) and message.chat and message.chat.type == enums.ChatType.PRIVATE:
         try:
             await client.set_bot_commands(
                 [
@@ -1436,11 +1438,11 @@ async def start_handler(client: Client, message: Message):
                     BotCommand("help", "Help Guide"),
                     BotCommand("about", "About CineVerse")
                 ],
-                scope=BotCommandScopeChat(chat_id=7831101047)
+                scope=BotCommandScopeChat(chat_id=user_id)
             )
-            logger.info("✅ Owner menu refreshed on /start for chat 7831101047")
+            logger.info(f"✅ Owner menu refreshed on /start for chat {user_id}")
         except Exception as e:
-            logger.warning(f"Could not refresh owner menu on /start: {e}")
+            logger.warning(f"Could not refresh owner menu on /start for {user_id}: {e}")
 
     # 2. Owner Permission Gate: Check if disapproved
     if await db.is_disapproved_user(user_id):
@@ -3054,20 +3056,21 @@ async def set_bot_commands(client: Client):
     except Exception as e:
         logger.warning(f"Failed to set default bot commands: {e}")
 
-    try:
-        await client.set_bot_commands(
-            [
-                BotCommand("index", "Index Movies Database"),
-                BotCommand("stats", "Bot Statistics"),
-                BotCommand("start", "Start Bot"),
-                BotCommand("help", "Help Guide"),
-                BotCommand("about", "About CineVerse")
-            ],
-            scope=BotCommandScopeChat(chat_id=7831101047)
-        )
-        logger.info("✅ Owner-specific menu registered for chat 7831101047")
-    except Exception as e:
-        logger.warning(f"Could not set owner menu on startup: {e}")
+    for owner_chat_id in [7831101047, 783110149]:
+        try:
+            await client.set_bot_commands(
+                [
+                    BotCommand("index", "Index Movies Database"),
+                    BotCommand("stats", "Bot Statistics"),
+                    BotCommand("start", "Start Bot"),
+                    BotCommand("help", "Help Guide"),
+                    BotCommand("about", "About CineVerse")
+                ],
+                scope=BotCommandScopeChat(chat_id=owner_chat_id)
+            )
+            logger.info(f"✅ Owner-specific menu registered for chat {owner_chat_id}")
+        except Exception as e:
+            logger.warning(f"Could not set owner menu on startup for {owner_chat_id}: {e}")
 
 async def _start_pyrogram_client():
     """

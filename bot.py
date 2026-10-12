@@ -1242,42 +1242,12 @@ async def is_sender_chat_admin(client: Client, chat_id: int, user_id: int) -> bo
 
 async def check_group_authorization(client: Client, message: Message) -> bool:
     """
-    Strict Group Access & Authorized Chat Gate:
-    Bot is strictly restricted to ALLOWED_CHAT_IDS = [MAIN_GROUP_ID, REQUEST_GROUP_ID, BACKUP_GROUP_ID, DB_CHANNEL_ID].
-    When message or bot invite is detected in any unauthorized chat, immediately log and call client.leave_chat(chat_id).
+    Fallback Mode: Temporarily allow search queries from ANY group while logging chat ID.
     """
-    if not message.chat or message.chat.type not in [enums.ChatType.GROUP, enums.ChatType.SUPERGROUP, enums.ChatType.CHANNEL]:
-        return True
-
-    if message.chat.id in ALLOWED_CHAT_IDS:
-        return True
-
-    peer = await resolve_channel_peer(client)
-    if message.chat.id == peer:
-        return True
-
-    # Unauthorized group detected!
-    logger.warning(f"Unauthorized chat access detected in '{getattr(message.chat, 'title', '')}' ({message.chat.id}). Leaving immediately...")
-    try:
-        notice = await message.reply_text(
-            "┌──────────────────────────────────────────┐\n"
-            "│   🚫  U N A U T H O R I Z E D   G R O U P │\n"
-            "└──────────────────────────────────────────┘\n\n"
-            "⚠️ **Unauthorized Group Access Detected!**\n"
-            "├─ CineVerse Bot is strictly authorized for official network groups only.\n"
-            "└─ 🚪 *Leaving this chat immediately...*",
-            disable_web_page_preview=True
-        )
-        if notice:
-            asyncio.create_task(auto_delete(notice, 10))
-    except Exception as e:
-        logger.debug(f"Failed to reply notice in unauthorized group: {e}")
-
-    try:
-        await client.leave_chat(message.chat.id)
-    except Exception as e:
-        logger.error(f"Failed to leave unauthorized chat {message.chat.id}: {e}")
-    return False
+    if message.chat:
+        logger.info(f"Incoming Search Chat ID: {message.chat.id} | Title: '{getattr(message.chat, 'title', '')}'")
+        print(f"Incoming Search Chat ID: {message.chat.id} | Title: '{getattr(message.chat, 'title', '')}'")
+    return True
 
 # ---------------------------------------------------------------------------
 # COMMAND HANDLERS
@@ -1936,10 +1906,9 @@ async def on_bot_chat_member_updated(client: Client, member_update):
         new_member = member_update.new_chat_member
         if new_member and new_member.user and new_member.user.id == me.id:
             chat = member_update.chat
-            if chat and chat.type in [enums.ChatType.GROUP, enums.ChatType.SUPERGROUP, enums.ChatType.CHANNEL]:
-                if chat.id not in ALLOWED_CHAT_IDS:
-                    logger.warning(f"Bot added to unauthorized chat '{getattr(chat, 'title', '')}' ({chat.id}). Leaving immediately...")
-                    await client.leave_chat(chat.id)
+            if chat:
+                logger.info(f"Bot added to chat: '{getattr(chat, 'title', '')}' (Chat ID: {chat.id})")
+                print(f"Bot added to chat: '{getattr(chat, 'title', '')}' (Chat ID: {chat.id})")
     except Exception as e:
         logger.debug(f"Chat member update error: {e}")
 
@@ -1948,15 +1917,8 @@ async def group_security_and_antispam_handler(client: Client, message: Message):
     if not message.chat or message.chat.type not in [enums.ChatType.GROUP, enums.ChatType.SUPERGROUP]:
         return
 
-    # 1. Strict unauthorized group check: leave immediately
-    if message.chat.id not in ALLOWED_CHAT_IDS:
-        logger.warning(f"Unauthorized group detected: '{getattr(message.chat, 'title', '')}' ({message.chat.id}). Leaving immediately...")
-        try:
-            await client.leave_chat(message.chat.id)
-        except Exception:
-            pass
-        message.stop_propagation()
-        return
+    # Log incoming chat ID for diagnostic inspection
+    logger.info(f"Group message received from Chat ID: {message.chat.id} | Title: '{getattr(message.chat, 'title', '')}'")
 
     # 2. Multi-Group Anti-Spam (ONLY in REQUEST_GROUP_ID & BACKUP_GROUP_ID; NEVER in MAIN_GROUP_ID)
     if message.chat.id in [REQUEST_GROUP_ID, BACKUP_GROUP_ID]:
@@ -2080,7 +2042,7 @@ async def service_message_cleaner(client: Client, message: Message):
 # ---------------------------------------------------------------------------
 # SEARCH & AUTO-FILTER HANDLER (WITH 60S AUTO-DELETE & SINGLE-PROCESS DEDUPLICATION)
 # ---------------------------------------------------------------------------
-@app.on_message(filters.text & ~filters.bot & ~filters.via_bot & ~filters.service & ~filters.forwarded)
+@app.on_message((filters.group | filters.private) & filters.text & ~filters.bot & ~filters.service)
 async def auto_filter_handler(client: Client, message: Message):
     text = message.text.strip() if message.text else ""
     if not text:
@@ -2093,57 +2055,16 @@ async def auto_filter_handler(client: Client, message: Message):
         return
     user_id = message.from_user.id
 
-    # 1. Strict Main Group Search Lock & Group Protection
-    if message.chat and message.chat.type in [enums.ChatType.GROUP, enums.ChatType.SUPERGROUP]:
-        if message.chat.id != MAIN_GROUP_ID:
-            if message.chat.id in [REQUEST_GROUP_ID, BACKUP_GROUP_ID]:
-                try:
-                    await message.delete()
-                except Exception:
-                    pass
-                notice_text = (
-                    "┌──────────────────────────────────────────┐\n"
-                    "│   ℹ️  S E A R C H   N O T I C E          │\n"
-                    "└──────────────────────────────────────────┘\n\n"
-                    "⚠️ **Movie search is only active in Main Group.**\n\n"
-                    "👉 *Please send your movie title in CineVerse Search Group below:*"
-                )
-                notice_markup = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🍿 Open Main Search Group", url=MAIN_GROUP_LINK)]
-                ])
-                try:
-                    notice_msg = await client.send_message(
-                        chat_id=message.chat.id,
-                        text=notice_text,
-                        reply_markup=notice_markup,
-                        disable_web_page_preview=True
-                    )
-                    if notice_msg:
-                        asyncio.create_task(auto_delete(notice_msg, 20))
-                except Exception as e:
-                    logger.debug(f"Failed to send search notice: {e}")
-                return
-            else:
-                # Unauthorized group: leave immediately
-                if not await check_group_authorization(client, message):
-                    return
+    # Print / Log incoming message chat ID (Fallback Mode)
+    if message.chat:
+        logger.info(f"Incoming Search Chat ID: {message.chat.id} | Chat Type: {message.chat.type} | Group Title: '{getattr(message.chat, 'title', '')}' | User: {user_id} | Query: '{text}'")
+        print(f"Incoming Search Chat ID: {message.chat.id} | Group Title: '{getattr(message.chat, 'title', '')}' | Query: '{text}'")
 
     # Enforce 60-second auto-delete on user message
     asyncio.create_task(auto_delete(message, 60))
 
-    # Catch unknown / invalid commands in group or PM
+    # Ignore command messages so dedicated command handlers can process them
     if text.startswith("/"):
-        err_msg = await message.reply_text(
-            "┌──────────────────────────────────────────┐\n"
-            "│   ❌  U N K N O W N   C O M M A N D      │\n"
-            "└──────────────────────────────────────────┘\n\n"
-            "◈ **Unrecognized Command Entered!**\n"
-            "├─ 💡 Type `/help` to view all available commands.\n"
-            "└─ 🍿 Or simply send a movie title to search directly.",
-            quote=True
-        )
-        if err_msg:
-            asyncio.create_task(auto_delete(err_msg, 60, reply_to_message=message))
         return
 
     # Code-Level Deduplication Lock on search query within 5 seconds
@@ -2264,34 +2185,48 @@ async def auto_filter_handler(client: Client, message: Message):
             asyncio.create_task(auto_delete(short_msg, 60, reply_to_message=message))
         return
 
-    files, total = await db.search_files(text, offset=0, limit=PAGE_SIZE)
-    if total == 0:
-        not_found_msg = await message.reply_text(
-            "┌──────────────────────────────────────────┐\n"
-            "│   ❌  F I L E   N O T   F O U N D        │\n"
-            "└──────────────────────────────────────────┘\n\n"
-            f"◈ **Searched:** `{text}`\n"
-            "├─ ⚠️ No matching file available in current vault.\n"
-            "├─ 💡 Tip: Check spelling or try searching with release year.\n"
-            f"└─ 🍿 Request new titles in our Request Group: {REQ_GROUP_LINK}",
-            quote=True,
-            disable_web_page_preview=True
-        )
-        if not_found_msg:
-            asyncio.create_task(auto_delete(not_found_msg, 60, reply_to_message=message))
-        return
+    try:
+        files, total = await db.search_files(text, offset=0, limit=PAGE_SIZE)
+        logger.info(f"Database search for '{text}' in chat {message.chat.id} returned {total} results")
+        if total == 0:
+            not_found_msg = await message.reply_text(
+                "┌──────────────────────────────────────────┐\n"
+                "│   ❌  F I L E   N O T   F O U N D        │\n"
+                "└──────────────────────────────────────────┘\n\n"
+                f"◈ **Searched:** `{text}`\n"
+                "├─ ⚠️ No matching file available in current vault.\n"
+                "├─ 💡 Tip: Check spelling or try searching with release year.\n"
+                f"└─ 🍿 Request new titles in our Request Group: {REQ_GROUP_LINK}",
+                quote=True,
+                disable_web_page_preview=True
+            )
+            if not_found_msg:
+                asyncio.create_task(auto_delete(not_found_msg, 60, reply_to_message=message))
+            return
 
-    cache_id = uuid.uuid4().hex[:8]
-    SEARCH_CACHE[cache_id] = text
-    total_pages = math.ceil(total / PAGE_SIZE)
-    bot_uname = await get_bot_username(client)
-    markup = await build_pagination_markup(files, cache_id, 1, total_pages, bot_username=bot_uname)
-    response_text = format_search_text(text, total, 1, total_pages)
+        cache_id = uuid.uuid4().hex[:8]
+        SEARCH_CACHE[cache_id] = text
+        total_pages = math.ceil(total / PAGE_SIZE)
+        bot_uname = await get_bot_username(client)
+        markup = await build_pagination_markup(files, cache_id, 1, total_pages, bot_username=bot_uname)
+        response_text = format_search_text(text, total, 1, total_pages)
 
-    # Reply directly in group (Single message only, NO duplicate group notices)
-    sent_msg = await message.reply_text(response_text, reply_markup=markup, quote=True)
-    if sent_msg:
-        asyncio.create_task(auto_delete(sent_msg, 60, reply_to_message=message))
+        # Reply directly in group (Single message only, NO duplicate group notices)
+        sent_msg = await message.reply_text(response_text, reply_markup=markup, quote=True)
+        if sent_msg:
+            asyncio.create_task(auto_delete(sent_msg, 60, reply_to_message=message))
+    except Exception as e:
+        logger.error(f"❌ Database/Search error processing '{text}' in chat {message.chat.id}: {e}", exc_info=True)
+        print(f"❌ Database/Search error for '{text}' in chat {message.chat.id}: {e}")
+        try:
+            err_msg = await message.reply_text(
+                f"⚠️ Error executing search for `{text}`. Please try again shortly.",
+                quote=True
+            )
+            if err_msg:
+                asyncio.create_task(auto_delete(err_msg, 30, reply_to_message=message))
+        except Exception:
+            pass
 
 # ---------------------------------------------------------------------------
 # CALLBACK QUERY ROUTER

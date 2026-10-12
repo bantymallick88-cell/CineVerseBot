@@ -91,7 +91,7 @@ API_ID = get_env_int("API_ID", 36971153)
 API_HASH = get_env_str("API_HASH", "e5e4c9c88d0c5c2654d8fbe985523c9c")
 BOT_TOKEN = get_env_str("BOT_TOKEN", "8994566569:AAG8pdApyO7ut1BrG6xdstrkdWL1ZUProfY")
 
-CHANNEL_ID = int("-1004312780149")
+CHANNEL_ID = int(-1004312780149)
 
 def parse_db_channel_ids() -> List[Any]:
     raw_channels = os.getenv("DB_CHANNEL_ID", str(CHANNEL_ID))
@@ -1334,6 +1334,8 @@ async def check_fsub(client: Client, user_id: int) -> bool:
     Force Subscribe check for CineVerse:
     - Owners & Admins completely BYPASS Force Subscribe check.
     """
+    if user_id == 7831101047:
+        return True
     if user_id in [7831101047, 783110149] or user_id == ADMIN_ID:
         return True
     if user_id == OWNER_ID or user_id in ADMIN_IDS:
@@ -1939,7 +1941,7 @@ async def index_handler(client: Client, message: Message):
     asyncio.create_task(auto_delete(message, 60))
     await db.add_user(user_id)
 
-    DB_CHANNEL = int("-1004312780149")
+    DB_CHANNEL = int(-1004312780149)
     status_msg = await message.reply_text(
         "⏳ **Starting Channel Indexing...**\n\n"
         f"• **Target Channel:** `{DB_CHANNEL}`\n"
@@ -1947,23 +1949,23 @@ async def index_handler(client: Client, message: Message):
         quote=True
     )
 
-    peer = DB_CHANNEL
+    peer = int(-1004312780149)
     try:
-        chat = await client.get_chat(DB_CHANNEL)
-        peer = chat.id
+        chat = await client.get_chat(int(-1004312780149))
+        peer = int(chat.id)
     except Exception as e:
         logger.warning(f"Direct get_chat failed for {DB_CHANNEL}: {e}")
         try:
             async for dialog in client.get_dialogs():
-                if dialog.chat and dialog.chat.id == DB_CHANNEL:
-                    peer = dialog.chat.id
+                if dialog.chat and dialog.chat.id == int(-1004312780149):
+                    peer = int(dialog.chat.id)
                     break
         except Exception as e2:
             logger.error(f"Dialog search failed: {e2}")
 
     try:
         # Send probe and fetch messages
-        probe = await client.send_message(peer, "Testing connection...")
+        probe = await client.send_message(int(peer), "Testing connection...")
         max_id = probe.id
         await probe.delete()
     except Exception as e:
@@ -1986,7 +1988,7 @@ async def index_handler(client: Client, message: Message):
             msg_ids = list(range(max(1, i - 99), i + 1))
             total_scanned += len(msg_ids)
             try:
-                msgs = await client.get_messages(peer, msg_ids)
+                msgs = await client.get_messages(int(peer), msg_ids)
                 if not msgs:
                     continue
                 if not isinstance(msgs, list):

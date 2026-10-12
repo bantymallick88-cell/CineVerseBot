@@ -3,14 +3,17 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>CineVerse • Secure Verification & Direct Unlock</title>
-  <meta name="description" content="Cinematic verification portal for CineVerse Movie Search. Instant direct Telegram file delivery.">
-  <meta name="theme-color" content="#070a12">
+  <title>CineVerse • Secure WebApp Gateway</title>
+  <meta name="description" content="Ultra-fast Telegram WebApp verification gateway for CineVerse Movie Vault.">
+  <meta name="theme-color" content="#070a14">
 
-  <!-- Fonts: Plus Jakarta Sans & JetBrains Mono -->
+  <!-- Telegram WebApp JS SDK -->
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+
+  <!-- Google Fonts -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 
   <style>
     *, *::before, *::after {
@@ -21,9 +24,9 @@
 
     :root {
       --bg-dark: #070a14;
-      --card-bg: rgba(14, 21, 37, 0.75);
-      --card-border: rgba(255, 255, 255, 0.08);
-      --card-glow: rgba(0, 240, 255, 0.2);
+      --card-bg: rgba(13, 20, 36, 0.78);
+      --card-border: rgba(0, 240, 255, 0.18);
+      --card-glow: rgba(0, 240, 255, 0.25);
       --accent-cyan: #00f0ff;
       --accent-cyan-rgb: 0, 240, 255;
       --accent-violet: #8b5cf6;
@@ -52,11 +55,21 @@
       align-items: center;
       justify-content: center;
       min-height: 100vh;
-      padding: 24px 16px;
+      padding: 20px 16px;
       position: relative;
     }
 
-    /* Animated Ambient Glow Orbs */
+    /* Animated Particle Canvas */
+    #particleCanvas {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      z-index: 1;
+    }
+
+    /* Ambient Animated Glow Mesh */
     .ambient-glow {
       position: fixed;
       inset: 0;
@@ -68,32 +81,32 @@
     .glow-orb {
       position: absolute;
       border-radius: 50%;
-      filter: blur(120px);
-      opacity: 0.35;
-      animation: orbFloat 10s ease-in-out infinite alternate;
+      filter: blur(110px);
+      opacity: 0.4;
+      animation: floatOrb 12s ease-in-out infinite alternate;
     }
 
     .glow-orb-1 {
       width: 440px;
       height: 440px;
-      top: -100px;
-      left: 15%;
+      top: -120px;
+      left: 10%;
       background: radial-gradient(circle, var(--accent-cyan) 0%, transparent 70%);
     }
 
     .glow-orb-2 {
-      width: 400px;
-      height: 400px;
-      bottom: -80px;
-      right: 15%;
+      width: 420px;
+      height: 420px;
+      bottom: -100px;
+      right: 10%;
       background: radial-gradient(circle, var(--accent-violet) 0%, transparent 70%);
-      animation-duration: 13s;
+      animation-duration: 15s;
       animation-delay: -3s;
     }
 
-    @keyframes orbFloat {
+    @keyframes floatOrb {
       0% { transform: translate(0, 0) scale(1); }
-      100% { transform: translate(30px, 40px) scale(1.12); }
+      100% { transform: translate(40px, 30px) scale(1.15); }
     }
 
     /* Main Container */
@@ -101,23 +114,23 @@
       position: relative;
       z-index: 10;
       width: 100%;
-      max-width: 460px;
+      max-width: 440px;
     }
 
-    /* Verification Card */
+    /* Ultra-Modern Glassmorphic Card */
     .verify-card {
       background: var(--card-bg);
-      backdrop-filter: blur(24px);
-      -webkit-backdrop-filter: blur(24px);
+      backdrop-filter: blur(28px);
+      -webkit-backdrop-filter: blur(28px);
       border: 1px solid var(--card-border);
       border-radius: 28px;
-      padding: 36px 28px;
-      box-shadow: 0 25px 60px -15px rgba(0, 0, 0, 0.7),
-                  0 0 40px -10px var(--card-glow);
+      padding: 32px 24px;
+      box-shadow: 0 25px 60px -15px rgba(0, 0, 0, 0.8),
+                  0 0 50px -12px var(--card-glow);
       text-align: center;
       position: relative;
       overflow: hidden;
-      transition: border-color 0.4s ease, box-shadow 0.4s ease;
+      transition: all 0.4s ease;
     }
 
     .verify-card::before {
@@ -127,24 +140,24 @@
       left: 0;
       right: 0;
       height: 3px;
-      background: linear-gradient(90deg, transparent, var(--accent-cyan), var(--accent-violet), transparent);
+      background: linear-gradient(90deg, transparent, var(--accent-cyan), var(--accent-violet), var(--accent-emerald), transparent);
     }
 
-    /* Header & Badge */
+    /* Telegram WebApp Pill */
     .badge-pill {
       display: inline-flex;
       align-items: center;
       gap: 7px;
-      padding: 6px 14px;
+      padding: 5px 14px;
       border-radius: 9999px;
       background: rgba(0, 240, 255, 0.08);
-      border: 1px solid rgba(0, 240, 255, 0.25);
+      border: 1px solid rgba(0, 240, 255, 0.3);
       color: var(--accent-cyan);
       font-size: 11px;
       font-weight: 700;
       letter-spacing: 1.2px;
       text-transform: uppercase;
-      margin-bottom: 20px;
+      margin-bottom: 18px;
     }
 
     .badge-dot {
@@ -158,33 +171,33 @@
 
     @keyframes pulseDot {
       0%, 100% { opacity: 1; transform: scale(1); }
-      50% { opacity: 0.4; transform: scale(0.8); }
+      50% { opacity: 0.3; transform: scale(0.7); }
     }
 
     .app-title {
-      font-size: 26px;
+      font-size: 24px;
       font-weight: 800;
       letter-spacing: -0.5px;
-      background: linear-gradient(135deg, #ffffff 30%, #cbd5e1 100%);
+      background: linear-gradient(135deg, #ffffff 40%, #94a3b8 100%);
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
-      margin-bottom: 8px;
+      margin-bottom: 6px;
     }
 
     .app-subtitle {
-      font-size: 13px;
+      font-size: 12.5px;
       color: var(--text-muted);
-      margin-bottom: 24px;
+      margin-bottom: 22px;
       line-height: 1.5;
     }
 
-    /* File Metadata Box */
+    /* Media Info Card */
     .file-box {
       background: rgba(255, 255, 255, 0.03);
-      border: 1px solid rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.07);
       border-radius: 16px;
-      padding: 14px 16px;
-      margin-bottom: 28px;
+      padding: 12px 16px;
+      margin-bottom: 24px;
       text-align: left;
     }
 
@@ -194,28 +207,28 @@
       letter-spacing: 1px;
       color: var(--text-dim);
       font-weight: 700;
-      margin-bottom: 4px;
+      margin-bottom: 3px;
     }
 
     .file-name {
-      font-size: 14px;
+      font-size: 13.5px;
       font-weight: 600;
       color: #fff;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
-      margin-bottom: 8px;
+      margin-bottom: 6px;
     }
 
     .file-tags {
       display: flex;
-      gap: 8px;
+      gap: 6px;
       flex-wrap: wrap;
     }
 
     .tag-item {
       font-family: var(--font-mono);
-      font-size: 11px;
+      font-size: 10.5px;
       padding: 3px 8px;
       border-radius: 6px;
       background: rgba(255, 255, 255, 0.05);
@@ -229,47 +242,64 @@
       border-color: rgba(16, 185, 129, 0.3);
     }
 
-    /* Circular Progress Display */
-    .progress-section {
+    /* Radial Glowing Ring & SVG Progress */
+    .ring-section {
       position: relative;
-      width: 140px;
-      height: 140px;
-      margin: 0 auto 24px auto;
+      width: 146px;
+      height: 146px;
+      margin: 0 auto 22px auto;
     }
 
-    .progress-svg {
+    .radial-halo {
+      position: absolute;
+      inset: 8px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(0, 240, 255, 0.18) 0%, transparent 70%);
+      filter: blur(12px);
+      animation: pulseHalo 2s ease-in-out infinite alternate;
+    }
+
+    @keyframes pulseHalo {
+      0% { opacity: 0.5; transform: scale(0.95); }
+      100% { opacity: 1; transform: scale(1.05); }
+    }
+
+    .ring-svg {
       width: 100%;
       height: 100%;
       transform: rotate(-90deg);
+      position: relative;
+      z-index: 2;
     }
 
-    .progress-bg {
+    .ring-bg {
       fill: none;
       stroke: rgba(255, 255, 255, 0.06);
       stroke-width: 8;
     }
 
-    .progress-bar {
+    .ring-progress {
       fill: none;
-      stroke: url(#cyanPurpleGrad);
+      stroke: url(#neonGradient);
       stroke-width: 8;
       stroke-linecap: round;
-      stroke-dasharray: 377;
-      stroke-dashoffset: 377;
+      stroke-dasharray: 396;
+      stroke-dashoffset: 396;
+      filter: drop-shadow(0 0 10px rgba(0, 240, 255, 0.6));
       transition: stroke-dashoffset 0.1s linear;
-      filter: drop-shadow(0 0 8px rgba(0, 240, 255, 0.5));
     }
 
-    .progress-center {
+    .ring-center {
       position: absolute;
       inset: 0;
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
+      z-index: 3;
     }
 
-    .countdown-val {
+    .countdown-number {
       font-size: 32px;
       font-weight: 800;
       font-family: var(--font-mono);
@@ -277,7 +307,7 @@
       line-height: 1;
     }
 
-    .countdown-sub {
+    .countdown-label {
       font-size: 10px;
       color: var(--accent-cyan);
       font-weight: 700;
@@ -286,64 +316,68 @@
       margin-top: 4px;
     }
 
-    /* Status Ticker */
-    .status-ticker {
+    /* Live 3.5s Verification Sequence Display */
+    .status-badge {
       display: inline-flex;
       align-items: center;
       gap: 8px;
-      font-size: 13px;
-      font-weight: 500;
-      color: var(--text-muted);
-      margin-bottom: 24px;
-      min-height: 22px;
+      font-size: 13.5px;
+      font-weight: 600;
+      color: var(--accent-cyan);
+      background: rgba(0, 240, 255, 0.06);
+      border: 1px solid rgba(0, 240, 255, 0.2);
+      padding: 8px 18px;
+      border-radius: 9999px;
+      margin-bottom: 22px;
+      min-height: 38px;
       transition: all 0.3s ease;
     }
 
-    .status-ticker.verified {
+    .status-badge.granted {
       color: #34d399;
-      font-weight: 600;
+      background: rgba(16, 185, 129, 0.1);
+      border-color: rgba(16, 185, 129, 0.4);
+      box-shadow: 0 0 20px rgba(16, 185, 129, 0.3);
     }
 
     /* CTA Button */
-    .cta-btn {
+    .cta-button {
       display: inline-flex;
       align-items: center;
       justify-content: center;
       gap: 10px;
       width: 100%;
-      padding: 16px 24px;
+      padding: 15px 22px;
       border-radius: 14px;
-      font-size: 15px;
+      font-size: 14.5px;
       font-weight: 700;
       text-decoration: none;
       color: #ffffff;
-      background: linear-gradient(135deg, #3b82f6 0%, #8b5cf6 50%, #06b6d4 100%);
+      background: linear-gradient(135deg, #0284c7 0%, #7c3aed 50%, #06b6d4 100%);
       background-size: 200% 200%;
       border: none;
       cursor: pointer;
-      box-shadow: 0 10px 25px -5px rgba(59, 130, 246, 0.4);
+      box-shadow: 0 10px 25px -5px rgba(2, 132, 199, 0.4);
       transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-      position: relative;
-      overflow: hidden;
     }
 
-    .cta-btn:hover {
+    .cta-button:hover {
       transform: translateY(-2px);
-      box-shadow: 0 15px 30px -5px rgba(139, 92, 246, 0.5);
+      box-shadow: 0 15px 30px -5px rgba(124, 58, 237, 0.5);
     }
 
-    .cta-btn.ready {
-      background: linear-gradient(135deg, #10b981 0%, #06b6d4 100%);
-      box-shadow: 0 10px 30px -5px rgba(16, 185, 129, 0.5);
-      animation: pulseButton 2s infinite;
+    .cta-button.granted {
+      background: linear-gradient(135deg, #059669 0%, #0284c7 100%);
+      box-shadow: 0 10px 30px -5px rgba(5, 150, 105, 0.5);
+      animation: pulseBtn 2s infinite;
     }
 
-    @keyframes pulseButton {
-      0%, 100% { box-shadow: 0 10px 30px -5px rgba(16, 185, 129, 0.5); }
+    @keyframes pulseBtn {
+      0%, 100% { box-shadow: 0 10px 30px -5px rgba(5, 150, 105, 0.5); }
       50% { box-shadow: 0 10px 40px 0px rgba(6, 182, 212, 0.7); }
     }
 
-    .cta-btn svg {
+    .cta-button svg {
       width: 18px;
       height: 18px;
       fill: currentColor;
@@ -351,9 +385,9 @@
 
     /* Fallback note */
     .fallback-note {
-      font-size: 12px;
+      font-size: 11.5px;
       color: var(--text-dim);
-      margin-top: 16px;
+      margin-top: 15px;
       line-height: 1.5;
     }
 
@@ -367,28 +401,30 @@
       text-decoration: underline;
     }
 
-    /* Footer Trust */
+    /* Trust Footer */
     .trust-footer {
-      margin-top: 24px;
+      margin-top: 20px;
       display: flex;
       align-items: center;
       justify-content: center;
-      gap: 8px;
+      gap: 7px;
       font-size: 11px;
       color: var(--text-dim);
-      letter-spacing: 0.3px;
     }
 
     .trust-footer svg {
-      width: 14px;
-      height: 14px;
+      width: 13px;
+      height: 13px;
       fill: #10b981;
     }
   </style>
 </head>
 <body>
 
-  <!-- Background Orbs -->
+  <!-- Particle Canvas -->
+  <canvas id="particleCanvas"></canvas>
+
+  <!-- Ambient Glow -->
   <div class="ambient-glow">
     <div class="glow-orb glow-orb-1"></div>
     <div class="glow-orb glow-orb-2"></div>
@@ -400,12 +436,12 @@
       <!-- Badge -->
       <div class="badge-pill">
         <span class="badge-dot"></span>
-        <span>CineVerse Cloud Gate</span>
+        <span>CineVerse Native WebApp</span>
       </div>
 
       <!-- Title -->
-      <h1 class="app-title">Direct File Unlock</h1>
-      <p class="app-subtitle">Connecting to high-speed Telegram media stream. Verifying security token...</p>
+      <h1 class="app-title">Securing Movie File</h1>
+      <p class="app-subtitle">Telegram WebApp Gateway • Direct Vault Access</p>
 
       <!-- Media Preview -->
       <div class="file-box">
@@ -414,46 +450,47 @@
         <div class="file-tags">
           <span class="tag-item highlight" id="qualityTag">1080p FHD</span>
           <span class="tag-item" id="fileIdTag">File Vault</span>
-          <span class="tag-item">Direct Stream</span>
+          <span class="tag-item">Direct Telegram Stream</span>
         </div>
       </div>
 
-      <!-- Circular Timer Animation (2.5s) -->
-      <div class="progress-section">
-        <svg class="progress-svg" viewBox="0 0 140 140">
+      <!-- Radial Glowing Ring Section (3.5s) -->
+      <div class="ring-section">
+        <div class="radial-halo"></div>
+        <svg class="ring-svg" viewBox="0 0 146 146">
           <defs>
-            <linearGradient id="cyanPurpleGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+            <linearGradient id="neonGradient" x1="0%" y1="0%" x2="100%" y2="100%">
               <stop offset="0%" stop-color="#00f0ff" />
               <stop offset="50%" stop-color="#8b5cf6" />
               <stop offset="100%" stop-color="#10b981" />
             </linearGradient>
           </defs>
-          <circle class="progress-bg" cx="70" cy="70" r="60" />
-          <circle class="progress-bar" id="progressBar" cx="70" cy="70" r="60" />
+          <circle class="ring-bg" cx="73" cy="73" r="63" />
+          <circle class="ring-progress" id="ringProgress" cx="73" cy="73" r="63" />
         </svg>
-        <div class="progress-center">
-          <div class="countdown-val" id="countdownVal">2.5s</div>
-          <div class="countdown-sub" id="countdownSub">VERIFYING</div>
+        <div class="ring-center">
+          <div class="countdown-number" id="countdownVal">3.5s</div>
+          <div class="countdown-label" id="countdownSub">VERIFYING</div>
         </div>
       </div>
 
-      <!-- Status Messages -->
-      <div class="status-ticker" id="statusTicker">
+      <!-- 3.5s Live Sequence Status Badge -->
+      <div class="status-badge" id="statusBadge">
         <span id="statusIcon">⚡</span>
-        <span id="statusText">Decrypting File Hash...</span>
+        <span id="statusText">Securing Stream Token...</span>
       </div>
 
       <!-- Action Button -->
-      <a href="#" class="cta-btn" id="actionBtn" rel="noopener">
+      <a href="#" class="cta-button" id="actionBtn" rel="noopener">
         <svg viewBox="0 0 24 24" id="btnIcon">
           <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
         </svg>
-        <span id="btnText">Please Wait...</span>
+        <span id="btnText">Verifying Token...</span>
       </a>
 
-      <!-- Fallback message -->
+      <!-- Fallback note -->
       <p class="fallback-note" id="fallbackNote">
-        Auto-redirecting to Telegram in 2-3 seconds.<br>
+        Auto-closing WebApp & returning to Telegram in 3.5s.<br>
         If not redirected, <a href="#" id="manualLink">tap here to open bot</a>.
       </p>
 
@@ -472,14 +509,70 @@
     (function () {
       "use strict";
 
-      // 1. Parse parameters
+      // 0. Telegram Native WebApp Handshake
+      var isTelegramWebApp = false;
+      if (window.Telegram && window.Telegram.WebApp) {
+        try {
+          window.Telegram.WebApp.ready();
+          window.Telegram.WebApp.expand();
+          isTelegramWebApp = true;
+        } catch (e) {
+          console.warn("Telegram WebApp init:", e);
+        }
+      }
+
+      // 1. Particle Canvas Simulation
+      var canvas = document.getElementById('particleCanvas');
+      var ctx = canvas.getContext('2d');
+      var particles = [];
+
+      function resizeCanvas() {
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+      }
+      resizeCanvas();
+      window.addEventListener('resize', resizeCanvas);
+
+      for (var p = 0; p < 35; p++) {
+        particles.push({
+          x: Math.random() * window.innerWidth,
+          y: Math.random() * window.innerHeight,
+          radius: Math.random() * 2 + 0.8,
+          vx: (Math.random() - 0.5) * 0.6,
+          vy: (Math.random() - 0.5) * 0.6,
+          alpha: Math.random() * 0.5 + 0.2
+        });
+      }
+
+      function drawParticles() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        for (var i = 0; i < particles.length; i++) {
+          var pt = particles[i];
+          pt.x += pt.vx;
+          pt.y += pt.vy;
+          if (pt.x < 0) pt.x = canvas.width;
+          if (pt.x > canvas.width) pt.x = 0;
+          if (pt.y < 0) pt.y = canvas.height;
+          if (pt.y > canvas.height) pt.y = 0;
+
+          ctx.beginPath();
+          ctx.arc(pt.x, pt.y, pt.radius, 0, Math.PI * 2);
+          ctx.fillStyle = "rgba(0, 240, 255, " + pt.alpha + ")";
+          ctx.shadowBlur = 8;
+          ctx.shadowColor = "#00f0ff";
+          ctx.fill();
+        }
+        requestAnimationFrame(drawParticles);
+      }
+      requestAnimationFrame(drawParticles);
+
+      // 2. Parse URL parameters
       var urlParams = new URLSearchParams(window.location.search);
       var rawFileId = urlParams.get('file_id') || urlParams.get('payload') || urlParams.get('id') || '';
       var botUsername = urlParams.get('bot') || 'CineVerseFilterBot';
       var title = urlParams.get('title') || '';
-      var quality = urlParams.get('quality') || 'Direct Vault';
+      var quality = urlParams.get('quality') || '1080p FHD';
 
-      // Ensure proper start param
       var startParam = rawFileId;
       if (startParam && !startParam.startsWith('file_')) {
         startParam = 'file_' + startParam;
@@ -488,8 +581,7 @@
         startParam = 'help';
       }
 
-      var telegramTarget = "https://t.me/" + botUsername + "?start=" + startParam;
-      var telegramIntent = "intent://t.me/" + botUsername + "?start=" + startParam + "#Intent;scheme=tg;package=org.telegram.messenger;end";
+      var tgDeepLink = "https://t.me/" + botUsername + "?start=" + startParam;
 
       // Update UI elements
       var fileNameDisplay = document.getElementById('fileNameDisplay');
@@ -498,12 +590,12 @@
       var manualLink = document.getElementById('manualLink');
       var actionBtn = document.getElementById('actionBtn');
       var btnText = document.getElementById('btnText');
-      var statusTicker = document.getElementById('statusTicker');
+      var statusBadge = document.getElementById('statusBadge');
       var statusText = document.getElementById('statusText');
       var statusIcon = document.getElementById('statusIcon');
       var countdownVal = document.getElementById('countdownVal');
       var countdownSub = document.getElementById('countdownSub');
-      var progressBar = document.getElementById('progressBar');
+      var ringProgress = document.getElementById('ringProgress');
 
       if (title && fileNameDisplay) {
         fileNameDisplay.textContent = decodeURIComponent(title);
@@ -519,83 +611,99 @@
         fileIdTag.textContent = "ID: " + rawFileId.replace('file_', '');
       }
 
-      if (manualLink) {
-        manualLink.href = telegramTarget;
-      }
-      if (actionBtn) {
-        actionBtn.href = telegramTarget;
-      }
+      if (manualLink) manualLink.href = tgDeepLink;
+      if (actionBtn) actionBtn.href = tgDeepLink;
 
-      // Smooth 2.4s Progress Animation
-      var totalDuration = 2400; // 2.4 seconds
+      // 3. 3.5s Live Verification Sequence Mechanics
+      // "⚡ Securing Stream Token..." -> "🔒 Decrypting Vault Hash..." -> "✅ Access Granted!"
+      var totalDuration = 3500; // 3.5 seconds
       var startTime = null;
-      var circumference = 2 * Math.PI * 60; // 376.99
-      progressBar.style.strokeDasharray = circumference;
-      progressBar.style.strokeDashoffset = circumference;
+      var circumference = 2 * Math.PI * 63; // ~395.84
+      ringProgress.style.strokeDasharray = circumference;
+      ringProgress.style.strokeDashoffset = circumference;
 
       var redirected = false;
 
-      function triggerRedirect() {
+      function completeVerification() {
         if (redirected) return;
         redirected = true;
 
-        if (statusTicker) statusTicker.classList.add('verified');
-        if (statusIcon) statusIcon.textContent = '✅';
-        if (statusText) statusText.textContent = 'Redirecting to CineVerse Bot...';
-        if (countdownVal) countdownVal.textContent = '0s';
-        if (countdownSub) countdownSub.textContent = 'UNLOCKED';
-        if (actionBtn) {
-          actionBtn.classList.add('ready');
-          btnText.textContent = '🚀 Open in Telegram Now';
-        }
+        statusBadge.classList.add('granted');
+        statusIcon.textContent = '✅';
+        statusText.textContent = 'Access Granted!';
+        countdownVal.textContent = 'READY';
+        countdownSub.textContent = 'GRANTED';
+        ringProgress.style.strokeDashoffset = 0;
 
-        // Trigger native app intent & web fallback
-        try {
-          window.location.href = telegramTarget;
-        } catch (e) {
-          window.location.href = telegramTarget;
-        }
+        actionBtn.classList.add('granted');
+        btnText.textContent = '🚀 Open in Telegram';
+
+        // Auto-close WebApp and redirect to Telegram PM with start payload
+        setTimeout(function () {
+          if (isTelegramWebApp && window.Telegram.WebApp.openTelegramLink) {
+            try {
+              window.Telegram.WebApp.openTelegramLink(tgDeepLink);
+              setTimeout(function () {
+                try { window.Telegram.WebApp.close(); } catch (err) {}
+              }, 300);
+            } catch (e) {
+              window.location.href = tgDeepLink;
+            }
+          } else {
+            window.location.href = tgDeepLink;
+          }
+        }, 300);
       }
 
-      function stepAnimation(timestamp) {
+      function stepSequence(timestamp) {
         if (!startTime) startTime = timestamp;
         var elapsed = timestamp - startTime;
         var progress = Math.min(elapsed / totalDuration, 1);
 
-        // Update progress circle
+        // Update circular ring offset
         var offset = circumference - (circumference * progress);
-        progressBar.style.strokeDashoffset = offset;
+        ringProgress.style.strokeDashoffset = offset;
 
         // Update countdown text
         var remaining = Math.max(0, (totalDuration - elapsed) / 1000).toFixed(1);
         countdownVal.textContent = remaining + "s";
 
-        // Dynamic status transition across 2.4s
-        if (elapsed < 800) {
-          statusIcon.textContent = '🔐';
-          statusText.textContent = 'Decrypting File Hash...';
-        } else if (elapsed < 1600) {
-          statusIcon.textContent = '🛡️';
-          statusText.textContent = 'Verifying Membership...';
-        } else if (elapsed < 2300) {
+        // 3.5s Live Sequence Stage Updates:
+        // 0.0s - 1.2s: "⚡ Securing Stream Token..."
+        // 1.2s - 2.4s: "🔒 Decrypting Vault Hash..."
+        // 2.4s - 3.5s: "✅ Access Granted!"
+        if (elapsed < 1200) {
           statusIcon.textContent = '⚡';
-          statusText.textContent = 'Generating Secure Handshake...';
+          statusText.textContent = 'Securing Stream Token...';
+        } else if (elapsed < 2400) {
+          statusIcon.textContent = '🔒';
+          statusText.textContent = 'Decrypting Vault Hash...';
+        } else {
+          statusIcon.textContent = '✅';
+          statusText.textContent = 'Access Granted!';
         }
 
         if (progress < 1) {
-          requestAnimationFrame(stepAnimation);
+          requestAnimationFrame(stepSequence);
         } else {
-          triggerRedirect();
+          completeVerification();
         }
       }
 
-      // Start animation immediately
-      requestAnimationFrame(stepAnimation);
+      // Start live animation
+      requestAnimationFrame(stepSequence);
 
-      // Handle direct manual click on button anytime
+      // Handle direct manual tap
       actionBtn.addEventListener('click', function (e) {
         e.preventDefault();
-        window.location.href = telegramTarget;
+        if (isTelegramWebApp && window.Telegram.WebApp.openTelegramLink) {
+          window.Telegram.WebApp.openTelegramLink(tgDeepLink);
+          setTimeout(function () {
+            try { window.Telegram.WebApp.close(); } catch (err) {}
+          }, 300);
+        } else {
+          window.location.href = tgDeepLink;
+        }
       });
 
     })();

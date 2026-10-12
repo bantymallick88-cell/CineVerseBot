@@ -34,7 +34,8 @@ from pyrogram.types import (
     InlineKeyboardButton,
     CallbackQuery,
     Message,
-    BotCommand
+    BotCommand,
+    WebAppInfo
 )
 from pyrogram.errors import (
     FloodWait,
@@ -115,14 +116,23 @@ GPLINKS_API_KEY = os.getenv("GPLINKS_API_KEY") or get_env_str("GPLINKS_API_KEY",
 AROLINKS_API_KEY = GPLINKS_API_KEY  # Backward compatibility alias
 VERIFY_BASE_URL = os.getenv("VERIFY_BASE_URL", os.getenv("RENDER_EXTERNAL_URL", "")).strip()
 
-REQ_GROUP_ID = get_env_int("REQ_GROUP_ID", -1003982672894)
-REQ_GROUP_LINK = get_env_str("REQ_GROUP_LINK", "https://t.me/FlimRequest_01")
-BACKUP_CHANNEL_ID = get_env_int("BACKUP_CHANNEL_ID", -1003423603865)
-BACKUP_CHANNEL_LINK = get_env_str("BACKUP_CHANNEL_LINK", "https://t.me/CineVersebackup")
-SEARCH_GROUP_ID = get_env_int("SEARCH_GROUP_ID", get_env_int("FSUB_GROUP_ID", -1004427640174))
-SEARCH_GROUP_LINK = get_env_str("SEARCH_GROUP_LINK", get_env_str("FSUB_GROUP_LINK", "https://t.me/CineVerseFlimSearch"))
+MAIN_GROUP_ID = get_env_int("MAIN_GROUP_ID", get_env_int("SEARCH_GROUP_ID", get_env_int("FSUB_GROUP_ID", -1004427640174)))
+MAIN_GROUP_LINK = get_env_str("MAIN_GROUP_LINK", get_env_str("SEARCH_GROUP_LINK", "https://t.me/CineVerseFlimSearch"))
+REQUEST_GROUP_ID = get_env_int("REQUEST_GROUP_ID", get_env_int("REQ_GROUP_ID", -1003982672894))
+REQUEST_GROUP_LINK = get_env_str("REQUEST_GROUP_LINK", get_env_str("REQ_GROUP_LINK", "https://t.me/FlimRequest_01"))
+BACKUP_GROUP_ID = get_env_int("BACKUP_GROUP_ID", get_env_int("BACKUP_CHANNEL_ID", -1003423603865))
+BACKUP_GROUP_LINK = get_env_str("BACKUP_GROUP_LINK", get_env_str("BACKUP_CHANNEL_LINK", "https://t.me/CineVersebackup"))
+
+# Strict Allowed Chat Access List: Main Group, Request Group, Backup Group, DB Channel
+ALLOWED_CHAT_IDS = [MAIN_GROUP_ID, REQUEST_GROUP_ID, BACKUP_GROUP_ID, DB_CHANNEL_ID]
 
 # Aliases for backwards compatibility
+REQ_GROUP_ID = REQUEST_GROUP_ID
+REQ_GROUP_LINK = REQUEST_GROUP_LINK
+BACKUP_CHANNEL_ID = BACKUP_GROUP_ID
+BACKUP_CHANNEL_LINK = BACKUP_GROUP_LINK
+SEARCH_GROUP_ID = MAIN_GROUP_ID
+SEARCH_GROUP_LINK = MAIN_GROUP_LINK
 FSUB_GROUP_ID = REQ_GROUP_ID
 FSUB_GROUP_LINK = REQ_GROUP_LINK
 CHANNEL_LINK = SEARCH_GROUP_LINK
@@ -130,6 +140,12 @@ DEVELOPER_LINK = get_env_str("DEVELOPER_LINK", f"tg://user?id={OWNER_ID}")
 WELCOME_IMAGE_URL = get_env_str(
     "WELCOME_IMAGE_URL",
     "https://images.unsplash.com/photo-1536440136628-849c177e76a1?q=80&w=1200&auto=format&fit=crop"
+)
+
+# Profanity and Abusive Words pattern for Anti-Spam moderation
+SPAM_WORDS_PATTERN = re.compile(
+    r"\b(bc|mc|bhosdike|bhosadi|chutiya|chutiye|madarchod|gandu|bhenchod|harami|fuck|fucking|shit|bitch|asshole|bastard|cunt|dick|pussy|randi)\b",
+    re.IGNORECASE
 )
 
 PAGE_SIZE = 8
@@ -217,6 +233,15 @@ class Database:
                     last_download_timestamp REAL
                 );
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS group_warnings (
+                    user_id INTEGER,
+                    chat_id INTEGER,
+                    warn_count INTEGER DEFAULT 0,
+                    last_warn_time REAL,
+                    PRIMARY KEY (user_id, chat_id)
+                );
+            """)
             # Clean up existing exact duplicates so only 1 unique record remains per (title, file_size)
             try:
                 conn.execute("""
@@ -230,6 +255,43 @@ class Database:
             except Exception as e:
                 logger.warning(f"Note on deduplicating movies table: {e}")
             conn.commit()
+
+    def _increment_user_warning(self, user_id: int, chat_id: int) -> int:
+        try:
+            with self._get_connection() as conn:
+                conn.execute("""
+                    INSERT INTO group_warnings (user_id, chat_id, warn_count, last_warn_time)
+                    VALUES (?, ?, 1, ?)
+                    ON CONFLICT(user_id, chat_id) DO UPDATE SET
+                        warn_count = warn_count + 1,
+                        last_warn_time = excluded.last_warn_time;
+                """, (user_id, chat_id, time.time()))
+                conn.commit()
+                row = conn.execute(
+                    "SELECT warn_count FROM group_warnings WHERE user_id = ? AND chat_id = ?;",
+                    (user_id, chat_id)
+                ).fetchone()
+                return int(row["warn_count"]) if row else 1
+        except Exception as e:
+            logger.error(f"Error incrementing user warning: {e}")
+            return 1
+
+    async def increment_user_warning(self, user_id: int, chat_id: int) -> int:
+        return await asyncio.to_thread(self._increment_user_warning, user_id, chat_id)
+
+    def _reset_user_warnings(self, user_id: int, chat_id: int):
+        try:
+            with self._get_connection() as conn:
+                conn.execute(
+                    "DELETE FROM group_warnings WHERE user_id = ? AND chat_id = ?;",
+                    (user_id, chat_id)
+                )
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Error resetting user warnings: {e}")
+
+    async def reset_user_warnings(self, user_id: int, chat_id: int):
+        await asyncio.to_thread(self._reset_user_warnings, user_id, chat_id)
 
     def _get_user_last_download(self, user_id: int) -> float:
         if user_id in USER_DOWNLOAD_CACHE:
@@ -775,7 +837,7 @@ async def build_pagination_markup(files: List[Dict[str, Any]], cache_id: str, cu
     buttons = []
     base_verify_url = get_redirect_base_url()
     
-    # Aesthetic Pop-Up / WebApp Verification (2-3s Animated Transition):
+    # Native Telegram WebApp Popup (3.5s Animated Gateway):
     for f in files:
         name = f.get("title", "Movie")
         size_str = format_size(f.get("file_size", 0))
@@ -783,7 +845,7 @@ async def build_pagination_markup(files: List[Dict[str, Any]], cache_id: str, cu
         display_name = (meta["clean_title"][:26] + "...") if len(meta["clean_title"]) > 29 else meta["clean_title"]
         btn_url = f"{base_verify_url}/verify?file_id={f['message_id']}"
         btn_text = f"📥 [ {meta['quality']} │ {size_str} ] ▷ {display_name}"
-        buttons.append([InlineKeyboardButton(text=btn_text, url=btn_url)])
+        buttons.append([InlineKeyboardButton(text=btn_text, web_app=WebAppInfo(url=btn_url))])
 
     # Row 1: Interactive filter submenus
     filter_row = [
@@ -1166,41 +1228,44 @@ def build_force_join_markup(retry_callback: str = "cb_check_join") -> InlineKeyb
         ]
     ])
 
+async def is_sender_chat_admin(client: Client, chat_id: int, user_id: int) -> bool:
+    if user_id == OWNER_ID or user_id in ADMIN_IDS:
+        return True
+    try:
+        member = await client.get_chat_member(chat_id, user_id)
+        return bool(member and member.status in [
+            enums.ChatMemberStatus.OWNER,
+            enums.ChatMemberStatus.ADMINISTRATOR
+        ])
+    except Exception:
+        return False
+
 async def check_group_authorization(client: Client, message: Message) -> bool:
     """
-    Unauthorized Group Protection:
-    Allow bot ONLY in CineVerse Search Group (-1004427640174) or added by ADMIN_ID.
-    If added to any other group, automatically send a notice and leave the group immediately.
+    Strict Group Access & Authorized Chat Gate:
+    Bot is strictly restricted to ALLOWED_CHAT_IDS = [MAIN_GROUP_ID, REQUEST_GROUP_ID, BACKUP_GROUP_ID, DB_CHANNEL_ID].
+    When message or bot invite is detected in any unauthorized chat, immediately log and call client.leave_chat(chat_id).
     """
-    if not message.chat or message.chat.type not in [enums.ChatType.GROUP, enums.ChatType.SUPERGROUP]:
+    if not message.chat or message.chat.type not in [enums.ChatType.GROUP, enums.ChatType.SUPERGROUP, enums.ChatType.CHANNEL]:
+        return True
+
+    if message.chat.id in ALLOWED_CHAT_IDS:
         return True
 
     peer = await resolve_channel_peer(client)
     if message.chat.id == peer:
         return True
 
-    if message.chat.id == SEARCH_GROUP_ID:
-        return True
-
-    if await db.is_authorized_group(message.chat.id):
-        return True
-
-    # If message is from admin, authorize the group
-    if message.from_user and (message.from_user.id == OWNER_ID or message.from_user.id in ADMIN_IDS):
-        await db.add_authorized_group(message.chat.id, message.from_user.id)
-        return True
-
     # Unauthorized group detected!
-    logger.warning(f"Unauthorized access in group '{getattr(message.chat, 'title', '')}' ({message.chat.id}). Sending notice and leaving...")
+    logger.warning(f"Unauthorized chat access detected in '{getattr(message.chat, 'title', '')}' ({message.chat.id}). Leaving immediately...")
     try:
         notice = await message.reply_text(
             "┌──────────────────────────────────────────┐\n"
             "│   🚫  U N A U T H O R I Z E D   G R O U P │\n"
             "└──────────────────────────────────────────┘\n\n"
             "⚠️ **Unauthorized Group Access Detected!**\n"
-            "├─ CineVerse Bot is strictly authorized for **CineVerse Search Group** (`-1004427640174`).\n"
-            "├─ Non-admin invitation detected.\n"
-            "└─ 🚪 *Leaving this group immediately...*",
+            "├─ CineVerse Bot is strictly authorized for official network groups only.\n"
+            "└─ 🚪 *Leaving this chat immediately...*",
             disable_web_page_preview=True
         )
         if notice:
@@ -1469,7 +1534,7 @@ async def start_handler(client: Client, message: Message):
         ],
         [
             InlineKeyboardButton("ℹ️ About CineVerse", callback_data="cb_about"),
-            InlineKeyboardButton("➕ Add Me to Group ↗", url=f"https://t.me/{bot_me.username}?startgroup=true")
+            InlineKeyboardButton("📢 Backup Channel ↗", url=BACKUP_CHANNEL_LINK)
         ]
     ])
 
@@ -1486,8 +1551,12 @@ async def stats_handler(client: Client, message: Message):
     if is_duplicate_message(message):
         return
     asyncio.create_task(auto_delete(message, 60))
-    if message.from_user:
-        await db.add_user(message.from_user.id)
+    if not message.from_user or message.from_user.id != OWNER_ID:
+        denied_msg = await message.reply_text("❌ Access Denied: Permission required from Owner Banty.", quote=True)
+        if denied_msg:
+            asyncio.create_task(auto_delete(denied_msg, 60, reply_to_message=message))
+        return
+
     stats = await db.get_stats()
     db_size = os.path.getsize(DB_FILE) if os.path.exists(DB_FILE) else 0
 
@@ -1523,17 +1592,14 @@ async def help_handler(client: Client, message: Message):
         "│       How to Search and Download         │\n"
         "└──────────────────────────────────────────┘\n\n"
         "◈ **3-Step Quick Guide:**\n"
-        "├─ 1️⃣ **Search:** Type any movie or series title in our search group.\n"
+        "├─ 1️⃣ **Search:** Type any movie or series title in our main search group.\n"
         "├─ 2️⃣ **Select:** Pick your desired resolution (4K, 1080p, 720p, HEVC).\n"
         "└─ 3️⃣ **Receive:** Bot delivers the file directly to your PM instantly!\n\n"
         "◈ **Command Center:**\n"
         "├─ `/start` ─ Initialize bot & access main portal\n"
-        "├─ `/rules` ─ Community guidelines (EN / OD / HI)\n"
-        "├─ `/stats` ─ Live database and user metrics\n"
         "├─ `/help` ─ Interactive usage guide\n"
-        "├─ `/disclaimer` ─ Terms of service & legal notice\n"
-        "├─ `/dmca` ─ Content takedown request\n"
-        "└─ `/index` ─ Admin database channel sync\n\n"
+        "├─ `/about` ─ About CineVerse & developer\n"
+        "└─ `/dmca` ─ Content takedown request\n\n"
         "──────────────────────────────────────────\n"
         "⚡ *Powered by CineVerse Luxury Media Engine*",
         quote=True
@@ -1643,7 +1709,6 @@ async def about_handler(client: Client, message: Message):
         "└──────────────────────────────────────────┘\n\n"
         "◈ **System Overview:**\n"
         "├─ 🤖 Bot: `CineVerse Auto-Filter Engine`\n"
-        f"├─ 📁 Total Vault Titles: `{stats['movies']}`\n"
         f"├─ 👥 Total Registered Users: `{stats['users']}`\n"
         "├─ ⚡ Architecture: `Ultra-Fast Async SQLite (WAL)`\n"
         "├─ 👑 Developer: `Banty`\n"
@@ -1729,7 +1794,7 @@ async def index_handler(client: Client, message: Message):
     if is_duplicate_message(message):
         return
     asyncio.create_task(auto_delete(message, 60))
-    if not message.from_user or not await is_authorized_user(message.from_user.id):
+    if not message.from_user or message.from_user.id != OWNER_ID:
         denied_msg = await message.reply_text("❌ Access Denied: Permission required from Owner Banty.", quote=True)
         if denied_msg:
             asyncio.create_task(auto_delete(denied_msg, 60, reply_to_message=message))
@@ -1862,6 +1927,96 @@ async def auto_index_channel(client: Client, message: Message):
             logger.info(f"[AUTO-INDEX] Saved '{title}' (ID: {message.id})")
 
 # ---------------------------------------------------------------------------
+# STRICT GROUP ACCESS & MULTI-GROUP ANTI-SPAM MODERATOR (GROUP -2)
+# ---------------------------------------------------------------------------
+@app.on_chat_member_updated()
+async def on_bot_chat_member_updated(client: Client, member_update):
+    try:
+        me = await client.get_me()
+        new_member = member_update.new_chat_member
+        if new_member and new_member.user and new_member.user.id == me.id:
+            chat = member_update.chat
+            if chat and chat.type in [enums.ChatType.GROUP, enums.ChatType.SUPERGROUP, enums.ChatType.CHANNEL]:
+                if chat.id not in ALLOWED_CHAT_IDS:
+                    logger.warning(f"Bot added to unauthorized chat '{getattr(chat, 'title', '')}' ({chat.id}). Leaving immediately...")
+                    await client.leave_chat(chat.id)
+    except Exception as e:
+        logger.debug(f"Chat member update error: {e}")
+
+@app.on_message(filters.group, group=-2)
+async def group_security_and_antispam_handler(client: Client, message: Message):
+    if not message.chat or message.chat.type not in [enums.ChatType.GROUP, enums.ChatType.SUPERGROUP]:
+        return
+
+    # 1. Strict unauthorized group check: leave immediately
+    if message.chat.id not in ALLOWED_CHAT_IDS:
+        logger.warning(f"Unauthorized group detected: '{getattr(message.chat, 'title', '')}' ({message.chat.id}). Leaving immediately...")
+        try:
+            await client.leave_chat(message.chat.id)
+        except Exception:
+            pass
+        message.stop_propagation()
+        return
+
+    # 2. Multi-Group Anti-Spam (ONLY in REQUEST_GROUP_ID & BACKUP_GROUP_ID; NEVER in MAIN_GROUP_ID)
+    if message.chat.id in [REQUEST_GROUP_ID, BACKUP_GROUP_ID]:
+        if not message.from_user or message.from_user.is_bot:
+            return
+        user_id = message.from_user.id
+        if not await is_sender_chat_admin(client, message.chat.id, user_id):
+            text = (message.text or message.caption or "").strip()
+            has_link = bool(
+                re.search(r"(https?://\S+|t\.me/\S+|telegram\.me/\S+|www\.\S+)", text, re.IGNORECASE) or
+                (message.entities and any(e.type in [enums.MessageEntityType.URL, enums.MessageEntityType.TEXT_LINK] for e in message.entities)) or
+                (message.caption_entities and any(e.type in [enums.MessageEntityType.URL, enums.MessageEntityType.TEXT_LINK] for e in message.caption_entities))
+            )
+            has_bad_word = bool(SPAM_WORDS_PATTERN.search(text))
+            if has_link or has_bad_word:
+                try:
+                    await message.delete()
+                except Exception:
+                    pass
+                warn_count = await db.increment_user_warning(user_id, message.chat.id)
+                user_mention = message.from_user.mention if message.from_user else f"User {user_id}"
+                if warn_count < 3:
+                    warn_text = (
+                        "┌──────────────────────────────────────────┐\n"
+                        "│   ⚠️  S P A M   W A R N I N G            │\n"
+                        "└──────────────────────────────────────────┘\n\n"
+                        f"👤 **User:** {user_mention}\n"
+                        f"⚠️ **Warning:** `[{warn_count}/3]`\n"
+                        "🚫 **Reason:** External links and abusive words are strictly prohibited in this group!\n\n"
+                        "⚡ *You will be banned automatically on your 3rd warning (3/3).*"
+                    )
+                    try:
+                        w_msg = await client.send_message(message.chat.id, warn_text)
+                        if w_msg:
+                            asyncio.create_task(auto_delete(w_msg, 20))
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        await client.ban_chat_member(message.chat.id, user_id)
+                    except Exception as e:
+                        logger.error(f"Failed to ban user {user_id} in {message.chat.id}: {e}")
+                    await db.reset_user_warnings(user_id, message.chat.id)
+                    ban_text = (
+                        "┌──────────────────────────────────────────┐\n"
+                        "│   🚫  U S E R   B A N N E D              │\n"
+                        "└──────────────────────────────────────────┘\n\n"
+                        f"👤 **User:** {user_mention} reached **[3/3] warnings**.\n"
+                        "⛔ **Action:** Automatically banned from this group for repeated spam/abuse."
+                    )
+                    try:
+                        b_msg = await client.send_message(message.chat.id, ban_text)
+                        if b_msg:
+                            asyncio.create_task(auto_delete(b_msg, 60))
+                    except Exception:
+                        pass
+                message.stop_propagation()
+                return
+
+# ---------------------------------------------------------------------------
 # GLOBAL INCOMING USER MESSAGE AUTO-DELETE TRACKER (GROUP -1)
 # ---------------------------------------------------------------------------
 @app.on_message(group=-1)
@@ -1938,12 +2093,42 @@ async def auto_filter_handler(client: Client, message: Message):
         return
     user_id = message.from_user.id
 
-    # Unauthorized Group Protection: Check group authorization before responding
+    # 1. Strict Main Group Search Lock & Group Protection
     if message.chat and message.chat.type in [enums.ChatType.GROUP, enums.ChatType.SUPERGROUP]:
-        if not await check_group_authorization(client, message):
-            return
+        if message.chat.id != MAIN_GROUP_ID:
+            if message.chat.id in [REQUEST_GROUP_ID, BACKUP_GROUP_ID]:
+                try:
+                    await message.delete()
+                except Exception:
+                    pass
+                notice_text = (
+                    "┌──────────────────────────────────────────┐\n"
+                    "│   ℹ️  S E A R C H   N O T I C E          │\n"
+                    "└──────────────────────────────────────────┘\n\n"
+                    "⚠️ **Movie search is only active in Main Group.**\n\n"
+                    "👉 *Please send your movie title in CineVerse Search Group below:*"
+                )
+                notice_markup = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🍿 Open Main Search Group", url=MAIN_GROUP_LINK)]
+                ])
+                try:
+                    notice_msg = await client.send_message(
+                        chat_id=message.chat.id,
+                        text=notice_text,
+                        reply_markup=notice_markup,
+                        disable_web_page_preview=True
+                    )
+                    if notice_msg:
+                        asyncio.create_task(auto_delete(notice_msg, 20))
+                except Exception as e:
+                    logger.debug(f"Failed to send search notice: {e}")
+                return
+            else:
+                # Unauthorized group: leave immediately
+                if not await check_group_authorization(client, message):
+                    return
 
-    # 1. Enforce 60-second auto-delete on user message
+    # Enforce 60-second auto-delete on user message
     asyncio.create_task(auto_delete(message, 60))
 
     # Catch unknown / invalid commands in group or PM
@@ -2693,6 +2878,24 @@ def start_flask_server():
 # ---------------------------------------------------------------------------
 # START BOT WITH GRACEFUL FLOODWAIT RETRY ENGINE
 # ---------------------------------------------------------------------------
+async def set_bot_commands(client: Client):
+    """
+    Sets official bot commands visible in public Telegram client menu.
+    Public users ONLY see: /start, /help, /about, /dmca.
+    /index and /stats are strictly removed from public suggestions and restricted to OWNER_ID.
+    """
+    try:
+        commands = [
+            BotCommand("start", "Initialize bot & access main portal"),
+            BotCommand("help", "How to search and download"),
+            BotCommand("about", "About CineVerse bot & developer"),
+            BotCommand("dmca", "DMCA takedown & copyright notice"),
+        ]
+        await client.set_bot_commands(commands)
+        logger.info("✅ Bot commands updated: only /start, /help, /about, /dmca visible in public menu")
+    except Exception as e:
+        logger.warning(f"Failed to set bot commands: {e}")
+
 async def _start_pyrogram_client():
     """
     Starts the Pyrogram client instance with graceful FloodWait backoff.
@@ -2703,6 +2906,7 @@ async def _start_pyrogram_client():
             logger.info("📡 Connecting to Telegram via Pyrogram...")
             await app.start()
             logger.info("✅ Pyrogram bot client connected and authenticated successfully!")
+            await set_bot_commands(app)
             break
         except FloodWait as e:
             wait_time = int(getattr(e, "value", getattr(e, "x", 60)))

@@ -515,7 +515,9 @@ class Database:
             if not clean_query:
                 return [], 0
 
-            raw_words = [w.strip() for w in re.split(r'[\s_.:,-]+', clean_query) if w.strip()]
+            # Clean user search query: remove punctuation and split words for fuzzy matching
+            cleaned_query_str = re.sub(r"[^a-zA-Z0-9\s]", " ", clean_query)
+            raw_words = [w.strip() for w in cleaned_query_str.split() if w.strip()]
             if not raw_words:
                 raw_words = [clean_query]
 
@@ -544,48 +546,48 @@ class Database:
                         sub_conds = []
                         for col in search_cols:
                             for pat in s_patterns:
-                                sub_conds.append(f"{col} LIKE ?")
-                                params.append(pat)
+                                sub_conds.append(f"LOWER({col}) LIKE ?")
+                                params.append(pat.lower())
                         conditions.append(f"({' OR '.join(sub_conds)})")
                     elif w.upper() in ["S15+", "S15"]:
                         sub_conds = []
                         for col in search_cols:
                             for pat in ["%S15%", "%Season 15%", "%S16%", "%Season 16%"]:
-                                sub_conds.append(f"{col} LIKE ?")
-                                params.append(pat)
+                                sub_conds.append(f"LOWER({col}) LIKE ?")
+                                params.append(pat.lower())
                         conditions.append(f"({' OR '.join(sub_conds)})")
                     elif w.upper() == "4K":
                         sub_conds = []
                         for col in search_cols:
                             for pat in ["%4K%", "%2160p%", "%UHD%"]:
-                                sub_conds.append(f"{col} LIKE ?")
-                                params.append(pat)
+                                sub_conds.append(f"LOWER({col}) LIKE ?")
+                                params.append(pat.lower())
                         conditions.append(f"({' OR '.join(sub_conds)})")
                     elif w.upper() == "HEVC":
                         sub_conds = []
                         for col in search_cols:
                             for pat in ["%HEVC%", "%x265%"]:
-                                sub_conds.append(f"{col} LIKE ?")
-                                params.append(pat)
+                                sub_conds.append(f"LOWER({col}) LIKE ?")
+                                params.append(pat.lower())
                         conditions.append(f"({' OR '.join(sub_conds)})")
                     elif w.lower() == "odia":
                         sub_conds = []
                         for col in search_cols:
                             for pat in ["%Odia%", "%Oriya%"]:
-                                sub_conds.append(f"{col} LIKE ?")
-                                params.append(pat)
+                                sub_conds.append(f"LOWER({col}) LIKE ?")
+                                params.append(pat.lower())
                         conditions.append(f"({' OR '.join(sub_conds)})")
                     elif w.lower() == "bengali":
                         sub_conds = []
                         for col in search_cols:
                             for pat in ["%Bengali%", "%Bangla%"]:
-                                sub_conds.append(f"{col} LIKE ?")
-                                params.append(pat)
+                                sub_conds.append(f"LOWER({col}) LIKE ?")
+                                params.append(pat.lower())
                         conditions.append(f"({' OR '.join(sub_conds)})")
                     else:
-                        sub_conds = [f"{col} LIKE ?" for col in search_cols]
+                        sub_conds = [f"LOWER({col}) LIKE ?" for col in search_cols]
                         conditions.append(f"({' OR '.join(sub_conds)})")
-                        params.extend([f"%{w}%" for _ in search_cols])
+                        params.extend([f"%{w.lower()}%" for _ in search_cols])
 
                 where_sql = " AND ".join(conditions)
 
@@ -598,11 +600,11 @@ class Database:
 
                 primary_col = "file_name" if "file_name" in search_cols else title_col
                 cap_col = "caption" if "caption" in search_cols else primary_col
-                order_params = [f"%{clean_query}%", f"%{clean_query}%"]
+                order_params = [f"%{clean_query.lower()}%", f"%{clean_query.lower()}%"]
                 if msg_id_col:
-                    order_clause = f"ORDER BY (CASE WHEN {primary_col} LIKE ? THEN 1 WHEN {cap_col} LIKE ? THEN 2 ELSE 3 END), {msg_id_col} DESC"
+                    order_clause = f"ORDER BY (CASE WHEN LOWER({primary_col}) LIKE ? THEN 1 WHEN LOWER({cap_col}) LIKE ? THEN 2 ELSE 3 END), {msg_id_col} DESC"
                 else:
-                    order_clause = f"ORDER BY (CASE WHEN {primary_col} LIKE ? THEN 1 WHEN {cap_col} LIKE ? THEN 2 ELSE 3 END)"
+                    order_clause = f"ORDER BY (CASE WHEN LOWER({primary_col}) LIKE ? THEN 1 WHEN LOWER({cap_col}) LIKE ? THEN 2 ELSE 3 END)"
 
                 search_sql = f"SELECT * FROM {target_table} WHERE {where_sql} {order_clause} LIMIT ? OFFSET ?;"
                 cursor.execute(search_sql, params + order_params + [limit, offset])
@@ -2155,24 +2157,19 @@ async def index_handler(client: Client, message: Message):
                     if media and getattr(media, 'file_id', None):
                         total_media += 1
                         # Extract title from document.file_name or caption
-                        file_name = None
-                        if msg.document and getattr(msg.document, 'file_name', None):
-                            file_name = msg.document.file_name
-                        elif msg.caption:
-                            file_name = msg.caption
-                        elif getattr(media, 'file_name', None):
-                            file_name = media.file_name
-                        else:
-                            file_name = "Untitled"
+                        raw_title = (msg.document.file_name if (msg.document and getattr(msg.document, "file_name", None)) else None) or msg.caption or getattr(media, "file_name", None) or "Unknown"
+                        sanitized_title = re.sub(r"[._-]+", " ", str(raw_title)).strip()
+                        if not sanitized_title:
+                            sanitized_title = "Unknown"
 
-                        file_id = getattr(media, 'file_id', None)
-                        file_size = getattr(media, 'file_size', 0) or 0
-                        caption = msg.caption or file_name
+                        file_id = getattr(media, "file_id", None)
+                        file_size = getattr(media, "file_size", 0) or 0
+                        caption = msg.caption or sanitized_title
 
-                        if file_id and file_name:
+                        if file_id and sanitized_title:
                             batch_buffer.append((
                                 file_id,
-                                str(file_name).strip(),
+                                sanitized_title,
                                 int(file_size),
                                 int(msg.id),
                                 target_peer,
@@ -2276,17 +2273,12 @@ async def auto_index_channel(client: Client, message: Message):
     if not file_id:
         return
 
-    file_name = None
-    if message.document and getattr(message.document, "file_name", None):
-        file_name = message.document.file_name
-    elif getattr(media, "file_name", None):
-        file_name = media.file_name
-    elif message.caption:
-        file_name = message.caption
-    else:
-        file_name = "Untitled"
+    raw_name = (message.document.file_name if (message.document and getattr(message.document, "file_name", None)) else None) or message.caption or getattr(media, "file_name", None) or "Unknown"
+    sanitized_title = re.sub(r"[._-]+", " ", str(raw_name)).strip()
+    if not sanitized_title:
+        sanitized_title = "Unknown"
 
-    title = str(file_name).strip() if file_name else "Untitled"
+    title = sanitized_title
     caption = str(message.caption).strip() if message.caption else title
     file_size = getattr(media, "file_size", 0) or 0
     cid = message.chat.id
@@ -2549,24 +2541,25 @@ async def auto_filter_handler(client: Client, message: Message):
         files, total = await db.search_files(text, offset=0, limit=PAGE_SIZE)
         logger.info(f"Database search for '{text}' in chat {message.chat.id} returned {total} results")
         if total == 0:
-            # On zero search results, forward user query directly to @FlimRequest_01
+            # On zero search results, send request alert directly to @FlimRequest_01
             try:
-                user_info = f"@{message.from_user.username}" if (message.from_user and message.from_user.username) else (f"[{message.from_user.first_name}](tg://user?id={user_id})" if message.from_user else f"`{user_id}`")
-                chat_info = getattr(message.chat, "title", None) or "Private Chat"
-                req_text = (
-                    "🎬 **New Content Request**\n\n"
-                    f"◈ **Query:** `{text}`\n"
-                    f"◈ **User:** {user_info} (`{user_id}`)\n"
-                    f"◈ **Chat:** `{chat_info}` (`{message.chat.id}`)"
+                user_first = message.from_user.first_name if (message.from_user and message.from_user.first_name) else "User"
+                user_uname = f"@{message.from_user.username}" if (message.from_user and message.from_user.username) else "No Username"
+                user_uid = message.from_user.id if message.from_user else message.chat.id
+                req_alert = (
+                    "📩 New Movie Request\n"
+                    f"👤 User: {user_first} ({user_uname})\n"
+                    f"🎬 Movie Name: {text}\n"
+                    f"🆔 User ID: {user_uid}"
                 )
                 try:
-                    await client.send_message("@FlimRequest_01", req_text)
-                    logger.info(f"✅ Forwarded request '{text}' directly to @FlimRequest_01")
+                    await client.send_message("@FlimRequest_01", req_alert)
+                    logger.info(f"✅ Sent request alert for '{text}' to @FlimRequest_01")
                 except Exception as send_err:
-                    logger.warning(f"send_message to @FlimRequest_01 failed: {send_err}, attempting forward_messages...")
+                    logger.warning(f"send_message to @FlimRequest_01 failed: {send_err}, attempting forward...")
                     await message.forward("@FlimRequest_01")
             except Exception as fwd_err:
-                logger.warning(f"Could not forward request to @FlimRequest_01: {fwd_err}")
+                logger.warning(f"Could not send request alert to @FlimRequest_01: {fwd_err}")
 
             not_found_msg = await message.reply_text(
                 "┌──────────────────────────────────────────┐\n"
@@ -2574,7 +2567,7 @@ async def auto_filter_handler(client: Client, message: Message):
                 "└──────────────────────────────────────────┘\n\n"
                 f"◈ **Searched:** `{text}`\n"
                 "├─ ⚠️ No matching file available in current vault.\n"
-                "├─ 🚀 Your request has been forwarded to @FlimRequest_01!\n"
+                "├─ 🚀 Your request has been sent to @FlimRequest_01!\n"
                 "├─ 💡 Tip: Check spelling or try searching with release year.\n"
                 f"└─ 🍿 Official Channel: {FSUB_CHANNEL_LINK}",
                 quote=True,
@@ -3245,15 +3238,6 @@ async def _start_pyrogram_client():
             await app.start()
             logger.info("✅ Pyrogram bot client connected and authenticated successfully!")
             await set_bot_commands(app)
-
-            # Populate Pyrogram peer cache automatically using get_dialogs()
-            try:
-                logger.info("📡 Populating Pyrogram peer cache via get_dialogs()...")
-                async for dialog in app.get_dialogs():
-                    pass
-                logger.info("✅ Peer cache successfully populated from dialogs.")
-            except Exception as e:
-                logger.warning(f"Note on populating dialogs peer cache: {e}")
 
             # Multi-channel peer resolution at bot startup to pre-cache channel entities
             for cid in DB_CHANNEL_IDS:

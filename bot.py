@@ -2087,6 +2087,47 @@ async def list_approved_handler(client: Client, message: Message):
     if reply_msg:
         asyncio.create_task(auto_delete(reply_msg, 60, reply_to_message=message))
 
+async def _resolve_channel_for_index(client: Client, target: Any) -> Optional[Any]:
+    """
+    Safely resolves a channel entity for indexing.
+    Attempts:
+    1. Direct resolution via client.get_chat(target)
+    2. Username / link extraction if target is a string (e.g. https://t.me/..., @...)
+    3. Fallback resolution using channel username or invite link from configuration
+    Returns Chat object if resolved, None if peer cannot be resolved.
+    """
+    candidates: List[Any] = [target]
+
+    target_str = str(target).strip()
+    if "t.me/" in target_str or target_str.startswith("@"):
+        uname = target_str.split("t.me/")[-1].strip("/").lstrip("@")
+        if uname:
+            candidates.extend([f"@{uname}", uname])
+
+    for link in [CHANNEL_LINK, FSUB_CHANNEL_LINK, FSUB_GROUP_LINK, "https://t.me/CineVerseFlimSearch", "cenahub01"]:
+        if link:
+            clean_uname = link.split("t.me/")[-1].strip("/").lstrip("@")
+            if clean_uname:
+                candidates.extend([f"@{clean_uname}", clean_uname])
+
+    seen = set()
+    unique_candidates: List[Any] = []
+    for c in candidates:
+        if c not in seen and c is not None:
+            seen.add(c)
+            unique_candidates.append(c)
+
+    for cand in unique_candidates:
+        try:
+            chat = await client.get_chat(cand)
+            if chat and getattr(chat, "id", None):
+                logger.info(f"✅ Successfully resolved channel entity via '{cand}': {chat.id} ('{getattr(chat, 'title', '')}')")
+                return chat
+        except (PeerIdInvalid, RPCError, Exception):
+            continue
+
+    return None
+
 @app.on_message(filters.command("index"))
 async def index_handler(client: Client, message: Message):
     if message.from_user and (message.from_user.id in [7831101047, 783110149] or str(message.from_user.id) in ["7831101047", "783110149"]):
@@ -2134,31 +2175,32 @@ async def index_handler(client: Client, message: Message):
     total_media = 0
     batch_buffer: List[Any] = []
     last_update = time.time()
+    indexed_channels: List[str] = []
+    skipped_channels: List[str] = []
 
     try:
         for cid in target_channels:
-            target_peer = cid
-            target_title = str(cid)
-            try:
-                resolved_chat = await client.get_chat(cid)
-                if resolved_chat and resolved_chat.id:
-                    target_peer = resolved_chat.id
-                    target_title = getattr(resolved_chat, "title", str(target_peer)) or str(target_peer)
-                    logger.info(f"✅ Resolved channel entity for index_handler: {target_peer} ('{target_title}')")
-            except (PeerIdInvalid, RPCError, Exception) as e:
-                logger.warning(f"⚠️ Pre-resolving channel {cid} encountered: {e} (proceeding safely with fallback peer ID)")
+            resolved_chat = await _resolve_channel_for_index(client, cid)
+            if not resolved_chat or not getattr(resolved_chat, "id", None):
+                logger.warning(f"⚠️ Cannot resolve channel peer for '{cid}' (PeerIdInvalid). Skipping channel.")
+                skipped_channels.append(str(cid))
+                continue
+
+            chat_id = resolved_chat.id
+            target_title = getattr(resolved_chat, "title", str(chat_id)) or str(chat_id)
+            indexed_channels.append(f"{target_title} (`{chat_id}`)")
 
             try:
-                async for msg in client.get_chat_history(target_peer):
+                async for msg in client.get_chat_history(chat_id):
                     if not msg:
                         continue
                     total_scanned += 1
-                    media = msg.video or msg.document or msg.audio or msg.animation
+                    media = msg.document or msg.video or msg.audio or msg.animation
                     if media and getattr(media, 'file_id', None):
                         total_media += 1
-                        # Extract title from document.file_name or caption
-                        raw_title = (msg.document.file_name if (msg.document and getattr(msg.document, "file_name", None)) else None) or msg.caption or getattr(media, "file_name", None) or "Unknown"
-                        sanitized_title = re.sub(r"[._-]+", " ", str(raw_title)).strip()
+                        # Title fallback: file_name = (msg.document.file_name if msg.document else None) or msg.caption or "Unknown"
+                        file_name = (msg.document.file_name if (msg.document and getattr(msg.document, "file_name", None)) else None) or msg.caption or getattr(media, "file_name", None) or "Unknown"
+                        sanitized_title = re.sub(r"[._-]+", " ", str(file_name)).strip()
                         if not sanitized_title:
                             sanitized_title = "Unknown"
 
@@ -2172,7 +2214,7 @@ async def index_handler(client: Client, message: Message):
                                 sanitized_title,
                                 int(file_size),
                                 int(msg.id),
-                                target_peer,
+                                chat_id,
                                 str(caption).strip()
                             ))
 
@@ -2191,7 +2233,7 @@ async def index_handler(client: Client, message: Message):
                         try:
                             await status_msg.edit_text(
                                 f"⏳ **Indexing in Progress (Chat History Mode)...**\n\n"
-                                f"• **Current Channel:** `{target_title}` (`{target_peer}`)\n"
+                                f"• **Current Channel:** `{target_title}` (`{chat_id}`)\n"
                                 f"• **Messages Scanned:** `{total_scanned}`\n"
                                 f"• **Videos/Files Found:** `{total_media}`\n"
                                 f"• **Newly Added:** `{added}`\n"
@@ -2204,13 +2246,13 @@ async def index_handler(client: Client, message: Message):
                         last_update = time.time()
 
             except (PeerIdInvalid, RPCError) as rpc_err:
-                logger.warning(f"⚠️ PeerIdInvalid / RPCError during chat history for channel {cid}: {rpc_err}")
+                logger.warning(f"⚠️ RPC error during get_chat_history for channel {chat_id}: {rpc_err}")
             except FloodWait as fw:
                 wait_time = int(getattr(fw, "value", getattr(fw, "x", 30)))
                 logger.warning(f"FloodWait during indexing: sleeping {wait_time}s")
                 await asyncio.sleep(wait_time)
             except Exception as e:
-                logger.warning(f"⚠️ Exception during chat history for channel {cid}: {e}")
+                logger.warning(f"⚠️ Exception during chat history for channel {chat_id}: {e}")
 
             # Flush after each channel
             if batch_buffer:
@@ -2219,14 +2261,18 @@ async def index_handler(client: Client, message: Message):
                 batch_buffer.clear()
 
         stats = await db.get_stats()
-        await status_msg.edit_text(
-            f"✅ **Full Channel Indexing Complete!**\n\n"
-            f"• **Channels Indexed:** `{', '.join(str(c) for c in target_channels)}`\n"
-            f"• **Total Messages Scanned:** `{total_scanned}`\n"
-            f"• **Total Videos/Files Identified:** `{total_media}`\n"
-            f"• **New Titles Imported:** `{added}`\n"
+        summary_lines = [
+            "✅ **Full Channel Indexing Complete!**\n",
+            f"• **Channels Indexed:** {', '.join(indexed_channels) if indexed_channels else 'None'}",
+            f"• **Total Messages Scanned:** `{total_scanned}`",
+            f"• **Total Videos/Files Identified:** `{total_media}`",
+            f"• **New Titles Imported:** `{added}`",
             f"🎬 **Total Movies in Database:** `{stats['movies']}`"
-        )
+        ]
+        if skipped_channels:
+            summary_lines.append(f"• ⚠️ **Unresolvable Channels Skipped:** `{', '.join(skipped_channels)}`")
+
+        await status_msg.edit_text("\n".join(summary_lines))
         if status_msg:
             asyncio.create_task(auto_delete(status_msg, 120, reply_to_message=message))
 
@@ -3238,17 +3284,6 @@ async def _start_pyrogram_client():
             await app.start()
             logger.info("✅ Pyrogram bot client connected and authenticated successfully!")
             await set_bot_commands(app)
-
-            # Multi-channel peer resolution at bot startup to pre-cache channel entities
-            for cid in DB_CHANNEL_IDS:
-                try:
-                    logger.info(f"Pre-caching channel peer {cid} at bot startup...")
-                    cached_chat = await app.get_chat(cid)
-                    if cached_chat and cached_chat.id:
-                        logger.info(f"✅ Cached channel peer: {cached_chat.id} ({getattr(cached_chat, 'title', '')})")
-                except Exception as e:
-                    logger.warning(f"⚠️ Could not cache channel {cid} on startup: {e}")
-
             break
         except FloodWait as e:
             wait_time = int(getattr(e, "value", getattr(e, "x", 60)))

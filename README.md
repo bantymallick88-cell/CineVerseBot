@@ -89,7 +89,7 @@ DB_CHANNEL_ID=-1004312780149
 ADMIN_ID=7831101047
 SEARCH_GROUP_ID=-1004427640174
 SEARCH_GROUP_LINK=https://t.me/CineVerseFlimSearch
-AROLINKS_API_KEY=your_arolinks_api_key_here
+GPLINKS_API_KEY=your_gplinks_api_key_here
 ```
 
 ### 3. Run the Bot

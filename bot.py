@@ -65,6 +65,20 @@ def get_env_str(key: str, default: str) -> str:
     val = os.getenv(key)
     return str(val).strip() if val and str(val).strip() else default
 
+# Auto-load variables from .env file if present
+if os.path.exists(".env"):
+    try:
+        with open(".env", "r", encoding="utf-8") as _env_file:
+            for _line in _env_file:
+                _line = _line.strip()
+                if _line and not _line.startswith("#") and "=" in _line:
+                    _k, _v = _line.split("=", 1)
+                    _k, _v = _k.strip(), _v.strip()
+                    if _k and _k not in os.environ:
+                        os.environ[_k] = _v
+    except Exception:
+        pass
+
 API_ID = get_env_int("API_ID", 36971153)
 API_HASH = get_env_str("API_HASH", "e5e4c9c88d0c5c2654d8fbe985523c9c")
 BOT_TOKEN = get_env_str("BOT_TOKEN", "8994566569:AAG8pdApyO7ut1BrG6xdstrkdWL1ZUProfY")
@@ -91,8 +105,9 @@ def parse_admin_ids() -> set:
 ADMIN_IDS = parse_admin_ids()
 ADMIN_ID = OWNER_ID
 
-# AroLinks Shortener API Configuration (Strict 1 File = 1 Ad Flow)
-AROLINKS_API_KEY = "d0e32c64e85d355dd4da53fbe9c25c9safe0baba"
+# GPLinks Shortener API Configuration (Strict 1 File = 1 Ad Flow)
+GPLINKS_API_KEY = get_env_str("GPLINKS_API_KEY", get_env_str("AROLINKS_API_KEY", ""))
+AROLINKS_API_KEY = GPLINKS_API_KEY  # Backward compatibility alias
 
 REQ_GROUP_ID = get_env_int("REQ_GROUP_ID", -1003982672894)
 REQ_GROUP_LINK = get_env_str("REQ_GROUP_LINK", "https://t.me/FlimRequest_01")
@@ -854,57 +869,52 @@ async def deliver_movie_file(client: Client, user_id: int, msg_id: int):
         logger.error(f"Error delivering file {msg_id} to user {user_id}: {e}")
 
 # ---------------------------------------------------------------------------
-# AROLINKS SHORTENER ENGINE (STRICT 1 FILE = 1 AD VERIFICATION)
+# GPLINKS SHORTENER ENGINE (STRICT 1 FILE = 1 AD VERIFICATION)
 # ---------------------------------------------------------------------------
-def _fetch_arolinks_short_url(destination_url: str) -> str:
+def _fetch_gplinks_short_url(destination_url: str) -> str:
     """
-    Calls AroLinks API synchronously (run in worker thread via asyncio.to_thread).
-    Endpoint: https://arolinks.com/api?api={AROLINKS_API_KEY}&url={DESTINATION_URL}
+    Calls GPLinks API synchronously (run in worker thread via asyncio.to_thread).
+    Endpoint: https://gplinks.in/api?api={GPLINKS_API_KEY}&url={DESTINATION_URL}
     """
-    if not AROLINKS_API_KEY:
+    if not GPLINKS_API_KEY:
         return destination_url
 
-    keys_to_try = [
-        AROLINKS_API_KEY,
-        AROLINKS_API_KEY.replace("safe0baba", "5afe0baba"),
-        "d0e32c64e85d355dd4da53fbe9c25c95afe0baba",
-        "d0e32c64e85d355dd4da53fbe9c25c9safe0baba"
-    ]
-    seen = set()
-    unique_keys = [k for k in keys_to_try if k and not (k in seen or seen.add(k))]
-
     encoded_url = urllib.parse.quote(destination_url, safe="")
-    for key in unique_keys:
-        try:
-            api_url = f"https://arolinks.com/api?api={key}&url={encoded_url}"
-            req = urllib.request.Request(
-                api_url,
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) CineVerseBot/2.0"}
-            )
-            with urllib.request.urlopen(req, timeout=8) as response:
-                if response.status == 200:
-                    body = response.read().decode("utf-8").strip()
-                    try:
-                        data = json.loads(body)
-                        if isinstance(data, dict):
-                            if data.get("status") == "success" and data.get("shortenedUrl"):
-                                return str(data["shortenedUrl"]).strip()
-                            for k in ["shortenedUrl", "short_url", "shorturl", "url"]:
-                                if data.get(k):
-                                    return str(data[k]).strip()
-                    except Exception:
-                        if body.startswith("http://") or body.startswith("https://"):
-                            return body
-        except Exception as e:
-            logger.warning(f"AroLinks API attempt error for {key[:10]}...: {e}")
+    api_url = f"https://gplinks.in/api?api={GPLINKS_API_KEY.strip()}&url={encoded_url}"
+    try:
+        req = urllib.request.Request(
+            api_url,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) CineVerseBot/2.0"}
+        )
+        with urllib.request.urlopen(req, timeout=10) as response:
+            if response.status == 200:
+                body = response.read().decode("utf-8").strip()
+                try:
+                    data = json.loads(body)
+                    if isinstance(data, dict):
+                        if data.get("status") == "success" and data.get("shortenedUrl"):
+                            return str(data["shortenedUrl"]).strip()
+                        for k in ["shortenedUrl", "short_url", "shorturl", "url"]:
+                            if data.get(k):
+                                return str(data[k]).strip()
+                except Exception:
+                    if body.startswith("http://") or body.startswith("https://"):
+                        return body
+    except Exception as e:
+        logger.warning(f"GPLinks API request error: {e}")
+
     return destination_url
 
-async def get_arolinks_short_url(destination_url: str) -> str:
-    return await asyncio.to_thread(_fetch_arolinks_short_url, destination_url)
+async def get_gplinks_short_url(destination_url: str) -> str:
+    return await asyncio.to_thread(_fetch_gplinks_short_url, destination_url)
 
-async def send_arolinks_verification_card(client: Client, target_chat: Any, user_id: int, file_msg_id: int, reply_to_message: Optional[Message] = None):
+# Aliases for backwards compatibility
+_fetch_arolinks_short_url = _fetch_gplinks_short_url
+get_arolinks_short_url = get_gplinks_short_url
+
+async def send_gplinks_verification_card(client: Client, target_chat: Any, user_id: int, file_msg_id: int, reply_to_message: Optional[Message] = None):
     """
-    Luxury Dribbble/Godly framed AroLinks verification card.
+    Luxury Dribbble/Godly framed GPLinks verification card.
     Enforces strictly 1 File = 1 Ad verification per movie file request.
     Delivers movie file directly upon completion.
     """
@@ -919,7 +929,7 @@ async def send_arolinks_verification_card(client: Client, target_chat: Any, user
 
     bot_uname = await get_bot_username(client)
     destination_url = f"https://t.me/{bot_uname}?start=verify_{token}"
-    short_url = await get_arolinks_short_url(destination_url)
+    short_url = await get_gplinks_short_url(destination_url)
 
     verify_text = (
         "┌──────────────────────────────────────────┐\n"
@@ -969,10 +979,12 @@ async def send_arolinks_verification_card(client: Client, target_chat: Any, user
                 disable_web_page_preview=True
             )
         except Exception as e:
-            logger.error(f"Error sending AroLinks verification card: {e}")
+            logger.error(f"Error sending GPLinks verification card: {e}")
 
     if verify_msg:
         asyncio.create_task(auto_delete(verify_msg, 180, reply_to_message=reply_to_message))
+
+send_arolinks_verification_card = send_gplinks_verification_card
 
 async def check_chat_membership(client: Client, chat_id: Any, user_id: int, fallback_username: Optional[str] = None) -> bool:
     try:
@@ -1150,7 +1162,7 @@ async def start_handler(client: Client, message: Message):
         elif param.isdigit():
             file_msg_id = int(param)
 
-    # A. User completed 1-page AroLinks ad verification and returned to PM:
+    # A. User completed 1-page GPLinks ad verification and returned to PM:
     if verify_token:
         if not await is_user_joined_group(client, user_id):
             user_name = message.from_user.first_name if message.from_user and message.from_user.first_name else "Friend"
@@ -1241,9 +1253,9 @@ async def start_handler(client: Client, message: Message):
                 asyncio.create_task(auto_delete(fsub_msg, 60, reply_to_message=message))
             return
 
-        # Enforce AroLinks 1 File = 1 Ad flow (if configured and not owner/admin):
-        if AROLINKS_API_KEY and user_id != OWNER_ID and user_id not in ADMIN_IDS:
-            await send_arolinks_verification_card(client, message, user_id, file_msg_id, reply_to_message=message)
+        # Enforce GPLinks 1 File = 1 Ad flow (if configured and not owner/admin):
+        if GPLINKS_API_KEY and user_id != OWNER_ID and user_id not in ADMIN_IDS:
+            await send_gplinks_verification_card(client, message, user_id, file_msg_id, reply_to_message=message)
             return
 
         # Direct delivery (fallback or owner/admin)
@@ -2336,11 +2348,11 @@ async def callback_router(client: Client, query: CallbackQuery):
             await query.answer("⏳ Request is already being processed!", show_alert=False)
             return
 
-        # AroLinks 1 File = 1 Ad Flow (if configured and not owner/admin)
-        if AROLINKS_API_KEY and user_id != OWNER_ID and user_id not in ADMIN_IDS:
+        # GPLinks 1 File = 1 Ad Flow (if configured and not owner/admin)
+        if GPLINKS_API_KEY and user_id != OWNER_ID and user_id not in ADMIN_IDS:
             await query.answer("⚡ Generating secure download link...", show_alert=False)
             target_chat_id = query.message.chat.id if query.message and query.message.chat else user_id
-            await send_arolinks_verification_card(client, target_chat_id, user_id, msg_id, reply_to_message=query.message)
+            await send_gplinks_verification_card(client, target_chat_id, user_id, msg_id, reply_to_message=query.message)
             return
 
         # User is verified: Send file immediately in PM

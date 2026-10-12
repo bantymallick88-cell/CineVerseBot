@@ -12,11 +12,12 @@ import urllib.parse
 from typing import List, Tuple, Dict, Any, Optional
 
 try:
-    from flask import Flask, send_from_directory, request
+    from flask import Flask, send_from_directory, request, redirect
 except ImportError:
     Flask = None
     send_from_directory = None
     request = None
+    redirect = None
 
 # --- CRITICAL FOR PYTHON 3.14+ (Must be before pyrogram import) ---
 import asyncio
@@ -957,7 +958,10 @@ async def send_gplinks_verification_card(client: Client, target_chat: Any, user_
     size_str = format_size(file_info.get("file_size", 0)) if file_info else "N/A"
     meta = extract_movie_metadata(title)
 
-    destination_url = f"https://t.me/CineVerseFilterBot?start=file_{file_msg_id}"
+    # Web-Redirect Proxy Payload:
+    # GPLinks API rejects direct 'https://t.me/' links and defaults back to google.com.
+    # Use hosted Web App / Render domain as the destination URL for GPLinks:
+    destination_url = f"https://cineversebot.onrender.com/redirect?file_id={file_msg_id}"
     short_url = await get_gplinks_short_url(destination_url)
 
     verify_text = (
@@ -2505,6 +2509,36 @@ if flask_app:
                 pass
         return "OK - CineVerse Movie Search Bot is running 24/7!", 200
 
+    @flask_app.route("/redirect")
+    def web_redirect_handler():
+        file_id = (request.args.get("file_id") or request.args.get("id") or "").strip() if request else ""
+        target_telegram_url = f"https://t.me/CineVerseFilterBot?start=file_{file_id}" if file_id else "https://t.me/CineVerseFilterBot"
+        html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="refresh" content="0; url={target_telegram_url}">
+    <title>Redirecting to CineVerse Bot...</title>
+    <script>window.location.replace("{target_telegram_url}");</script>
+</head>
+<body style="background:#070a12;color:#f8fafc;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;">
+    <div style="text-align:center;">
+        <h2>⚡ Returning to CineVerse Bot...</h2>
+        <p>If not redirected automatically, <a href="{target_telegram_url}" style="color:#00f0ff;font-weight:bold;">tap here to open Telegram</a>.</p>
+    </div>
+</body>
+</html>"""
+        if redirect:
+            try:
+                resp = redirect(target_telegram_url, code=302)
+                resp.data = html
+                resp.headers["Content-Type"] = "text/html; charset=utf-8"
+                return resp
+            except Exception:
+                pass
+        return html, 200, {"Content-Type": "text/html; charset=utf-8"}
+
     @flask_app.route("/verify")
     @flask_app.route("/verification")
     @flask_app.route("/verification.html")
@@ -2542,6 +2576,33 @@ def start_flask_server():
             from http.server import HTTPServer, BaseHTTPRequestHandler
             class FallbackHandler(BaseHTTPRequestHandler):
                 def do_GET(self):
+                    if self.path.startswith("/redirect"):
+                        parsed = urllib.parse.urlparse(self.path)
+                        qs = urllib.parse.parse_qs(parsed.query)
+                        file_id = (qs.get("file_id", [""])[0] or qs.get("id", [""])[0]).strip()
+                        target_url = f"https://t.me/CineVerseFilterBot?start=file_{file_id}" if file_id else "https://t.me/CineVerseFilterBot"
+                        html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="refresh" content="0; url={target_url}">
+    <title>Redirecting to CineVerse Bot...</title>
+    <script>window.location.replace("{target_url}");</script>
+</head>
+<body style="background:#070a12;color:#f8fafc;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;">
+    <div style="text-align:center;">
+        <h2>⚡ Returning to CineVerse Bot...</h2>
+        <p>If not redirected automatically, <a href="{target_url}" style="color:#00f0ff;font-weight:bold;">tap here to open Telegram</a>.</p>
+    </div>
+</body>
+</html>"""
+                        self.send_response(302)
+                        self.send_header("Location", target_url)
+                        self.send_header("Content-type", "text/html; charset=utf-8")
+                        self.end_headers()
+                        self.wfile.write(html.encode("utf-8"))
+                        return
                     if any(self.path.startswith(p) for p in ["/verify", "/verification", "/verification.html"]):
                         try:
                             with open("verification.html", "rb") as f:

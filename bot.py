@@ -773,15 +773,15 @@ async def get_file_download_short_url(file_msg_id: int) -> str:
 
 async def build_pagination_markup(files: List[Dict[str, Any]], cache_id: str, current_page: int, total_pages: int, bot_username: Optional[str] = None) -> InlineKeyboardMarkup:
     buttons = []
-    target_bot = bot_username or os.getenv("BOT_USERNAME", "CineVerseFilterBot")
+    base_verify_url = get_redirect_base_url()
     
-    # Direct Delivery (No Ads): Set download buttons directly to Telegram deep links
+    # Aesthetic Pop-Up / WebApp Verification (2-3s Animated Transition):
     for f in files:
         name = f.get("title", "Movie")
         size_str = format_size(f.get("file_size", 0))
         meta = extract_movie_metadata(name)
         display_name = (meta["clean_title"][:26] + "...") if len(meta["clean_title"]) > 29 else meta["clean_title"]
-        btn_url = f"https://t.me/{target_bot}?start=file_{f['message_id']}"
+        btn_url = f"{base_verify_url}/verify?file_id={f['message_id']}"
         btn_text = f"📥 [ {meta['quality']} │ {size_str} ] ▷ {display_name}"
         buttons.append([InlineKeyboardButton(text=btn_text, url=btn_url)])
 
@@ -955,10 +955,10 @@ async def deliver_movie_file(client: Client, user_id: int, msg_id: int):
             f"├─ 🔊 **Audio:** `{meta['audio']}` │ 💾 **Size:** `{size_str}`\n"
             "└─ ⚡ **Powered by CineVerse Network**\n\n"
             "┌──────────────────────────────────────────┐\n"
-            "│  ⚠️  A U T O - D E L E T E :  3  M I N S │\n"
+            "│  ⚠️  A U T O - D E L E T E :  2  M I N S │\n"
             "│  Forward or save to Saved Messages now!  │\n"
             "└──────────────────────────────────────────┘\n\n"
-            "⚠️ **AUTO-DELETE: 3 mins | Forward or save to Saved Messages now!**"
+            "⚠️ **AUTO-DELETE: 2 mins | Forward or save to Saved Messages now!**"
         )
 
         sent_file = None
@@ -982,7 +982,7 @@ async def deliver_movie_file(client: Client, user_id: int, msg_id: int):
                 caption=caption
             )
         if sent_file:
-            asyncio.create_task(auto_delete(sent_file, 180))
+            asyncio.create_task(auto_delete(sent_file, 120))
     except UserIsBlocked:
         logger.warning(f"User {user_id} has blocked the bot.")
     except Exception as e:
@@ -1117,16 +1117,38 @@ async def check_chat_membership(client: Client, chat_id: Any, user_id: int, fall
         return False
 
 async def is_user_joined_group(client: Client, user_id: int) -> bool:
-    """Strictly checks if user is a member of CineVerse Search Group (-1004427640174)."""
+    """Strictly checks if user is a member of CineVerse Search Group / Request Group."""
     if user_id == OWNER_ID or user_id in ADMIN_IDS:
         return True
 
-    return await check_chat_membership(
+    joined_req = await check_chat_membership(
         client,
-        SEARCH_GROUP_ID,
+        REQ_GROUP_ID,
         user_id,
-        fallback_username="CineVerseFlimSearch"
+        fallback_username="FlimRequest_01"
     )
+    if not joined_req and SEARCH_GROUP_ID != REQ_GROUP_ID:
+        joined_req = await check_chat_membership(
+            client,
+            SEARCH_GROUP_ID,
+            user_id,
+            fallback_username="CineVerseFlimSearch"
+        )
+    return joined_req
+
+async def is_user_fully_joined(client: Client, user_id: int) -> bool:
+    """Strictly checks if user has joined BOTH required channels: Request Group & Backup Channel."""
+    if user_id == OWNER_ID or user_id in ADMIN_IDS:
+        return True
+
+    has_group = await is_user_joined_group(client, user_id)
+    has_backup = await check_chat_membership(
+        client,
+        BACKUP_CHANNEL_ID,
+        user_id,
+        fallback_username="CineVersebackup"
+    )
+    return has_group and has_backup
 
 async def is_authorized_user(user_id: int) -> bool:
     if user_id == OWNER_ID or user_id in ADMIN_IDS:
@@ -1136,10 +1158,11 @@ async def is_authorized_user(user_id: int) -> bool:
 def build_force_join_markup(retry_callback: str = "cb_check_join") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🍿 Join Group First", url=SEARCH_GROUP_LINK)
+            InlineKeyboardButton("🍿 Join Request Group", url=REQ_GROUP_LINK),
+            InlineKeyboardButton("📢 Join Backup Channel", url=BACKUP_CHANNEL_LINK)
         ],
         [
-            InlineKeyboardButton("🔄 Verify & Continue", callback_data=retry_callback)
+            InlineKeyboardButton("🔄 Try Again / Verified", callback_data=retry_callback)
         ]
     ])
 
@@ -1327,21 +1350,21 @@ async def start_handler(client: Client, message: Message):
                 asyncio.create_task(auto_delete(invalid_msg, 60, reply_to_message=message))
             return
 
-    # B. User arrived for a specific file (from Search Group /start get_{id} or GPLinks redirect /start file_{id}):
+    # B. User arrived for a specific file (from Search Group /start file_{id} or WebApp gateway):
     if file_msg_id:
-        if not await is_user_joined_group(client, user_id):
+        if not await is_user_fully_joined(client, user_id):
             user_name = message.from_user.first_name if message.from_user and message.from_user.first_name else "Friend"
             fsub_text = (
                 "┌──────────────────────────────────────────┐\n"
                 "│   🔒  A C C E S S   R E Q U I R E D      │\n"
-                "│      CineVerse Search Group Member Gate  │\n"
+                "│    CineVerse Dual Channel Verification   │\n"
                 "└──────────────────────────────────────────┘\n\n"
                 f"👋 Hello **{user_name}**,\n\n"
-                "You **MUST** be a member of **CineVerse Search Group** (`-1004427640174`) to download movies!\n\n"
-                "◈ **Mandatory Requirement:**\n"
-                "├─ 🍿 Join **CineVerse Search Group**\n"
-                "└─ ⚡ Access instant movie downloads & vault\n\n"
-                "👉 *Tap the button below to join the group first:*"
+                "To unlock and receive your movie file, you **MUST** join both required channels:\n\n"
+                "◈ **Required Channels:**\n"
+                "├─ 🍿 **CineVerse Request Group**\n"
+                "└─ 📢 **CineVerse Backup Channel**\n\n"
+                "👉 *Join both channels below and tap 'Try Again / Verified':*"
             )
             fsub_msg = await message.reply_text(
                 fsub_text,
@@ -1385,19 +1408,19 @@ async def start_handler(client: Client, message: Message):
         return
 
     # 4. Normal /start command (no file parameter): Check Force Join
-    if not await is_user_joined_group(client, user_id):
+    if not await is_user_fully_joined(client, user_id):
         user_name = message.from_user.first_name if message.from_user and message.from_user.first_name else "Friend"
         fsub_text = (
             "┌──────────────────────────────────────────┐\n"
             "│   🔒  A C C E S S   R E Q U I R E D      │\n"
-            "│      CineVerse Search Group Member Gate  │\n"
+            "│    CineVerse Dual Channel Verification   │\n"
             "└──────────────────────────────────────────┘\n\n"
             f"👋 Hello **{user_name}**,\n\n"
-            "You **MUST** be a member of **CineVerse Search Group** (`-1004427640174`) to search or download movies!\n\n"
-            "◈ **Mandatory Requirement:**\n"
-            "├─ 🍿 Join **CineVerse Search Group**\n"
-            "└─ ⚡ Access instant movie downloads & vault\n\n"
-            "👉 *Tap the button below to join the group first:*"
+            "To access CineVerse Bot features, you **MUST** join both required channels:\n\n"
+            "◈ **Required Channels:**\n"
+            "├─ 🍿 **CineVerse Request Group**\n"
+            "└─ 📢 **CineVerse Backup Channel**\n\n"
+            "👉 *Join both channels below and tap 'Try Again / Verified':*"
         )
         fsub_msg = await message.reply_text(
             fsub_text,
@@ -1960,22 +1983,22 @@ async def auto_filter_handler(client: Client, message: Message):
             asyncio.create_task(auto_delete(denied_msg, 60, reply_to_message=message))
         return
 
-    # 3. If query is in Private Chat (PM): Redirect to CineVerse Search Group (-1004427640174)
+    # 3. If query is in Private Chat (PM): Redirect to CineVerse Search Group
     if message.chat.type == enums.ChatType.PRIVATE:
         # Check Force Join first in PM
-        if not await is_user_joined_group(client, user_id):
+        if not await is_user_fully_joined(client, user_id):
             user_name = message.from_user.first_name if message.from_user and message.from_user.first_name else "Friend"
             fsub_text = (
                 "┌──────────────────────────────────────────┐\n"
                 "│   🔒  A C C E S S   R E Q U I R E D      │\n"
-                "│      CineVerse Search Group Member Gate  │\n"
+                "│    CineVerse Dual Channel Verification   │\n"
                 "└──────────────────────────────────────────┘\n\n"
                 f"👋 Hello **{user_name}**,\n\n"
-                "You **MUST** be a member of **CineVerse Search Group** (`-1004427640174`) to search or download movies!\n\n"
-                "◈ **Mandatory Requirement:**\n"
-                "├─ 🍿 Join **CineVerse Search Group**\n"
-                "└─ ⚡ Access instant movie downloads & vault\n\n"
-                "👉 *Tap the button below to join the group first:*"
+                "To access CineVerse Bot search, you **MUST** join both required channels:\n\n"
+                "◈ **Required Channels:**\n"
+                "├─ 🍿 **CineVerse Request Group**\n"
+                "└─ 📢 **CineVerse Backup Channel**\n\n"
+                "👉 *Join both channels below and tap 'Try Again / Verified':*"
             )
             fsub_markup = build_force_join_markup("cb_check_join")
             pm_msg = await message.reply_text(
@@ -2016,15 +2039,19 @@ async def auto_filter_handler(client: Client, message: Message):
         return
 
     # 4. Mandatory Group Member Check (Force-Sub)
-    if not await is_user_joined_group(client, user_id):
+    if not await is_user_fully_joined(client, user_id):
+        user_name = message.from_user.mention if message.from_user else "Friend"
         fsub_text = (
             "┌──────────────────────────────────────────┐\n"
             "│   🔒  A C C E S S   R E Q U I R E D      │\n"
-            "│      CineVerse Search Group Member Gate  │\n"
+            "│    CineVerse Dual Channel Verification   │\n"
             "└──────────────────────────────────────────┘\n\n"
-            f"👋 Hello {message.from_user.mention},\n\n"
-            "You **MUST** be a member of **CineVerse Search Group** (`-1004427640174`) to search or download movies!\n\n"
-            "👉 *Tap the button below to join the group first:*"
+            f"👋 Hello {user_name},\n\n"
+            "You **MUST** be a member of both channels to search and download movies!\n\n"
+            "◈ **Required Channels:**\n"
+            "├─ 🍿 **CineVerse Request Group**\n"
+            "└─ 📢 **CineVerse Backup Channel**\n\n"
+            "👉 *Join both channels below and tap 'Try Again / Verified':*"
         )
         fsub_markup = build_force_join_markup("cb_check_join")
         block_msg = await message.reply_text(
@@ -2108,7 +2135,7 @@ async def callback_router(client: Client, query: CallbackQuery):
     data = query.data
 
     if data == "cb_check_join":
-        is_joined = await is_user_joined_group(client, user_id)
+        is_joined = await is_user_fully_joined(client, user_id)
         if is_joined:
             await query.answer("✅ Verified! Access Granted.", show_alert=False)
             try:
@@ -2118,7 +2145,7 @@ async def callback_router(client: Client, query: CallbackQuery):
                     "│       Membership Verified & Unlocked     │\n"
                     "└──────────────────────────────────────────┘\n\n"
                     "🎉 **Welcome to CineVerse Search Network!**\n\n"
-                    "Your membership in **CineVerse Search Group** has been verified successfully.\n\n"
+                    "Your membership in both required channels has been verified successfully.\n\n"
                     "◈ **Next Step:**\n"
                     "💬 Search any movie title directly in CineVerse Search Group below!",
                     reply_markup=InlineKeyboardMarkup([
@@ -2128,7 +2155,7 @@ async def callback_router(client: Client, query: CallbackQuery):
             except Exception:
                 pass
         else:
-            await query.answer("❌ You haven't joined CineVerse Search Group yet! Please join first.", show_alert=True)
+            await query.answer("❌ You must join BOTH required channels first!", show_alert=True)
         return
 
     elif data == "cb_close":
@@ -2437,18 +2464,18 @@ async def callback_router(client: Client, query: CallbackQuery):
     elif data.startswith("get_"):
         msg_id = int(data.split("_")[1])
 
-        # Strict Force Join Check (CineVerse Search Group)
-        if not await is_user_joined_group(client, user_id):
-            await query.answer("❌ You must join CineVerse Search Group first!", show_alert=True)
+        # Strict Force Join Check (Request Group & Backup Channel)
+        if not await is_user_fully_joined(client, user_id):
+            await query.answer("❌ You must join both Request Group and Backup Channel first!", show_alert=True)
             user_name = query.from_user.first_name if query.from_user else "Friend"
             fsub_text = (
                 "┌──────────────────────────────────────────┐\n"
                 "│   🔒  A C C E S S   R E Q U I R E D      │\n"
-                "│      CineVerse Search Group Member Gate  │\n"
+                "│      Join Both Channels to Continue      │\n"
                 "└──────────────────────────────────────────┘\n\n"
                 f"👋 Hello **{user_name}**,\n\n"
-                "You **MUST** be a member of **CineVerse Search Group** (`-1004427640174`) to download movies!\n\n"
-                "👉 *Tap the button below to join the group first:*"
+                "You **MUST** be a member of both our **Request Group** and **Backup Channel** to download files!\n\n"
+                "👉 *Please join both channels using the buttons below, then tap Verified:* \n"
             )
             fsub_markup = build_force_join_markup(f"get_{msg_id}")
             try:
@@ -2493,8 +2520,8 @@ async def callback_router(client: Client, query: CallbackQuery):
 
     elif data.startswith("check_token_"):
         token = data.split("_", 2)[2]
-        if not await is_user_joined_group(client, user_id):
-            await query.answer("❌ You must join CineVerse Search Group first!", show_alert=True)
+        if not await is_user_fully_joined(client, user_id):
+            await query.answer("❌ You must join both Request Group and Backup Channel first!", show_alert=True)
             return
 
         delivered_msg_id = await db.verify_and_consume_token(token, user_id)
@@ -2599,33 +2626,6 @@ if flask_app:
         return "OK - CineVerse Movie Search Bot is running 24/7!", 200
 
     @flask_app.route("/redirect")
-    def web_redirect_handler():
-        file_id = request.args.get("file_id") or request.args.get("payload") or ""
-        # Clean Base64 or direct parameter
-        if file_id.startswith("file_"):
-            start_param = file_id
-        else:
-            start_param = f"file_{file_id}"
-            
-        # Return clean HTML that forces browser intent launch & manual button fallback
-        html_content = f'''
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <meta http-equiv="refresh" content="0;url=https://t.me/CineVerseFilterBot?start={start_param}">
-            <script type="text/javascript">
-                window.location.href = "https://t.me/CineVerseFilterBot?start={start_param}";
-            </script>
-        </head>
-        <body style="background:#0f172a; color:#fff; font-family:sans-serif; text-align:center; padding-top:50px;">
-            <h2>Redirecting to CineVerse Bot...</h2>
-            <p>If not redirected automatically, tap below:</p>
-            <a href="https://t.me/CineVerseFilterBot?start={start_param}" style="background:#22c55e; color:#fff; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; margin-top:15px; font-weight:bold;">Open File in Telegram</a>
-        </body>
-        </html>
-        '''
-        return html_content, 200, {'Content-Type': 'text/html'}
-
     @flask_app.route("/verify")
     @flask_app.route("/verification")
     @flask_app.route("/verification.html")
@@ -2663,37 +2663,7 @@ def start_flask_server():
             from http.server import HTTPServer, BaseHTTPRequestHandler
             class FallbackHandler(BaseHTTPRequestHandler):
                 def do_GET(self):
-                    if self.path.startswith("/redirect"):
-                        parsed = urllib.parse.urlparse(self.path)
-                        qs = urllib.parse.parse_qs(parsed.query)
-                        file_id = (qs.get("file_id", [""])[0] or qs.get("payload", [""])[0] or qs.get("id", [""])[0]).strip()
-                        if file_id.startswith("file_"):
-                            start_param = file_id
-                        else:
-                            start_param = f"file_{file_id}"
-
-                        html_content = f'''
-                        <!DOCTYPE html>
-                        <html>
-                        <head>
-                            <meta http-equiv="refresh" content="0;url=https://t.me/CineVerseFilterBot?start={start_param}">
-                            <script type="text/javascript">
-                                window.location.href = "https://t.me/CineVerseFilterBot?start={start_param}";
-                            </script>
-                        </head>
-                        <body style="background:#0f172a; color:#fff; font-family:sans-serif; text-align:center; padding-top:50px;">
-                            <h2>Redirecting to CineVerse Bot...</h2>
-                            <p>If not redirected automatically, tap below:</p>
-                            <a href="https://t.me/CineVerseFilterBot?start={start_param}" style="background:#22c55e; color:#fff; padding:12px 24px; border-radius:8px; text-decoration:none; display:inline-block; margin-top:15px; font-weight:bold;">Open File in Telegram</a>
-                        </body>
-                        </html>
-                        '''
-                        self.send_response(200)
-                        self.send_header("Content-type", "text/html; charset=utf-8")
-                        self.end_headers()
-                        self.wfile.write(html_content.encode("utf-8"))
-                        return
-                    if any(self.path.startswith(p) for p in ["/verify", "/verification", "/verification.html"]):
+                    if any(self.path.startswith(p) for p in ["/verify", "/verification", "/verification.html", "/redirect"]):
                         try:
                             with open("verification.html", "rb") as f:
                                 content = f.read()

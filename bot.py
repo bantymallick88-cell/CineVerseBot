@@ -1,5 +1,6 @@
 import os
 import sys
+import re
 import base64
 import math
 import time
@@ -27,7 +28,7 @@ try:
 except RuntimeError:
     asyncio.set_event_loop(asyncio.new_event_loop())
 
-from pyrogram import Client, filters, enums
+from pyrogram import Client, filters, enums, idle
 from pyrogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
@@ -2763,13 +2764,77 @@ def start_flask_server():
     thread.start()
 
 # ---------------------------------------------------------------------------
-# START BOT VIA STANDARD app.run()
+# START BOT WITH GRACEFUL FLOODWAIT RETRY ENGINE
 # ---------------------------------------------------------------------------
-if __name__ == "__main__":
+async def _start_pyrogram_client():
+    """
+    Starts the Pyrogram client instance with graceful FloodWait backoff.
+    Gracefully catches FloodWait or startup exceptions without crashing the deploy process.
+    """
+    while True:
+        try:
+            logger.info("📡 Connecting to Telegram via Pyrogram...")
+            await app.start()
+            logger.info("✅ Pyrogram bot client connected and authenticated successfully!")
+            break
+        except FloodWait as e:
+            wait_time = int(getattr(e, "value", getattr(e, "x", 60)))
+            logger.warning(f"⚠️ Telegram FloodWait during startup: sleeping for {wait_time}s...")
+            print(f"⚠️ Telegram FloodWait: Sleeping {wait_time}s before retrying client start...")
+            await asyncio.sleep(wait_time + 1)
+        except Exception as e:
+            err_str = str(e)
+            if "FLOOD_WAIT" in err_str.upper():
+                match = re.search(r"FLOOD_WAIT_(\d+)", err_str.upper())
+                wait_time = int(match.group(1)) if match else 60
+                logger.warning(f"⚠️ Telegram FloodWait in exception ({e}): sleeping for {wait_time}s...")
+                print(f"⚠️ Telegram FloodWait: Sleeping {wait_time}s before retrying...")
+                await asyncio.sleep(wait_time + 1)
+            else:
+                logger.error(f"❌ Error during Telegram client start: {e}", exc_info=True)
+                print(f"❌ Startup error: {e}. Retrying in 10s...")
+                await asyncio.sleep(10)
+
+    logger.info("🚀 CineVerse Bot is idle and listening for updates...")
+    await idle()
+    await app.stop()
+
+def run_bot_safely():
+    """
+    Main runner that wraps app.run() inside a persistent retry loop
+    catching any unhandled FloodWait or startup exceptions.
+    """
     start_flask_server()
     print("=" * 60)
     print("🚀 CineVerse Movie Search Bot is starting...")
     print(f"📌 Admin ID: {ADMIN_ID} | DB Channel: {DB_CHANNEL_ID}")
     print("=" * 60)
-    app.run()
+
+    while True:
+        try:
+            app.run(_start_pyrogram_client())
+            break
+        except (KeyboardInterrupt, SystemExit):
+            logger.info("Bot execution terminated by user or system signal.")
+            break
+        except FloodWait as e:
+            wait_time = int(getattr(e, "value", getattr(e, "x", 60)))
+            logger.warning(f"⚠️ Pyrogram FloodWait caught in runner: sleeping {wait_time}s...")
+            print(f"⚠️ FloodWait: Sleeping {wait_time}s before reconnecting...")
+            time.sleep(wait_time + 1)
+        except Exception as e:
+            err_str = str(e)
+            if "FLOOD_WAIT" in err_str.upper():
+                match = re.search(r"FLOOD_WAIT_(\d+)", err_str.upper())
+                wait_time = int(match.group(1)) if match else 60
+                logger.warning(f"⚠️ FloodWait in runner ({e}): sleeping {wait_time}s...")
+                print(f"⚠️ FloodWait: Sleeping {wait_time}s before reconnecting...")
+                time.sleep(wait_time + 1)
+            else:
+                logger.error(f"❌ Fatal error in bot runner: {e}", exc_info=True)
+                print(f"❌ Runner error: {e}. Retrying in 10s...")
+                time.sleep(10)
+
+if __name__ == "__main__":
+    run_bot_safely()
 

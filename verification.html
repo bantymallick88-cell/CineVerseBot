@@ -1,0 +1,736 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>CineVerse Secure Verification • 1-Step Media Unlock</title>
+  <meta name="description" content="Ultra-fast secure media verification gateway for CineVerse Telegram Bot. Decrypt high-speed movie stream and unlock download in 10 seconds.">
+  <meta name="theme-color" content="#070a12">
+
+  <!-- Google Fonts: Plus Jakarta Sans & JetBrains Mono -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+
+  <style>
+    /* -------------------------------------------------------------
+       CSS RESET & DESIGN TOKENS (Godly / Dribbble Dark Glassmorphism)
+       ------------------------------------------------------------- */
+    *, *::before, *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    :root {
+      --bg-dark: #070a12;
+      --card-bg: rgba(14, 20, 32, 0.72);
+      --card-border: rgba(255, 255, 255, 0.08);
+      --card-border-glow: rgba(0, 240, 255, 0.28);
+      --accent-cyan: #00f0ff;
+      --accent-cyan-rgb: 0, 240, 255;
+      --accent-purple: #9d4edd;
+      --accent-emerald: #10b981;
+      --accent-amber: #f59e0b;
+      --text-primary: #f8fafc;
+      --text-secondary: #94a3b8;
+      --text-muted: #64748b;
+      --font-main: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      --font-mono: 'JetBrains Mono', monospace;
+      --radius-xl: 28px;
+      --radius-lg: 18px;
+      --radius-md: 12px;
+      --radius-pill: 9999px;
+    }
+
+    html, body {
+      min-height: 100%;
+      background-color: var(--bg-dark);
+      color: var(--text-primary);
+      font-family: var(--font-main);
+      overflow-x: hidden;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    body {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 24px 16px;
+      position: relative;
+    }
+
+    /* Ambient Animated Mesh Glow Background */
+    .ambient-glow {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 0;
+      overflow: hidden;
+    }
+
+    .glow-orb {
+      position: absolute;
+      border-radius: 50%;
+      filter: blur(120px);
+      opacity: 0.35;
+      animation: floatOrb 12s ease-in-out infinite alternate;
+    }
+
+    .glow-orb-1 {
+      width: 480px;
+      height: 480px;
+      top: -120px;
+      left: 10%;
+      background: radial-gradient(circle, var(--accent-cyan) 0%, transparent 70%);
+    }
+
+    .glow-orb-2 {
+      width: 420px;
+      height: 420px;
+      bottom: -100px;
+      right: 10%;
+      background: radial-gradient(circle, var(--accent-purple) 0%, transparent 70%);
+      animation-duration: 15s;
+      animation-delay: -3s;
+    }
+
+    .glow-orb-3 {
+      width: 320px;
+      height: 320px;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      background: radial-gradient(circle, #3b82f6 0%, transparent 70%);
+      opacity: 0.2;
+      animation-duration: 18s;
+    }
+
+    @keyframes floatOrb {
+      0% { transform: translateY(0) scale(1); }
+      100% { transform: translateY(40px) scale(1.12); }
+    }
+
+    /* Subtle cyber background grid */
+    .bg-grid {
+      position: fixed;
+      inset: 0;
+      background-image: 
+        linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+      background-size: 36px 36px;
+      z-index: 1;
+      pointer-events: none;
+    }
+
+    /* -------------------------------------------------------------
+       MAIN VERIFICATION CARD (Glassmorphism Frame)
+       ------------------------------------------------------------- */
+    .main-wrapper {
+      position: relative;
+      z-index: 10;
+      width: 100%;
+      max-width: 480px;
+    }
+
+    .verify-card {
+      position: relative;
+      background: var(--card-bg);
+      backdrop-filter: blur(28px);
+      -webkit-backdrop-filter: blur(28px);
+      border: 1px solid var(--card-border);
+      border-radius: var(--radius-xl);
+      padding: 36px 28px;
+      box-shadow: 
+        0 30px 60px -15px rgba(0, 0, 0, 0.8),
+        0 0 40px -10px rgba(var(--accent-cyan-rgb), 0.15),
+        inset 0 1px 1px rgba(255, 255, 255, 0.12);
+      text-align: center;
+      transition: border-color 0.4s ease, box-shadow 0.4s ease;
+    }
+
+    .verify-card:hover {
+      border-color: var(--card-border-glow);
+      box-shadow: 
+        0 35px 70px -15px rgba(0, 0, 0, 0.85),
+        0 0 50px -5px rgba(var(--accent-cyan-rgb), 0.22),
+        inset 0 1px 1px rgba(255, 255, 255, 0.18);
+    }
+
+    /* Brand Header */
+    .brand-header {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 6px 16px;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: var(--radius-pill);
+      margin-bottom: 22px;
+      font-size: 0.82rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--accent-cyan);
+    }
+
+    .brand-header svg {
+      width: 16px;
+      height: 16px;
+      fill: currentColor;
+    }
+
+    .title {
+      font-size: 1.65rem;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      line-height: 1.25;
+      margin-bottom: 8px;
+      background: linear-gradient(135deg, #ffffff 30%, #cbd5e1 70%, var(--accent-cyan) 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .subtitle {
+      font-size: 0.92rem;
+      color: var(--text-secondary);
+      line-height: 1.5;
+      margin-bottom: 26px;
+    }
+
+    /* Dynamic Movie Info Preview Card */
+    .movie-preview {
+      background: rgba(8, 12, 22, 0.65);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      border-radius: var(--radius-lg);
+      padding: 16px 18px;
+      margin-bottom: 28px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      text-align: left;
+    }
+
+    .movie-icon {
+      flex-shrink: 0;
+      width: 48px;
+      height: 48px;
+      border-radius: var(--radius-md);
+      background: linear-gradient(135deg, rgba(var(--accent-cyan-rgb), 0.2), rgba(157, 78, 221, 0.25));
+      border: 1px solid rgba(0, 240, 255, 0.3);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--accent-cyan);
+    }
+
+    .movie-icon svg {
+      width: 24px;
+      height: 24px;
+    }
+
+    .movie-details {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .movie-title {
+      font-size: 0.96rem;
+      font-weight: 700;
+      color: var(--text-primary);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-bottom: 4px;
+    }
+
+    .movie-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .tag-badge {
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.06);
+      color: var(--text-secondary);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+    }
+
+    .tag-badge.cyan {
+      color: var(--accent-cyan);
+      background: rgba(var(--accent-cyan-rgb), 0.1);
+      border-color: rgba(var(--accent-cyan-rgb), 0.25);
+    }
+
+    /* -------------------------------------------------------------
+       CIRCULAR COUNTDOWN TIMER (SVG Ring)
+       ------------------------------------------------------------- */
+    .timer-container {
+      position: relative;
+      width: 170px;
+      height: 170px;
+      margin: 0 auto 26px auto;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .timer-svg {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      transform: rotate(-90deg);
+    }
+
+    .timer-track {
+      fill: none;
+      stroke: rgba(255, 255, 255, 0.06);
+      stroke-width: 10;
+    }
+
+    .timer-progress {
+      fill: none;
+      stroke: url(#timerGradient);
+      stroke-width: 10;
+      stroke-linecap: round;
+      stroke-dasharray: 440;
+      stroke-dashoffset: 0;
+      transition: stroke-dashoffset 1s linear;
+      filter: drop-shadow(0 0 10px rgba(var(--accent-cyan-rgb), 0.7));
+    }
+
+    .timer-content {
+      position: relative;
+      z-index: 2;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .timer-number {
+      font-family: var(--font-mono);
+      font-size: 3.4rem;
+      font-weight: 800;
+      line-height: 1;
+      color: #ffffff;
+      text-shadow: 0 0 20px rgba(var(--accent-cyan-rgb), 0.8);
+      letter-spacing: -0.05em;
+    }
+
+    .timer-label {
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--accent-cyan);
+      margin-top: 4px;
+    }
+
+    /* Verification Status Banner */
+    .status-box {
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      border-radius: var(--radius-md);
+      padding: 10px 14px;
+      margin-bottom: 24px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      font-size: 0.85rem;
+      font-weight: 500;
+      color: var(--text-secondary);
+      transition: all 0.3s ease;
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--accent-amber);
+      box-shadow: 0 0 10px var(--accent-amber);
+      animation: pulseDot 1.4s ease-in-out infinite;
+    }
+
+    .status-box.ready .status-dot {
+      background: var(--accent-emerald);
+      box-shadow: 0 0 12px var(--accent-emerald);
+    }
+
+    .status-box.ready {
+      border-color: rgba(16, 185, 129, 0.3);
+      background: rgba(16, 185, 129, 0.08);
+      color: #6ee7b7;
+    }
+
+    @keyframes pulseDot {
+      0%, 100% { transform: scale(1); opacity: 1; }
+      50% { transform: scale(1.35); opacity: 0.6; }
+    }
+
+    /* -------------------------------------------------------------
+       PRIMARY UNLOCK BUTTON (Morphing Vibrant CTA)
+       ------------------------------------------------------------- */
+    .unlock-btn-link {
+      display: block;
+      text-decoration: none;
+      width: 100%;
+    }
+
+    .unlock-btn {
+      width: 100%;
+      padding: 18px 24px;
+      border-radius: var(--radius-lg);
+      font-family: var(--font-main);
+      font-size: 1.05rem;
+      font-weight: 800;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      border: none;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      position: relative;
+      overflow: hidden;
+      transition: all 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    /* Locked / Countdown State */
+    .unlock-btn.disabled {
+      background: rgba(255, 255, 255, 0.06);
+      color: var(--text-muted);
+      cursor: not-allowed;
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      box-shadow: none;
+    }
+
+    /* Unlocked / Vibrant Active State */
+    .unlock-btn.ready {
+      background: linear-gradient(135deg, #00f0ff 0%, #3b82f6 50%, #9d4edd 100%);
+      color: #070a12;
+      box-shadow: 
+        0 10px 30px -5px rgba(0, 240, 255, 0.5),
+        0 0 25px rgba(157, 78, 221, 0.4),
+        inset 0 1px 1px rgba(255, 255, 255, 0.5);
+      animation: pulseBtn 2s infinite ease-in-out;
+    }
+
+    .unlock-btn.ready:hover {
+      transform: translateY(-2px) scale(1.02);
+      box-shadow: 
+        0 15px 40px -5px rgba(0, 240, 255, 0.7),
+        0 0 35px rgba(157, 78, 221, 0.6),
+        inset 0 1px 1px rgba(255, 255, 255, 0.6);
+    }
+
+    .unlock-btn.ready:active {
+      transform: translateY(1px) scale(0.99);
+    }
+
+    /* Subtle Shimmer Sweep on Unlock */
+    .unlock-btn.ready::after {
+      content: '';
+      position: absolute;
+      top: -50%;
+      left: -50%;
+      width: 200%;
+      height: 200%;
+      background: linear-gradient(
+        60deg,
+        transparent 30%,
+        rgba(255, 255, 255, 0.45) 50%,
+        transparent 70%
+      );
+      transform: rotate(25deg);
+      animation: sweepShimmer 3.5s infinite;
+    }
+
+    @keyframes sweepShimmer {
+      0% { transform: translateX(-150%) rotate(25deg); }
+      100% { transform: translateX(150%) rotate(25deg); }
+    }
+
+    @keyframes pulseBtn {
+      0%, 100% { filter: brightness(1); }
+      50% { filter: brightness(1.12); }
+    }
+
+    .btn-icon {
+      width: 20px;
+      height: 20px;
+      fill: currentColor;
+    }
+
+    /* Footer Trust Badge */
+    .card-footer {
+      margin-top: 24px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      font-size: 0.76rem;
+      color: var(--text-muted);
+      letter-spacing: 0.02em;
+    }
+
+    .card-footer svg {
+      width: 14px;
+      height: 14px;
+      fill: var(--accent-emerald);
+    }
+
+    /* -------------------------------------------------------------
+       RESPONSIVE ADJUSTMENTS
+       ------------------------------------------------------------- */
+    @media (max-width: 480px) {
+      .verify-card {
+        padding: 28px 20px;
+        border-radius: 22px;
+      }
+      .title {
+        font-size: 1.45rem;
+      }
+      .timer-container {
+        width: 150px;
+        height: 150px;
+      }
+      .timer-number {
+        font-size: 3rem;
+      }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Ambient Glow Elements -->
+  <div class="ambient-glow">
+    <div class="glow-orb glow-orb-1"></div>
+    <div class="glow-orb glow-orb-2"></div>
+    <div class="glow-orb glow-orb-3"></div>
+  </div>
+
+  <!-- Cyber Grid -->
+  <div class="bg-grid"></div>
+
+  <!-- Verification Card Container -->
+  <main class="main-wrapper">
+    <section class="verify-card" id="verifyCard">
+
+      <!-- CineVerse Brand Header -->
+      <div class="brand-header" id="brandHeader">
+        <svg viewBox="0 0 24 24">
+          <path d="M18 4l2 4h-3l-2-4h-2l2 4h-3l-2-4H8l2 4H7L5 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V4h-4z"/>
+        </svg>
+        <span>CineVerse Secure Vault</span>
+      </div>
+
+      <!-- Heading -->
+      <h1 class="title" id="pageTitle">1-Step Media Unlock</h1>
+      <p class="subtitle" id="pageSubtitle">Decrypting high-speed direct stream handshake. Please wait for the security countdown.</p>
+
+      <!-- Dynamic Movie Details Preview -->
+      <div class="movie-preview" id="moviePreview">
+        <div class="movie-icon">
+          <svg viewBox="0 0 24 24" fill="currentColor">
+            <path d="M4 6H2v14c0 1.1.9 2 2 2h14v-2H4V6zm16-4H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-8 12.5v-9l6 4.5-6 4.5z"/>
+          </svg>
+        </div>
+        <div class="movie-details">
+          <div class="movie-title" id="movieTitleDisplay">Verified Cinema File</div>
+          <div class="movie-tags">
+            <span class="tag-badge cyan" id="qualityBadge">1080p FHD</span>
+            <span class="tag-badge" id="sizeBadge">Direct Vault</span>
+            <span class="tag-badge" id="audioBadge">Fast Stream</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 10-Second Circular Countdown Timer -->
+      <div class="timer-container" id="timerContainer">
+        <svg class="timer-svg" viewBox="0 0 160 160">
+          <defs>
+            <linearGradient id="timerGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stop-color="#00f0ff" />
+              <stop offset="50%" stop-color="#3b82f6" />
+              <stop offset="100%" stop-color="#9d4edd" />
+            </linearGradient>
+          </defs>
+          <!-- Background Track -->
+          <circle class="timer-track" cx="80" cy="80" r="70" />
+          <!-- Animated Progress Stroke -->
+          <circle class="timer-progress" id="timerProgress" cx="80" cy="80" r="70" />
+        </svg>
+
+        <div class="timer-content">
+          <div class="timer-number" id="countdownNumber">10</div>
+          <div class="timer-label" id="countdownLabel">SECONDS</div>
+        </div>
+      </div>
+
+      <!-- Dynamic Security Status Box -->
+      <div class="status-box" id="statusBox">
+        <span class="status-dot" id="statusDot"></span>
+        <span id="statusText">Decrypting secure media stream...</span>
+      </div>
+
+      <!-- Unlock Button -->
+      <a class="unlock-btn-link" id="unlockLink" href="javascript:void(0)">
+        <button class="unlock-btn disabled" id="unlockButton" disabled>
+          <svg class="btn-icon" id="btnIcon" viewBox="0 0 24 24">
+            <path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"/>
+          </svg>
+          <span id="btnText">Please Wait (10s)...</span>
+        </button>
+      </a>
+
+      <!-- Security Trust Footer -->
+      <div class="card-footer">
+        <svg viewBox="0 0 24 24">
+          <path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm-2 16l-4-4 1.41-1.41L10 14.17l6.59-6.59L18 9l-8 8z"/>
+        </svg>
+        <span>End-to-End Encrypted Handshake • Instant Telegram Delivery</span>
+      </div>
+
+    </section>
+  </main>
+
+  <!-- Verification Logic & Dynamic Redirection -->
+  <script>
+    (function () {
+      "use strict";
+
+      // 1. Parse URL Parameters
+      const urlParams = new URLSearchParams(window.location.search);
+      const fileId = urlParams.get('file_id') || urlParams.get('id') || '';
+      const botUsername = urlParams.get('bot') || 'CineVerseFilterBot';
+      const movieTitle = urlParams.get('title') || 'Verified Cinema Media';
+      const quality = urlParams.get('quality') || '1080p FHD';
+      const size = urlParams.get('size') || 'Direct Vault';
+
+      // 2. Populate Dynamic UI Information
+      const movieTitleEl = document.getElementById('movieTitleDisplay');
+      const qualityBadgeEl = document.getElementById('qualityBadge');
+      const sizeBadgeEl = document.getElementById('sizeBadge');
+      if (movieTitleEl) movieTitleEl.textContent = decodeURIComponent(movieTitle);
+      if (qualityBadgeEl) qualityBadgeEl.textContent = decodeURIComponent(quality);
+      if (sizeBadgeEl) sizeBadgeEl.textContent = decodeURIComponent(size);
+
+      // 3. Construct Telegram Deep Link
+      // Target Format: https://t.me/CineVerseFilterBot?start=file_{file_id}
+      let telegramDeepLink = `https://t.me/${botUsername}`;
+      if (fileId) {
+        telegramDeepLink = `https://t.me/${botUsername}?start=file_${fileId}`;
+      }
+
+      // 4. Circular Timer Mechanics
+      const totalSeconds = 10;
+      let remainingSeconds = totalSeconds;
+      const radius = 70;
+      const circumference = 2 * Math.PI * radius; // Approx 439.82
+
+      const timerProgressEl = document.getElementById('timerProgress');
+      const countdownNumberEl = document.getElementById('countdownNumber');
+      const countdownLabelEl = document.getElementById('countdownLabel');
+      const statusBoxEl = document.getElementById('statusBox');
+      const statusTextEl = document.getElementById('statusText');
+      const unlockButtonEl = document.getElementById('unlockButton');
+      const unlockLinkEl = document.getElementById('unlockLink');
+      const btnTextEl = document.getElementById('btnText');
+      const btnIconEl = document.getElementById('btnIcon');
+
+      // Initialize SVG progress dash
+      if (timerProgressEl) {
+        timerProgressEl.style.strokeDasharray = `${circumference}`;
+        timerProgressEl.style.strokeDashoffset = '0';
+      }
+
+      function updateProgress(secondsLeft) {
+        if (!timerProgressEl) return;
+        const progressFraction = (totalSeconds - secondsLeft) / totalSeconds;
+        const offset = circumference * progressFraction;
+        timerProgressEl.style.strokeDashoffset = `${offset}`;
+      }
+
+      // Countdown Interval
+      const timerInterval = setInterval(function () {
+        remainingSeconds--;
+
+        if (countdownNumberEl) {
+          countdownNumberEl.textContent = remainingSeconds;
+        }
+
+        updateProgress(remainingSeconds);
+
+        // Dynamic Status messages
+        if (remainingSeconds > 6) {
+          if (statusTextEl) statusTextEl.textContent = 'Decrypting high-speed media stream...';
+        } else if (remainingSeconds > 3) {
+          if (statusTextEl) statusTextEl.textContent = 'Validating security token & session...';
+        } else if (remainingSeconds > 0) {
+          if (statusTextEl) statusTextEl.textContent = 'Finalizing direct Telegram handshake...';
+        }
+
+        if (unlockButtonEl && btnTextEl && remainingSeconds > 0) {
+          btnTextEl.textContent = `Please Wait (${remainingSeconds}s)...`;
+        }
+
+        // When Countdown reaches 0
+        if (remainingSeconds <= 0) {
+          clearInterval(timerInterval);
+          onVerificationComplete();
+        }
+      }, 1000);
+
+      // Handle Verification Completion
+      function onVerificationComplete() {
+        if (countdownNumberEl) countdownNumberEl.textContent = '0';
+        if (countdownLabelEl) countdownLabelEl.textContent = 'READY';
+        if (timerProgressEl) timerProgressEl.style.strokeDashoffset = `${circumference}`;
+
+        // Status update
+        if (statusBoxEl) statusBoxEl.classList.add('ready');
+        if (statusTextEl) statusTextEl.textContent = 'Verified! Your download stream is ready.';
+
+        // Unlock Button state
+        if (unlockButtonEl) {
+          unlockButtonEl.disabled = false;
+          unlockButtonEl.classList.remove('disabled');
+          unlockButtonEl.classList.add('ready');
+        }
+
+        if (btnTextEl) {
+          btnTextEl.textContent = 'UNLOCK MOVIE FILE 🚀';
+        }
+
+        // Switch icon to unlocked
+        if (btnIconEl) {
+          btnIconEl.innerHTML = '<path d="M12 2C9.24 2 7 4.24 7 7v3H6c-1.1 0-2 .9-2 2v8c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2v-8c0-1.1-.9-2-2-2h-1V7c0-2.76-2.24-5-5-5zm0 2c1.66 0 3 1.34 3 3v3H9V7c0-1.66 1.34-3 3-3zm0 11c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2z"/>';
+        }
+
+        // Attach target link and click listener
+        if (unlockLinkEl) {
+          unlockLinkEl.href = telegramDeepLink;
+          unlockLinkEl.addEventListener('click', function (e) {
+            e.preventDefault();
+            window.location.href = telegramDeepLink;
+          });
+        }
+      }
+
+    })();
+  </script>
+</body>
+</html>

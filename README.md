@@ -66,7 +66,8 @@ An ultra-advanced, high-performance Telegram Auto-Filter Bot built with **Pyrogr
 | `DB_CHANNEL_ID` | Your DB Channel ID (e.g., `-1004312780149`) |
 | `ADMIN_ID` | Primary Admin ID (`7831101047`) |
 | `CHANNEL_LINK` | `https://t.me/CineVerseFlimSearch` |
-| `DEVELOPER_LINK` | `tg://user?id=7831101047` |
+| `GPLINKS_API_KEY` | Your GPLinks API Key (Shortener engine) |
+| `VERIFY_BASE_URL` | Optional verification landing host (e.g. `https://cineverse-bot.onrender.com`) |
 
 6. Click **"Create Background Worker"**. Render will build the Docker container and keep your bot online 24/7 with automatic updates on every git push.
 
@@ -90,6 +91,7 @@ ADMIN_ID=7831101047
 SEARCH_GROUP_ID=-1004427640174
 SEARCH_GROUP_LINK=https://t.me/CineVerseFlimSearch
 GPLINKS_API_KEY=your_gplinks_api_key_here
+VERIFY_BASE_URL=https://cineverse-bot.onrender.com
 ```
 
 ### 3. Run the Bot

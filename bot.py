@@ -12,9 +12,11 @@ import urllib.parse
 from typing import List, Tuple, Dict, Any, Optional
 
 try:
-    from flask import Flask
+    from flask import Flask, send_from_directory, request
 except ImportError:
     Flask = None
+    send_from_directory = None
+    request = None
 
 # --- CRITICAL FOR PYTHON 3.14+ (Must be before pyrogram import) ---
 import asyncio
@@ -106,8 +108,9 @@ ADMIN_IDS = parse_admin_ids()
 ADMIN_ID = OWNER_ID
 
 # GPLinks Shortener API Configuration (Strict 1 File = 1 Ad Flow)
-GPLINKS_API_KEY = get_env_str("GPLINKS_API_KEY", get_env_str("AROLINKS_API_KEY", ""))
+GPLINKS_API_KEY = os.getenv("GPLINKS_API_KEY") or get_env_str("GPLINKS_API_KEY", get_env_str("AROLINKS_API_KEY", ""))
 AROLINKS_API_KEY = GPLINKS_API_KEY  # Backward compatibility alias
+VERIFY_BASE_URL = os.getenv("VERIFY_BASE_URL", os.getenv("RENDER_EXTERNAL_URL", "")).strip()
 
 REQ_GROUP_ID = get_env_int("REQ_GROUP_ID", -1003982672894)
 REQ_GROUP_LINK = get_env_str("REQ_GROUP_LINK", "https://t.me/FlimRequest_01")
@@ -868,37 +871,44 @@ async def deliver_movie_file(client: Client, user_id: int, msg_id: int):
 # ---------------------------------------------------------------------------
 # GPLINKS SHORTENER ENGINE (STRICT 1 FILE = 1 AD VERIFICATION)
 # ---------------------------------------------------------------------------
+# GPLINKS SHORTENER & 1-PAGE VERIFICATION ENGINE
+# ---------------------------------------------------------------------------
 def _fetch_gplinks_short_url(destination_url: str) -> str:
     """
     Calls GPLinks API synchronously (run in worker thread via asyncio.to_thread).
-    Endpoint: https://gplinks.in/api?api={GPLINKS_API_KEY}&url={DESTINATION_URL}
+    Endpoint: https://api.gplinks.com/api?api={GPLINKS_API_KEY}&url={DESTINATION_URL}
     """
-    if not GPLINKS_API_KEY:
+    api_key = (os.getenv("GPLINKS_API_KEY") or GPLINKS_API_KEY or "").strip()
+    if not api_key:
         return destination_url
 
     encoded_url = urllib.parse.quote(destination_url, safe="")
-    api_url = f"https://gplinks.in/api?api={GPLINKS_API_KEY.strip()}&url={encoded_url}"
-    try:
-        req = urllib.request.Request(
-            api_url,
-            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) CineVerseBot/2.0"}
-        )
-        with urllib.request.urlopen(req, timeout=10) as response:
-            if response.status == 200:
-                body = response.read().decode("utf-8").strip()
-                try:
-                    data = json.loads(body)
-                    if isinstance(data, dict):
-                        if data.get("status") == "success" and data.get("shortenedUrl"):
-                            return str(data["shortenedUrl"]).strip()
-                        for k in ["shortenedUrl", "short_url", "shorturl", "url"]:
-                            if data.get(k):
-                                return str(data[k]).strip()
-                except Exception:
-                    if body.startswith("http://") or body.startswith("https://"):
-                        return body
-    except Exception as e:
-        logger.warning(f"GPLinks API request error: {e}")
+    endpoints = [
+        f"https://api.gplinks.com/api?api={api_key}&url={encoded_url}",
+        f"https://gplinks.in/api?api={api_key}&url={encoded_url}"
+    ]
+    for api_url in endpoints:
+        try:
+            req = urllib.request.Request(
+                api_url,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) CineVerseBot/2.0"}
+            )
+            with urllib.request.urlopen(req, timeout=10) as response:
+                if response.status == 200:
+                    body = response.read().decode("utf-8").strip()
+                    try:
+                        data = json.loads(body)
+                        if isinstance(data, dict):
+                            if data.get("status") == "success" and data.get("shortenedUrl"):
+                                return str(data["shortenedUrl"]).strip()
+                            for k in ["shortenedUrl", "short_url", "shorturl", "url"]:
+                                if data.get(k):
+                                    return str(data[k]).strip()
+                    except Exception:
+                        if body.startswith("http://") or body.startswith("https://"):
+                            return body
+        except Exception as e:
+            logger.warning(f"GPLinks API request error on {api_url}: {e}")
 
     return destination_url
 
@@ -908,6 +918,32 @@ async def get_gplinks_short_url(destination_url: str) -> str:
 # Aliases for backwards compatibility
 _fetch_arolinks_short_url = _fetch_gplinks_short_url
 get_arolinks_short_url = get_gplinks_short_url
+
+def get_verification_landing_url(file_msg_id: int, bot_uname: str, title: str = "", quality: str = "", size_str: str = "") -> str:
+    """
+    Constructs the 1-page verification landing URL.
+    Opens verification.html with movie parameters so users undergo the 10s countdown
+    and unlock the direct Telegram deep link: https://t.me/CineVerseFilterBot?start=file_{file_id}.
+    """
+    params = {
+        "file_id": str(file_msg_id),
+        "bot": bot_uname
+    }
+    if title:
+        params["title"] = title
+    if quality:
+        params["quality"] = quality
+    if size_str:
+        params["size"] = size_str
+
+    query_str = urllib.parse.urlencode(params)
+    if VERIFY_BASE_URL:
+        base = VERIFY_BASE_URL.rstrip("/")
+        if base.endswith(".html"):
+            return f"{base}?{query_str}"
+        return f"{base}/verification.html?{query_str}"
+
+    return f"https://t.me/{bot_uname}?start=file_{file_msg_id}"
 
 async def send_gplinks_verification_card(client: Client, target_chat: Any, user_id: int, file_msg_id: int, reply_to_message: Optional[Message] = None):
     """
@@ -921,7 +957,7 @@ async def send_gplinks_verification_card(client: Client, target_chat: Any, user_
     meta = extract_movie_metadata(title)
 
     bot_uname = (await get_bot_username(client)) or os.getenv("BOT_USERNAME", "CineVerseFilterBot")
-    destination_url = f"https://t.me/{bot_uname}?start=file_{file_msg_id}"
+    destination_url = get_verification_landing_url(file_msg_id, bot_uname, meta["clean_title"], meta["quality"], size_str)
     short_url = await get_gplinks_short_url(destination_url)
 
     verify_text = (
@@ -937,7 +973,7 @@ async def send_gplinks_verification_card(client: Client, target_chat: Any, user_
         "│  ⚡ 1-STEP QUICK AD VERIFICATION         │\n"
         "├──────────────────────────────────────────┤\n"
         "│ 📍 Step: Tap 'Unlock Movie'              │\n"
-        "│         -> Wait 5s Timer -> Get Link.    │\n"
+        "│         -> Wait 10s Timer -> Unlock File.│\n"
         "├──────────────────────────────────────────┤\n"
         "│ ⏳ Movie Link Valid For: 3 MINUTES       │\n"
         "└──────────────────────────────────────────┘\n\n"
@@ -2387,9 +2423,9 @@ async def callback_router(client: Client, query: CallbackQuery):
         popup_guide = (
             "⚡ 1-STEP VERIFICATION / କେମିତି ଖୋଲିବେ:\n"
             "📍 1. Tap 'Unlock Movie'\n"
-            "⏱️ 2. Wait 5s timer on page\n"
-            "🔓 3. Click 'Get Link' -> File delivers in PM!\n"
-            "ଲିଙ୍କ୍ ଖୋଲି 5s ଅପେକ୍ଷା କରି Get Link ଦବାନ୍ତୁ!"
+            "⏱️ 2. Wait 10s circular countdown timer\n"
+            "🔓 3. Click 'UNLOCK MOVIE FILE' -> File delivers in PM!\n"
+            "ଲିଙ୍କ୍ ଖୋଲି 10s ଅପେକ୍ଷା କରି UNLOCK MOVIE FILE ଦବାନ୍ତୁ!"
         )
         await query.answer(popup_guide, show_alert=True)
 
@@ -2402,11 +2438,11 @@ async def callback_router(client: Client, query: CallbackQuery):
             "📍 **Step 1: Open the Verification Link**\n"
             "├─ Tap `[ 🔓 Unlock Movie (1-Page Verification) ]`\n"
             "└─ It opens the secure page in your browser.\n\n"
-            "⏱️ **Step 2: Wait 5 Seconds Timer**\n"
-            "├─ Scroll down slightly on the webpage.\n"
-            "└─ Wait for the 5-second countdown timer to reach 0.\n\n"
-            "🔓 **Step 3: Click Get Link**\n"
-            "├─ Click the green **GET LINK** button.\n"
+            "⏱️ **Step 2: Watch the 10-Second Countdown**\n"
+            "├─ Circular neon countdown timer shows remaining time.\n"
+            "└─ Wait for the timer to reach 0.\n\n"
+            "🔓 **Step 3: Click UNLOCK MOVIE FILE**\n"
+            "├─ Click the bright **UNLOCK MOVIE FILE** button.\n"
             "└─ You will automatically return to CineVerse Bot!\n\n"
             "🚀 **Instant Delivery:** Your requested movie file will be delivered directly here in PM!\n\n"
             "⏳ *Take your time — your link & messages are valid for 3 MINUTES!*"
@@ -2462,7 +2498,27 @@ if flask_app:
 
     @flask_app.route("/")
     def index():
+        if request and request.args.get("file_id") and send_from_directory:
+            try:
+                return send_from_directory(".", "verification.html")
+            except Exception:
+                pass
         return "OK - CineVerse Movie Search Bot is running 24/7!", 200
+
+    @flask_app.route("/verify")
+    @flask_app.route("/verification")
+    @flask_app.route("/verification.html")
+    def verification_landing():
+        if send_from_directory:
+            try:
+                return send_from_directory(".", "verification.html")
+            except Exception as e:
+                logger.error(f"Error serving verification.html: {e}")
+        try:
+            with open("verification.html", "r", encoding="utf-8") as f:
+                return f.read(), 200, {"Content-Type": "text/html; charset=utf-8"}
+        except Exception as e:
+            return f"Error loading verification page: {e}", 500
 
     @flask_app.route("/health")
     def health():
@@ -2477,7 +2533,7 @@ def start_flask_server():
 
     def run_server():
         if flask_app:
-            logger.info(f"🌐 Flask health check server listening on 0.0.0.0:{port}")
+            logger.info(f"🌐 Flask web server listening on 0.0.0.0:{port}")
             try:
                 flask_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
             except Exception as e:
@@ -2486,6 +2542,17 @@ def start_flask_server():
             from http.server import HTTPServer, BaseHTTPRequestHandler
             class FallbackHandler(BaseHTTPRequestHandler):
                 def do_GET(self):
+                    if any(self.path.startswith(p) for p in ["/verify", "/verification", "/verification.html"]):
+                        try:
+                            with open("verification.html", "rb") as f:
+                                content = f.read()
+                            self.send_response(200)
+                            self.send_header("Content-type", "text/html; charset=utf-8")
+                            self.end_headers()
+                            self.wfile.write(content)
+                            return
+                        except Exception:
+                            pass
                     self.send_response(200)
                     self.send_header("Content-type", "text/plain; charset=utf-8")
                     self.end_headers()

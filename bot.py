@@ -2166,7 +2166,7 @@ async def index_handler(client: Client, message: Message):
     status_msg = await message.reply_text(
         "⏳ **Starting Channel Indexing...**\n\n"
         f"• **Target Channels:** `{', '.join(str(c) for c in target_channels)}`\n"
-        "• Direct Bot API Chat History scanning in progress...",
+        "• Direct Bot API batch scanning in progress...",
         quote=True
     )
 
@@ -2181,78 +2181,108 @@ async def index_handler(client: Client, message: Message):
     try:
         for cid in target_channels:
             resolved_chat = await _resolve_channel_for_index(client, cid)
-            if not resolved_chat or not getattr(resolved_chat, "id", None):
-                logger.warning(f"⚠️ Cannot resolve channel peer for '{cid}' (PeerIdInvalid). Skipping channel.")
-                skipped_channels.append(str(cid))
-                continue
+            target_peer = resolved_chat.id if (resolved_chat and getattr(resolved_chat, "id", None)) else cid
+            target_title = getattr(resolved_chat, "title", str(target_peer)) if resolved_chat else str(target_peer)
+            indexed_channels.append(f"{target_title} (`{target_peer}`)")
 
-            chat_id = resolved_chat.id
-            target_title = getattr(resolved_chat, "title", str(chat_id)) or str(chat_id)
-            indexed_channels.append(f"{target_title} (`{chat_id}`)")
-
+            # Step 1: Probe latest message ID (max_id) via dummy message or fallback
+            max_id = 0
             try:
-                async for msg in client.get_chat_history(chat_id):
-                    if not msg:
+                dummy = await client.send_message(target_peer, ".")
+                if dummy and getattr(dummy, "id", None):
+                    max_id = dummy.id
+                    try:
+                        await dummy.delete()
+                    except Exception:
+                        pass
+            except Exception as dummy_err:
+                logger.warning(f"Could not send probe message to {target_peer}: {dummy_err}")
+
+            if not max_id:
+                try:
+                    with db._get_connection() as conn:
+                        row = conn.execute("SELECT MAX(message_id) FROM movies WHERE channel_id = ?", (target_peer,)).fetchone()
+                        if row and row[0]:
+                            max_id = int(row[0]) + 1000
+                except Exception:
+                    pass
+            if not max_id:
+                max_id = 20000
+
+            logger.info(f"Indexing channel {target_peer} from ID 1 to {max_id} in batches of 100...")
+
+            # Step 2: Iterate message IDs in batches of 100
+            for i in range(1, max_id + 1, 100):
+                batch_list = list(range(i, min(i + 100, max_id + 1)))
+                try:
+                    msgs = await client.get_messages(target_peer, message_ids=batch_list)
+                    if not msgs:
                         continue
-                    total_scanned += 1
-                    media = msg.document or msg.video or msg.audio or msg.animation
-                    if media and getattr(media, 'file_id', None):
-                        total_media += 1
-                        # Title fallback: file_name = (msg.document.file_name if msg.document else None) or msg.caption or "Unknown"
-                        file_name = (msg.document.file_name if (msg.document and getattr(msg.document, "file_name", None)) else None) or msg.caption or getattr(media, "file_name", None) or "Unknown"
-                        sanitized_title = re.sub(r"[._-]+", " ", str(file_name)).strip()
-                        if not sanitized_title:
-                            sanitized_title = "Unknown"
+                    if not isinstance(msgs, list):
+                        msgs = [msgs]
+                    for msg in msgs:
+                        if not msg:
+                            continue
+                        total_scanned += len(batch_list) if msg == msgs[0] else 0
+                        media = msg.document or msg.video or msg.audio or msg.animation
+                        if media and getattr(media, "file_id", None):
+                            total_media += 1
+                            # Extract title: file_name = (msg.document.file_name if msg.document else None) or msg.caption or "Unknown"
+                            file_name = (msg.document.file_name if (msg.document and getattr(msg.document, "file_name", None)) else None) or msg.caption or getattr(media, "file_name", None) or "Unknown"
+                            sanitized_title = re.sub(r"[._-]+", " ", str(file_name)).strip()
+                            if not sanitized_title:
+                                sanitized_title = "Unknown"
 
-                        file_id = getattr(media, "file_id", None)
-                        file_size = getattr(media, "file_size", 0) or 0
-                        caption = msg.caption or sanitized_title
+                            file_id = getattr(media, "file_id", None)
+                            file_size = getattr(media, "file_size", 0) or 0
+                            caption = msg.caption or sanitized_title
 
-                        if file_id and sanitized_title:
-                            batch_buffer.append((
-                                file_id,
-                                sanitized_title,
-                                int(file_size),
-                                int(msg.id),
-                                chat_id,
-                                str(caption).strip()
-                            ))
+                            if file_id and sanitized_title:
+                                batch_buffer.append((
+                                    file_id,
+                                    sanitized_title,
+                                    int(file_size),
+                                    int(msg.id),
+                                    target_peer,
+                                    str(caption).strip()
+                                ))
 
                     if len(batch_buffer) >= 100:
                         ins_count = await db.add_movies_batch(batch_buffer)
                         added += ins_count
                         batch_buffer.clear()
 
-                    # Live progress update every 3 seconds
-                    if time.time() - last_update > 3:
-                        if batch_buffer:
-                            ins_count = await db.add_movies_batch(batch_buffer)
-                            added += ins_count
-                            batch_buffer.clear()
-                        stats = await db.get_stats()
-                        try:
-                            await status_msg.edit_text(
-                                f"⏳ **Indexing in Progress (Chat History Mode)...**\n\n"
-                                f"• **Current Channel:** `{target_title}` (`{chat_id}`)\n"
-                                f"• **Messages Scanned:** `{total_scanned}`\n"
-                                f"• **Videos/Files Found:** `{total_media}`\n"
-                                f"• **Newly Added:** `{added}`\n"
-                                f"🎬 **Total Movies in DB:** `{stats['movies']}`"
-                            )
-                        except MessageNotModified:
-                            pass
-                        except Exception:
-                            pass
-                        last_update = time.time()
+                    await asyncio.sleep(0.02)
 
-            except (PeerIdInvalid, RPCError) as rpc_err:
-                logger.warning(f"⚠️ RPC error during get_chat_history for channel {chat_id}: {rpc_err}")
-            except FloodWait as fw:
-                wait_time = int(getattr(fw, "value", getattr(fw, "x", 30)))
-                logger.warning(f"FloodWait during indexing: sleeping {wait_time}s")
-                await asyncio.sleep(wait_time)
-            except Exception as e:
-                logger.warning(f"⚠️ Exception during chat history for channel {chat_id}: {e}")
+                except FloodWait as fw:
+                    wait_time = int(getattr(fw, "value", getattr(fw, "x", 30)))
+                    logger.warning(f"FloodWait during indexing: sleeping {wait_time}s")
+                    await asyncio.sleep(wait_time)
+                except Exception as e:
+                    logger.warning(f"⚠️ Exception during get_messages batch {batch_list[0]}-{batch_list[-1]} for channel {target_peer}: {e}")
+
+                # Live progress update every 3 seconds
+                if time.time() - last_update > 3:
+                    if batch_buffer:
+                        ins_count = await db.add_movies_batch(batch_buffer)
+                        added += ins_count
+                        batch_buffer.clear()
+                    stats = await db.get_stats()
+                    try:
+                        await status_msg.edit_text(
+                            f"⏳ **Indexing in Progress (Bot API Batch Mode)...**\n\n"
+                            f"• **Current Channel:** `{target_title}` (`{target_peer}`)\n"
+                            f"• **Scanning Range:** IDs `{batch_list[0]}` - `{batch_list[-1]}` (of `{max_id}`)\n"
+                            f"• **Messages Scanned:** `{total_scanned}`\n"
+                            f"• **Videos/Files Found:** `{total_media}`\n"
+                            f"• **Newly Added:** `{added}`\n"
+                            f"🎬 **Total Movies in DB:** `{stats['movies']}`"
+                        )
+                    except MessageNotModified:
+                        pass
+                    except Exception:
+                        pass
+                    last_update = time.time()
 
             # Flush after each channel
             if batch_buffer:

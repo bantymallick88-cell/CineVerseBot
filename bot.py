@@ -553,6 +553,21 @@ class Database:
                     (f"%{q}%", f"%{q}%")
                 )
                 raw_rows = cursor.fetchall()
+                if not raw_rows:
+                    words = q.split()
+                    if words:
+                        conditions = []
+                        params = []
+                        for w in words:
+                            conditions.append("(LOWER(file_name) LIKE ? OR LOWER(caption) LIKE ?)")
+                            params.extend([f"%{w}%", f"%{w}%"])
+                        where_sql = " AND ".join(conditions)
+                        cursor.execute(
+                            f"SELECT file_id, file_name, file_size, caption FROM movies WHERE {where_sql} LIMIT 15",
+                            params
+                        )
+                        raw_rows = cursor.fetchall()
+
                 results = []
                 for row in raw_rows:
                     f_id = str(row[0] or "")
@@ -593,15 +608,9 @@ class Database:
                 )
                 raw_rows = cursor.fetchall()
 
-                count_res = cursor.execute(
-                    "SELECT COUNT(*) FROM movies WHERE LOWER(file_name) LIKE ? OR LOWER(caption) LIKE ?",
-                    (f"%{q}%", f"%{q}%")
-                ).fetchone()
-                total = int(count_res[0]) if count_res else len(raw_rows)
-
-                if total == 0 and (" " in q or "_" in q or "." in q):
-                    words = [w for w in re.split(r"[\s._-]+", q) if w]
-                    if len(words) > 1:
+                if not raw_rows:
+                    words = q.split()
+                    if words:
                         word_conds = []
                         word_params = []
                         for w in words:
@@ -618,6 +627,14 @@ class Database:
                             word_params
                         ).fetchone()
                         total = int(count_res[0]) if count_res else len(raw_rows)
+                    else:
+                        total = 0
+                else:
+                    count_res = cursor.execute(
+                        "SELECT COUNT(*) FROM movies WHERE LOWER(file_name) LIKE ? OR LOWER(caption) LIKE ?",
+                        (f"%{q}%", f"%{q}%")
+                    ).fetchone()
+                    total = int(count_res[0]) if count_res else len(raw_rows)
 
                 normalized_rows: List[Dict[str, Any]] = []
                 for row in raw_rows:
@@ -2710,7 +2727,7 @@ async def auto_filter_handler(client: Client, message: Message):
         return
 
     try:
-        # Search using wildcard SQL:
+        # 1. Flexible case-insensitive SQL wildcard search across file_name and caption:
         # SELECT file_id, file_name, file_size, caption FROM movies WHERE LOWER(file_name) LIKE ? OR LOWER(caption) LIKE ? LIMIT 15
         # passing (f"%{q}%", f"%{q}%")
         with db._get_connection() as conn:
@@ -2720,11 +2737,37 @@ async def auto_filter_handler(client: Client, message: Message):
                 (f"%{q}%", f"%{q}%")
             )
             raw_rows = cursor.fetchall()
-            count_row = cursor.execute(
-                "SELECT COUNT(*) FROM movies WHERE LOWER(file_name) LIKE ? OR LOWER(caption) LIKE ?",
-                (f"%{q}%", f"%{q}%")
-            ).fetchone()
-            total = int(count_row[0]) if count_row else len(raw_rows)
+
+            # 2. Word-by-word fallback:
+            # If direct query returns no rows, split query into words (words = q.split()) and
+            # match records where ALL words exist in file_name or caption using AND SQL conditions.
+            if not raw_rows:
+                words = q.split()
+                if words:
+                    conditions = []
+                    params = []
+                    for w in words:
+                        conditions.append("(LOWER(file_name) LIKE ? OR LOWER(caption) LIKE ?)")
+                        params.extend([f"%{w}%", f"%{w}%"])
+                    where_sql = " AND ".join(conditions)
+                    cursor.execute(
+                        f"SELECT file_id, file_name, file_size, caption FROM movies WHERE {where_sql} LIMIT 15",
+                        params
+                    )
+                    raw_rows = cursor.fetchall()
+                    count_row = cursor.execute(
+                        f"SELECT COUNT(*) FROM movies WHERE {where_sql}",
+                        params
+                    ).fetchone()
+                    total = int(count_row[0]) if count_row else len(raw_rows)
+                else:
+                    total = 0
+            else:
+                count_row = cursor.execute(
+                    "SELECT COUNT(*) FROM movies WHERE LOWER(file_name) LIKE ? OR LOWER(caption) LIKE ?",
+                    (f"%{q}%", f"%{q}%")
+                ).fetchone()
+                total = int(count_row[0]) if count_row else len(raw_rows)
 
         files = []
         for r in raw_rows:

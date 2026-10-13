@@ -2146,7 +2146,6 @@ async def index_handler(client: Client, message: Message):
         asyncio.create_task(auto_delete(message, 10))
         return
 
-    asyncio.create_task(auto_delete(message, 60))
     await db.add_user(user_id)
 
     # Determine channels to index
@@ -2169,6 +2168,7 @@ async def index_handler(client: Client, message: Message):
         "• Direct Bot API batch scanning in progress...",
         quote=True
     )
+    status_msg_id = status_msg.id
 
     added = 0
     total_scanned = 0
@@ -2280,8 +2280,12 @@ async def index_handler(client: Client, message: Message):
                         )
                     except MessageNotModified:
                         pass
-                    except Exception:
-                        pass
+                    except FloodWait as fw:
+                        wait_time = int(getattr(fw, "value", getattr(fw, "x", 5)))
+                        logger.warning(f"FloodWait during status edit: sleeping {wait_time}s")
+                        await asyncio.sleep(wait_time)
+                    except Exception as edit_err:
+                        logger.debug(f"Could not edit status message {status_msg_id}: {edit_err}")
                     last_update = time.time()
 
             # Flush after each channel
@@ -2302,9 +2306,12 @@ async def index_handler(client: Client, message: Message):
         if skipped_channels:
             summary_lines.append(f"• ⚠️ **Unresolvable Channels Skipped:** `{', '.join(skipped_channels)}`")
 
-        await status_msg.edit_text("\n".join(summary_lines))
-        if status_msg:
-            asyncio.create_task(auto_delete(status_msg, 120, reply_to_message=message))
+        try:
+            await status_msg.edit_text("\n".join(summary_lines))
+        except MessageNotModified:
+            pass
+        except Exception as edit_err:
+            logger.warning(f"Failed to edit final completion message {status_msg_id}: {edit_err}")
 
     except Exception as e:
         logger.error(f"Error in batch indexing: {e}", exc_info=True)
@@ -2313,12 +2320,15 @@ async def index_handler(client: Client, message: Message):
             added += ins_count
             batch_buffer.clear()
         stats = await db.get_stats()
-        await status_msg.edit_text(
-            f"⚠️ **Indexing Notice:** {e}\n\n"
-            f"• **Messages Scanned:** `{total_scanned}`\n"
-            f"• **New Titles Added:** `{added}`\n"
-            f"🎬 **Total Movies in Database:** `{stats['movies']}`"
-        )
+        try:
+            await status_msg.edit_text(
+                f"⚠️ **Indexing Notice:** {e}\n\n"
+                f"• **Messages Scanned:** `{total_scanned}`\n"
+                f"• **New Titles Added:** `{added}`\n"
+                f"🎬 **Total Movies in Database:** `{stats['movies']}`"
+            )
+        except Exception:
+            pass
 
 # ---------------------------------------------------------------------------
 # AUTO-INDEX NEW UPLOADS IN CHANNEL

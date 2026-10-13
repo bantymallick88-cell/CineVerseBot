@@ -410,7 +410,7 @@ class Database:
                 movies_db_path = os.path.join(os.getcwd(), "database", "movies.db")
                 if os.path.exists(movies_db_path) and os.path.abspath(movies_db_path) != os.path.abspath(self.db_path):
                     try:
-                        with sqlite3.connect(movies_db_path) as mconn:
+                        with sqlite3.connect(movies_db_path, check_same_thread=False) as mconn:
                             mconn.execute(
                                 """
                                 INSERT OR IGNORE INTO movies (file_id, title, file_size, message_id, channel_id, file_name, caption)
@@ -469,7 +469,7 @@ class Database:
                 movies_db_path = os.path.join(os.getcwd(), "database", "movies.db")
                 if os.path.exists(movies_db_path) and os.path.abspath(movies_db_path) != os.path.abspath(self.db_path):
                     try:
-                        with sqlite3.connect(movies_db_path) as mconn:
+                        with sqlite3.connect(movies_db_path, check_same_thread=False) as mconn:
                             mconn.executemany(
                                 """
                                 INSERT OR IGNORE INTO movies (file_id, title, file_size, message_id, channel_id, file_name, caption)
@@ -498,7 +498,7 @@ class Database:
                 movies_db_path = os.path.join(os.getcwd(), "database", "movies.db")
                 if os.path.exists(movies_db_path) and os.path.abspath(movies_db_path) != os.path.abspath(self.db_path):
                     try:
-                        with sqlite3.connect(movies_db_path) as mconn:
+                        with sqlite3.connect(movies_db_path, check_same_thread=False) as mconn:
                             mconn.execute("DELETE FROM movies WHERE rowid NOT IN (SELECT MIN(rowid) FROM movies GROUP BY file_id);")
                             mconn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_movies_unique_file_id ON movies(file_id);")
                             mconn.commit()
@@ -1139,7 +1139,8 @@ async def build_pagination_markup(files: List[Dict[str, Any]], cache_id: str, cu
         size_str = format_size(f.get("file_size", 0))
         meta = extract_movie_metadata(name)
         display_name = (meta["clean_title"][:26] + "...") if len(meta["clean_title"]) > 29 else meta["clean_title"]
-        btn_url = f"{base_verify_url}/verify?file_id={f['message_id']}"
+        target_btn_id = f.get('message_id') or f.get('file_id')
+        btn_url = f"{base_verify_url}/verify?file_id={target_btn_id}"
         btn_text = f"📥 [ {meta['quality']} │ {size_str} ] ▷ {display_name}"
         buttons.append([InlineKeyboardButton(text=btn_text, web_app=WebAppInfo(url=btn_url))])
 
@@ -2224,7 +2225,7 @@ async def index_handler(client: Client, message: Message):
     movies_db_path = os.path.join(os.getcwd(), "database", "movies.db")
     if os.path.exists(movies_db_path) and os.path.abspath(movies_db_path) != os.path.abspath(db.db_path):
         try:
-            with sqlite3.connect(movies_db_path) as mconn:
+            with sqlite3.connect(movies_db_path, check_same_thread=False) as mconn:
                 mconn.execute("DELETE FROM movies;")
                 mconn.commit()
         except Exception:
@@ -2243,15 +2244,31 @@ async def index_handler(client: Client, message: Message):
     # 1. Non-blocking background task: Network timeouts never freeze the message handler
     asyncio.create_task(_async_channel_indexer_task(client, message, status_msg, target_channels))
 
-async def _async_channel_indexer_task(client: Client, message: Message, status_msg: Message, target_channels: List[Any]):
-    status_msg_id = status_msg.id
+INDEXING_IN_PROGRESS: bool = False
 
-    # Reset movies table on index before scanning
+async def _async_channel_indexer_task(client: Client, message: Optional[Message] = None, status_msg: Optional[Message] = None, target_channels: Optional[List[Any]] = None):
+    global INDEXING_IN_PROGRESS
+    if INDEXING_IN_PROGRESS:
+        logger.warning("Indexing is already running in background. Skipping duplicate run.")
+        if status_msg:
+            try:
+                await status_msg.edit_text("⏳ **Indexing is already running in the background...**")
+            except Exception:
+                pass
+        return
+    INDEXING_IN_PROGRESS = True
+    status_msg_id = status_msg.id if status_msg else None
+    if not target_channels:
+        target_channels = ["@database_Cineverse01", "@database_Cineverse"]
+
+    # Reset movies table on index before scanning only if status_msg is provided (explicit /index) or if DB is empty
     with db._get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM movies;")
-        conn.commit()
-    logger.info("Reset movies table at start of _async_channel_indexer_task.")
+        curr_cnt = cursor.execute("SELECT COUNT(*) FROM movies;").fetchone()[0]
+        if status_msg is not None or curr_cnt == 0:
+            cursor.execute("DELETE FROM movies;")
+            conn.commit()
+            logger.info("Reset movies table at start of _async_channel_indexer_task.")
 
     added = 0
     total_scanned = 0
@@ -2358,25 +2375,26 @@ async def _async_channel_indexer_task(client: Client, message: Message, status_m
                     total_scanned += len(batch_ids)
 
                 # Edit the status message after every 100 messages showing imported count from SELECT COUNT(*) FROM movies
-                try:
-                    with db._get_connection() as count_conn:
-                        total_in_db = count_conn.execute("SELECT COUNT(*) FROM movies;").fetchone()[0]
-                    await status_msg.edit_text(
-                        f"⏳ **Indexing in Progress (Bot API Batch Mode)...**\n\n"
-                        f"• **Current Channel:** `{target_title}` (`{chat.id}`)\n"
-                        f"• **Scanning Range:** IDs `{batch_ids[0]}` - `{batch_ids[-1]}` (of `{max_id}`)\n"
-                        f"• **Messages Scanned:** `{total_scanned}`\n"
-                        f"• **Videos/Files Found:** `{total_media}`\n"
-                        f"• **Newly Imported:** `{added}`\n"
-                        f"🎬 **Total Movies in DB:** `{total_in_db}`"
-                    )
-                except MessageNotModified:
-                    pass
-                except FloodWait as e:
-                    logger.warning(f"FloodWait during status edit: sleeping {e.value}s")
-                    await asyncio.sleep(e.value)
-                except Exception as edit_err:
-                    logger.debug(f"Could not edit status message {status_msg_id}: {edit_err}")
+                if status_msg:
+                    try:
+                        with db._get_connection() as count_conn:
+                            total_in_db = count_conn.execute("SELECT COUNT(*) FROM movies;").fetchone()[0]
+                        await status_msg.edit_text(
+                            f"⏳ **Indexing in Progress (Bot API Batch Mode)...**\n\n"
+                            f"• **Current Channel:** `{target_title}` (`{chat.id}`)\n"
+                            f"• **Scanning Range:** IDs `{batch_ids[0]}` - `{batch_ids[-1]}` (of `{max_id}`)\n"
+                            f"• **Messages Scanned:** `{total_scanned}`\n"
+                            f"• **Videos/Files Found:** `{total_media}`\n"
+                            f"• **Newly Imported:** `{added}`\n"
+                            f"🎬 **Total Movies in DB:** `{total_in_db}`"
+                        )
+                    except MessageNotModified:
+                        pass
+                    except FloodWait as e:
+                        logger.warning(f"FloodWait during status edit: sleeping {e.value}s")
+                        await asyncio.sleep(e.value)
+                    except Exception as edit_err:
+                        logger.debug(f"Could not edit status message {status_msg_id}: {edit_err}")
 
                 await asyncio.sleep(0.05)
 
@@ -2384,7 +2402,7 @@ async def _async_channel_indexer_task(client: Client, message: Message, status_m
             movies_db_path = os.path.join(os.getcwd(), "database", "movies.db")
             if os.path.exists(movies_db_path) and os.path.abspath(movies_db_path) != os.path.abspath(db.db_path):
                 try:
-                    with db._get_connection() as sconn, sqlite3.connect(movies_db_path) as mconn:
+                    with db._get_connection() as sconn, sqlite3.connect(movies_db_path, check_same_thread=False) as mconn:
                         mcur = mconn.cursor()
                         rows = sconn.execute("SELECT file_id, file_name, file_size, caption, title, message_id, channel_id FROM movies WHERE channel_id = ?", (chat.id,)).fetchall()
                         for r in rows:
@@ -2409,26 +2427,30 @@ async def _async_channel_indexer_task(client: Client, message: Message, status_m
         if skipped_channels:
             summary_lines.append(f"• ⚠️ **Unresolvable Channels Skipped:** `{', '.join(skipped_channels)}`")
 
-        try:
-            await status_msg.edit_text("\n".join(summary_lines))
-        except MessageNotModified:
-            pass
-        except Exception as edit_err:
-            logger.warning(f"Failed to edit final completion message {status_msg_id}: {edit_err}")
+        if status_msg:
+            try:
+                await status_msg.edit_text("\n".join(summary_lines))
+            except MessageNotModified:
+                pass
+            except Exception as edit_err:
+                logger.warning(f"Failed to edit final completion message {status_msg_id}: {edit_err}")
 
     except Exception as e:
         logger.error(f"Error in batch indexing: {e}", exc_info=True)
-        try:
-            with db._get_connection() as count_conn:
-                total_in_db = count_conn.execute("SELECT COUNT(*) FROM movies;").fetchone()[0]
-            await status_msg.edit_text(
-                f"⚠️ **Indexing Notice:** {e}\n\n"
-                f"• **Messages Scanned:** `{total_scanned}`\n"
-                f"• **Newly Imported:** `{added}`\n"
-                f"🎬 **Total Movies in Database:** `{total_in_db}`"
-            )
-        except Exception:
-            pass
+        if status_msg:
+            try:
+                with db._get_connection() as count_conn:
+                    total_in_db = count_conn.execute("SELECT COUNT(*) FROM movies;").fetchone()[0]
+                await status_msg.edit_text(
+                    f"⚠️ **Indexing Notice:** {e}\n\n"
+                    f"• **Messages Scanned:** `{total_scanned}`\n"
+                    f"• **Newly Imported:** `{added}`\n"
+                    f"🎬 **Total Movies in Database:** `{total_in_db}`"
+                )
+            except Exception:
+                pass
+    finally:
+        INDEXING_IN_PROGRESS = False
 
 # ---------------------------------------------------------------------------
 # AUTO-INDEX NEW UPLOADS IN CHANNEL
@@ -2726,8 +2748,33 @@ async def auto_filter_handler(client: Client, message: Message):
             asyncio.create_task(auto_delete(short_msg, 60, reply_to_message=message))
         return
 
+    # 1. CHECK DB COUNT AT SEARCH TIME:
+    # Inside the search query handler, before querying, print/log SELECT COUNT(*) FROM movies.
+    db_movie_count = 0
     try:
-        # 1. Flexible case-insensitive SQL wildcard search across file_name and caption:
+        with db._get_connection() as count_check_conn:
+            cnt_res = count_check_conn.execute("SELECT COUNT(*) FROM movies;").fetchone()
+            db_movie_count = int(cnt_res[0]) if cnt_res else 0
+    except Exception as count_err:
+        logger.error(f"Error checking movies table count at search time: {count_err}")
+
+    logger.info(f"📊 [SEARCH-COUNT-CHECK] Current database movies count: {db_movie_count} | Query: '{q}' | User ID: {user_id}")
+    print(f"📊 [SEARCH-COUNT-CHECK] Current database movies count: {db_movie_count} | Query: '{q}' | User ID: {user_id}")
+
+    # If count is 0, auto-trigger a background re-index or log a critical notice so database state is clear.
+    if db_movie_count == 0:
+        logger.critical(
+            f"🚨 [CRITICAL NOTICE] Movies table is completely EMPTY (COUNT = 0) at search time for query '{q}'! "
+            f"Auto-triggering background re-index from target channels (@database_Cineverse01, @database_Cineverse)..."
+        )
+        print(
+            f"🚨 [CRITICAL NOTICE] Movies table is completely EMPTY (COUNT = 0) at search time for query '{q}'! "
+            f"Auto-triggering background re-index from target channels (@database_Cineverse01, @database_Cineverse)..."
+        )
+        asyncio.create_task(_async_channel_indexer_task(client, message, None, ["@database_Cineverse01", "@database_Cineverse"]))
+
+    try:
+        # 2. Flexible case-insensitive SQL wildcard search across file_name and caption:
         # SELECT file_id, file_name, file_size, caption FROM movies WHERE LOWER(file_name) LIKE ? OR LOWER(caption) LIKE ? LIMIT 15
         # passing (f"%{q}%", f"%{q}%")
         with db._get_connection() as conn:

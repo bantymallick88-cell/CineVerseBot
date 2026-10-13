@@ -220,10 +220,6 @@ WELCOME_IMAGE_URL = get_env_str(
     "WELCOME_IMAGE_URL",
     "https://images.unsplash.com/photo-1536440136628-849c177e76a1?q=80&w=1200&auto=format&fit=crop"
 )
-POPUP_ANIMATION_URL = get_env_str(
-    "POPUP_ANIMATION_URL",
-    os.getenv("VAULT_ANIMATION_URL", "https://media.giphy.com/media/xUPGcC4A6ElcqtUJd6/giphy.gif")
-)
 
 # Profanity and Abusive Words pattern for Anti-Spam moderation
 SPAM_WORDS_PATTERN = re.compile(
@@ -1204,42 +1200,51 @@ async def deliver_movie_file(client: Client, user_id: int, msg_id: int):
 
         meta = extract_movie_metadata(title)
 
-        # 1. VISUAL ANIMATION POPUP (2.5 SECONDS):
-        # Right after Force Sub verification in PM, send high-quality animated media popup
-        pop_msg = None
+        # Pure text-based dynamic rotating hourglass/timer countdown (3-4 seconds)
+        timer_msg = None
         try:
-            try:
-                pop_msg = await client.send_animation(
-                    chat_id=user_id,
-                    animation=POPUP_ANIMATION_URL,
-                    caption="⏳ Preparing your media vault file..."
-                )
-            except Exception as anim_err:
-                logger.warning(f"send_animation failed ({anim_err}), attempting send_video...")
-                try:
-                    pop_msg = await client.send_video(
-                        chat_id=user_id,
-                        video=POPUP_ANIMATION_URL,
-                        caption="⏳ Preparing your media vault file..."
-                    )
-                except Exception as vid_err:
-                    logger.warning(f"send_video failed ({vid_err}), falling back to text notification...")
-                    pop_msg = await client.send_message(
-                        chat_id=user_id,
-                        text="⏳ Preparing your media vault file..."
-                    )
+            timer_msg = await client.send_message(
+                chat_id=user_id,
+                text="⌛ Preparing your media vault file... [ 3s ]"
+            )
         except Exception as e:
-            logger.warning(f"Could not send animated popup media: {e}")
+            logger.warning(f"Could not send timer message: {e}")
 
-        # Keep it visible for exactly 2.5 seconds
-        await asyncio.sleep(2.5)
-
-        # 2. CLEANUP: Delete the animated popup video message after 2.5 seconds
-        if pop_msg:
+        # Second 2: ⏳ Encrypting high-speed link... [ 2s ]
+        await asyncio.sleep(1)
+        if timer_msg:
             try:
-                await pop_msg.delete()
-            except Exception as del_err:
-                logger.debug(f"Popup cleanup error: {del_err}")
+                await client.edit_message_text(
+                    chat_id=user_id,
+                    message_id=timer_msg.id,
+                    text="⏳ Encrypting high-speed link... [ 2s ]"
+                )
+            except Exception as e:
+                logger.debug(f"Timer step 2 edit error: {e}")
+
+        # Second 3: ⌛ Generating download stream... [ 1s ]
+        await asyncio.sleep(1)
+        if timer_msg:
+            try:
+                await client.edit_message_text(
+                    chat_id=user_id,
+                    message_id=timer_msg.id,
+                    text="⌛ Generating download stream... [ 1s ]"
+                )
+            except Exception as e:
+                logger.debug(f"Timer step 3 edit error: {e}")
+
+        # Second 4: ⚡ Ready! Delivering file now...
+        await asyncio.sleep(1)
+        if timer_msg:
+            try:
+                await client.edit_message_text(
+                    chat_id=user_id,
+                    message_id=timer_msg.id,
+                    text="⚡ Ready! Delivering file now..."
+                )
+            except Exception as e:
+                logger.debug(f"Timer step 4 edit error: {e}")
 
         caption = (
             "┌──────────────────────────────────────────┐\n"
@@ -1286,6 +1291,12 @@ async def deliver_movie_file(client: Client, user_id: int, msg_id: int):
                 except Exception as copy_err:
                     logger.warning(f"copy_message failed for {target_msg_id}: {copy_err}")
                     sent_file = None
+
+        if timer_msg:
+            try:
+                await timer_msg.delete()
+            except Exception as del_err:
+                logger.debug(f"Timer message cleanup error: {del_err}")
 
         if sent_file:
             asyncio.create_task(auto_delete(sent_file, 120))

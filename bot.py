@@ -91,26 +91,10 @@ API_ID = get_env_int("API_ID", 36971153)
 API_HASH = get_env_str("API_HASH", "e5e4c9c88d0c5c2654d8fbe985523c9c")
 BOT_TOKEN = get_env_str("BOT_TOKEN", "8994566569:AAG8pdApyO7ut1BrG6xdstrkdWL1ZUProfY")
 
-DEFAULT_DB_CHANNELS = [-1004312780149, -1004391530222]
-
-def parse_db_channel_ids() -> List[Any]:
-    raw_channels = os.getenv("DB_CHANNEL_ID", "-1004312780149, -1004391530222")
-    channels = []
-    for item in raw_channels.split(","):
-        item = item.strip()
-        if not item:
-            continue
-        try:
-            channels.append(int(item))
-        except (ValueError, TypeError):
-            channels.append(str(item).lstrip("@"))
-    for def_ch in DEFAULT_DB_CHANNELS:
-        if def_ch not in channels and str(def_ch) not in channels:
-            channels.append(def_ch)
-    return channels
-
-DB_CHANNEL_IDS = parse_db_channel_ids()
-DB_CHANNEL_ID = DB_CHANNEL_IDS[0] if DB_CHANNEL_IDS else -1004312780149
+TARGET_CHANNELS = [-1004312780149, -1004391530222]
+DEFAULT_DB_CHANNELS = list(TARGET_CHANNELS)
+DB_CHANNEL_IDS = list(TARGET_CHANNELS)
+DB_CHANNEL_ID = TARGET_CHANNELS[0]
 CHANNEL_ID = DB_CHANNEL_ID
 
 ADMIN_ID = 7831101047
@@ -628,7 +612,23 @@ class Database:
                 total_res = cursor.execute(count_sql, params).fetchone()
                 total = int(total_res[0]) if total_res else 0
                 if total == 0:
-                    return [], 0
+                    # Direct case-insensitive wildcard (LIKE '%query%') across file_name and caption
+                    direct_wildcard = f"%{clean_query.lower()}%"
+                    sub_conds = [f"LOWER({col}) LIKE ?" for col in search_cols]
+                    where_sql = f"({' OR '.join(sub_conds)})"
+                    params = [direct_wildcard for _ in search_cols]
+                    count_sql = f"SELECT COUNT(*) FROM {target_table} WHERE {where_sql};"
+                    total_res = cursor.execute(count_sql, params).fetchone()
+                    total = int(total_res[0]) if total_res else 0
+                    if total == 0 and len(raw_words) > 1:
+                        # Sequence wildcard e.g. %sanam%bewafa%
+                        seq_wildcard = "%" + "%".join([w.lower() for w in raw_words]) + "%"
+                        params = [seq_wildcard for _ in search_cols]
+                        total_res = cursor.execute(count_sql, params).fetchone()
+                        total = int(total_res[0]) if total_res else 0
+
+                    if total == 0:
+                        return [], 0
 
                 primary_col = "file_name" if "file_name" in search_cols else title_col
                 cap_col = "caption" if "caption" in search_cols else primary_col
@@ -2139,7 +2139,7 @@ async def _resolve_channel_for_index(client: Client, target: Any) -> Optional[An
         if uname:
             candidates.extend([f"@{uname}", uname])
 
-    for link in [CHANNEL_LINK, FSUB_CHANNEL_LINK, FSUB_GROUP_LINK, "https://t.me/CineVerseFlimSearch", "cenahub01"]:
+    for link in [CHANNEL_LINK, FSUB_CHANNEL_LINK, "https://t.me/CineVerseFlimSearch", "cenahub01"]:
         if link:
             clean_uname = link.split("t.me/")[-1].strip("/").lstrip("@")
             if clean_uname:
@@ -2148,7 +2148,7 @@ async def _resolve_channel_for_index(client: Client, target: Any) -> Optional[An
     seen = set()
     unique_candidates: List[Any] = []
     for c in candidates:
-        if c not in seen and c is not None:
+        if c not in seen and c is not None and c not in [-1004427640174, "-1004427640174"]:
             seen.add(c)
             unique_candidates.append(c)
 
@@ -2156,6 +2156,8 @@ async def _resolve_channel_for_index(client: Client, target: Any) -> Optional[An
         try:
             chat = await client.get_chat(cand)
             if chat and getattr(chat, "id", None):
+                if chat.id == -1004427640174 or str(chat.id) == "-1004427640174":
+                    continue
                 logger.info(f"✅ Successfully resolved channel entity via '{cand}': {chat.id} ('{getattr(chat, 'title', '')}')")
                 return chat
         except (PeerIdInvalid, RPCError, Exception):
@@ -2183,19 +2185,8 @@ async def index_handler(client: Client, message: Message):
 
     await db.add_user(user_id)
 
-    # Determine channels to index
-    target_channels = []
-    if message.command and len(message.command) > 1:
-        for arg in message.command[1:]:
-            arg = arg.strip()
-            if not arg:
-                continue
-            try:
-                target_channels.append(int(arg))
-            except (ValueError, TypeError):
-                target_channels.append(arg)
-    if not target_channels:
-        target_channels = list(DB_CHANNEL_IDS) if DB_CHANNEL_IDS else [-1004312780149, -1004391530222]
+    # Force hardcoded channel list strictly to TARGET_CHANNELS [-1004312780149, -1004391530222]
+    target_channels = [cid for cid in TARGET_CHANNELS if cid != -1004427640174]
 
     status_msg = await message.reply_text(
         "⏳ **Starting Channel Indexing...**\n\n"
@@ -2288,9 +2279,11 @@ async def _async_channel_indexer_task(client: Client, message: Message, status_m
                         media = msg.document or msg.video or msg.audio or msg.animation
                         if media and getattr(media, "file_id", None):
                             total_media += 1
-                            # Extract title: file_name = (msg.document.file_name if msg.document else None) or msg.caption or "Unknown"
-                            file_name = (msg.document.file_name if (msg.document and getattr(msg.document, "file_name", None)) else None) or msg.caption or getattr(media, "file_name", None) or "Unknown"
-                            sanitized_title = re.sub(r"[._-]+", " ", str(file_name)).strip()
+                            # Extract valid title from msg.document.file_name, msg.video.file_name, or msg.caption
+                            doc_name = getattr(msg.document, "file_name", None) if msg.document else None
+                            vid_name = getattr(msg.video, "file_name", None) if msg.video else None
+                            raw_title = doc_name or vid_name or msg.caption or getattr(media, "file_name", None) or "Unknown"
+                            sanitized_title = re.sub(r"[._-]+", " ", str(raw_title)).strip()
                             if not sanitized_title:
                                 sanitized_title = "Unknown"
 
@@ -2409,7 +2402,9 @@ async def auto_index_channel(client: Client, message: Message):
     if not file_id:
         return
 
-    raw_name = (message.document.file_name if (message.document and getattr(message.document, "file_name", None)) else None) or message.caption or getattr(media, "file_name", None) or "Unknown"
+    doc_name = getattr(message.document, "file_name", None) if message.document else None
+    vid_name = getattr(message.video, "file_name", None) if message.video else None
+    raw_name = doc_name or vid_name or message.caption or getattr(media, "file_name", None) or "Unknown"
     sanitized_title = re.sub(r"[._-]+", " ", str(raw_name)).strip()
     if not sanitized_title:
         sanitized_title = "Unknown"

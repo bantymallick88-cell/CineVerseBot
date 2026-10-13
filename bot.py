@@ -698,7 +698,7 @@ class Database:
     def _get_stats(self) -> Dict[str, int]:
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            total_movies = cursor.execute("SELECT COUNT(DISTINCT file_id) FROM movies;").fetchone()[0]
+            total_movies = cursor.execute("SELECT COUNT(*) FROM movies;").fetchone()[0]
             total_users = cursor.execute("SELECT COUNT(*) FROM users;").fetchone()[0]
             return {"movies": total_movies, "users": total_users}
 
@@ -2212,7 +2212,6 @@ async def _async_channel_indexer_task(client: Client, message: Message, status_m
     added = 0
     total_scanned = 0
     total_media = 0
-    batch_buffer: List[Any] = []
     indexed_channels: List[str] = []
     skipped_channels: List[str] = []
 
@@ -2272,42 +2271,68 @@ async def _async_channel_indexer_task(client: Client, message: Message, status_m
                 if msgs:
                     if not isinstance(msgs, list):
                         msgs = [msgs]
-                    for msg in msgs:
-                        if not msg:
-                            continue
-                        total_scanned += 1
-                        media = msg.document or msg.video or msg.audio or msg.animation
-                        if media and getattr(media, "file_id", None):
-                            total_media += 1
-                            # Extract valid title from msg.document.file_name, msg.video.file_name, or msg.caption
-                            doc_name = getattr(msg.document, "file_name", None) if msg.document else None
-                            vid_name = getattr(msg.video, "file_name", None) if msg.video else None
-                            raw_title = doc_name or vid_name or msg.caption or getattr(media, "file_name", None) or "Unknown"
-                            sanitized_title = re.sub(r"[._-]+", " ", str(raw_title)).strip()
-                            if not sanitized_title:
-                                sanitized_title = "Unknown"
+                    with db._get_connection() as conn:
+                        cursor = conn.cursor()
+                        for msg in msgs:
+                            if not msg:
+                                continue
+                            total_scanned += 1
+                            media = msg.document or msg.video or msg.audio or msg.animation
+                            if media and getattr(media, "file_id", None):
+                                total_media += 1
+                                file_id = media.file_id
+                                file_name = getattr(media, "file_name", None) or msg.caption or "Unknown"
+                                file_size = getattr(media, "file_size", 0)
+                                caption = msg.caption or ""
+                                # Clean title (replace '.', '_', '-' with spaces)
+                                clean_title = file_name.replace(".", " ").replace("_", " ").replace("-", " ")
+                                cursor.execute(
+                                    "INSERT OR IGNORE INTO movies (file_id, file_name, file_size, caption) VALUES (?, ?, ?, ?)",
+                                    (file_id, clean_title, file_size, caption)
+                                )
+                                if cursor.rowcount > 0:
+                                    added += 1
+                                try:
+                                    cursor.execute(
+                                        "UPDATE movies SET title = COALESCE(title, ?), message_id = COALESCE(message_id, ?), channel_id = COALESCE(channel_id, ?) WHERE file_id = ?",
+                                        (clean_title, int(msg.id), target_peer, file_id)
+                                    )
+                                except Exception:
+                                    pass
+                        conn.commit()
 
-                            file_id = getattr(media, "file_id", None)
-                            file_size = getattr(media, "file_size", 0) or 0
-                            caption = msg.caption or sanitized_title
-
-                            if file_id and sanitized_title:
-                                batch_buffer.append((
-                                    file_id,
-                                    sanitized_title,
-                                    int(file_size),
-                                    int(msg.id),
-                                    target_peer,
-                                    str(caption).strip()
-                                ))
+                    # Mirror to secondary database/movies.db if present
+                    movies_db_path = os.path.join(os.getcwd(), "database", "movies.db")
+                    if os.path.exists(movies_db_path) and os.path.abspath(movies_db_path) != os.path.abspath(db.db_path):
+                        try:
+                            with sqlite3.connect(movies_db_path) as mconn:
+                                mcur = mconn.cursor()
+                                for msg in msgs:
+                                    if not msg:
+                                        continue
+                                    media = msg.document or msg.video or msg.audio or msg.animation
+                                    if media and getattr(media, "file_id", None):
+                                        file_id = media.file_id
+                                        file_name = getattr(media, "file_name", None) or msg.caption or "Unknown"
+                                        file_size = getattr(media, "file_size", 0)
+                                        caption = msg.caption or ""
+                                        clean_title = file_name.replace(".", " ").replace("_", " ").replace("-", " ")
+                                        mcur.execute(
+                                            "INSERT OR IGNORE INTO movies (file_id, file_name, file_size, caption) VALUES (?, ?, ?, ?)",
+                                            (file_id, clean_title, file_size, caption)
+                                        )
+                                        try:
+                                            mcur.execute(
+                                                "UPDATE movies SET title = COALESCE(title, ?), message_id = COALESCE(message_id, ?), channel_id = COALESCE(channel_id, ?) WHERE file_id = ?",
+                                                (clean_title, int(msg.id), target_peer, file_id)
+                                            )
+                                        except Exception:
+                                            pass
+                                mconn.commit()
+                        except Exception:
+                            pass
                 else:
                     total_scanned += len(batch_list)
-
-                # Flush batch buffer immediately
-                if batch_buffer:
-                    ins_count = await db.add_movies_batch(batch_buffer)
-                    added += ins_count
-                    batch_buffer.clear()
 
                 # Edit in-place status message with current progress after every batch
                 try:
@@ -2318,7 +2343,7 @@ async def _async_channel_indexer_task(client: Client, message: Message, status_m
                         f"• **Scanning Range:** IDs `{batch_list[0]}` - `{batch_list[-1]}` (of `{max_id}`)\n"
                         f"• **Messages Scanned:** `{total_scanned}`\n"
                         f"• **Videos/Files Found:** `{total_media}`\n"
-                        f"• **Newly Added:** `{added}`\n"
+                        f"• **Newly Imported:** `{added}`\n"
                         f"🎬 **Total Movies in DB:** `{stats['movies']}`"
                     )
                 except MessageNotModified:
@@ -2331,19 +2356,13 @@ async def _async_channel_indexer_task(client: Client, message: Message, status_m
 
                 await asyncio.sleep(0.05)
 
-            # Flush after each channel
-            if batch_buffer:
-                ins_count = await db.add_movies_batch(batch_buffer)
-                added += ins_count
-                batch_buffer.clear()
-
         stats = await db.get_stats()
         summary_lines = [
             "✅ **Full Channel Indexing Complete!**\n",
             f"• **Channels Indexed:** {', '.join(indexed_channels) if indexed_channels else 'None'}",
             f"• **Total Messages Scanned:** `{total_scanned}`",
             f"• **Total Videos/Files Identified:** `{total_media}`",
-            f"• **New Titles Imported:** `{added}`",
+            f"• **Newly Imported:** `{added}`",
             f"🎬 **Total Movies in Database:** `{stats['movies']}`"
         ]
         if skipped_channels:
@@ -2358,16 +2377,12 @@ async def _async_channel_indexer_task(client: Client, message: Message, status_m
 
     except Exception as e:
         logger.error(f"Error in batch indexing: {e}", exc_info=True)
-        if batch_buffer:
-            ins_count = await db.add_movies_batch(batch_buffer)
-            added += ins_count
-            batch_buffer.clear()
         stats = await db.get_stats()
         try:
             await status_msg.edit_text(
                 f"⚠️ **Indexing Notice:** {e}\n\n"
                 f"• **Messages Scanned:** `{total_scanned}`\n"
-                f"• **New Titles Added:** `{added}`\n"
+                f"• **Newly Imported:** `{added}`\n"
                 f"🎬 **Total Movies in Database:** `{stats['movies']}`"
             )
         except Exception:

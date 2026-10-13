@@ -2228,12 +2228,23 @@ async def _async_channel_indexer_task(client: Client, message: Message, status_m
     skipped_channels: List[str] = []
 
     try:
-        for channel_id in target_channels:
-            chat_obj = await get_target_chat(client, channel_id)
-            target_peer = chat_obj.id if hasattr(chat_obj, 'id') else chat_obj
-            target_title = getattr(chat_obj, "title", str(target_peer)) if hasattr(chat_obj, 'id') else str(target_peer)
-            indexed_channels.append(f"{target_title} (`{target_peer}`)")
-            logger.info(f"Indexing channel {target_title} ({target_peer}) via get_chat_history streaming...")
+        for cid in target_channels:
+            try:
+                chat = await client.get_chat(int(cid))
+            except Exception as resolve_err:
+                logger.warning(f"get_chat({cid}) failed: {resolve_err}, trying fallback resolution...")
+                try:
+                    chat = await _resolve_channel_for_index(client, cid)
+                except Exception:
+                    chat = None
+            if not chat:
+                skipped_channels.append(str(cid))
+                logger.warning(f"Could not resolve channel {cid}")
+                continue
+
+            target_title = getattr(chat, "title", str(chat.id))
+            indexed_channels.append(f"{target_title} (`{chat.id}`)")
+            logger.info(f"Indexing channel {target_title} ({chat.id}) via get_chat_history streaming...")
 
             channel_scanned = 0
             last_edit_time = time.time()
@@ -2241,7 +2252,7 @@ async def _async_channel_indexer_task(client: Client, message: Message, status_m
             with db._get_connection() as conn:
                 cursor = conn.cursor()
                 try:
-                    async for msg in client.get_chat_history(chat_obj.id if hasattr(chat_obj, 'id') else chat_obj):
+                    async for msg in client.get_chat_history(chat.id):
                         if not msg:
                             continue
                         total_scanned += 1
@@ -2250,10 +2261,9 @@ async def _async_channel_indexer_task(client: Client, message: Message, status_m
                         if media and getattr(media, "file_id", None):
                             total_media += 1
                             file_id = media.file_id
-                            file_name = getattr(media, "file_name", None) or msg.caption or "Unknown"
+                            clean_title = (getattr(media, "file_name", None) or msg.caption or "Unknown").replace(".", " ").replace("_", " ").replace("-", " ")
                             file_size = getattr(media, "file_size", 0)
                             caption = msg.caption or ""
-                            clean_title = file_name.replace(".", " ").replace("_", " ").replace("-", " ")
                             cursor.execute(
                                 "INSERT OR IGNORE INTO movies (file_id, file_name, file_size, caption) VALUES (?, ?, ?, ?)",
                                 (file_id, clean_title, file_size, caption)
@@ -2263,7 +2273,7 @@ async def _async_channel_indexer_task(client: Client, message: Message, status_m
                             try:
                                 cursor.execute(
                                     "UPDATE movies SET title = COALESCE(title, ?), message_id = COALESCE(message_id, ?), channel_id = COALESCE(channel_id, ?) WHERE file_id = ?",
-                                    (clean_title, int(msg.id), target_peer, file_id)
+                                    (clean_title, int(msg.id), chat.id, file_id)
                                 )
                             except Exception:
                                 pass
@@ -2277,7 +2287,7 @@ async def _async_channel_indexer_task(client: Client, message: Message, status_m
                                     total_in_db = cursor.execute("SELECT COUNT(*) FROM movies;").fetchone()[0]
                                     await status_msg.edit_text(
                                         f"⏳ **Indexing in Progress (Streaming History Mode)...**\n\n"
-                                        f"• **Current Channel:** `{target_title}` (`{target_peer}`)\n"
+                                        f"• **Current Channel:** `{target_title}` (`{chat.id}`)\n"
                                         f"• **Messages Scanned:** `{total_scanned}`\n"
                                         f"• **Videos/Files Found:** `{total_media}`\n"
                                         f"• **Newly Imported:** `{added}`\n"
@@ -2295,16 +2305,16 @@ async def _async_channel_indexer_task(client: Client, message: Message, status_m
 
                 except Exception as stream_err:
                     conn.commit()
-                    logger.warning(f"Streaming get_chat_history error on {target_peer}: {stream_err}")
+                    logger.warning(f"Streaming get_chat_history error on {chat.id}: {stream_err}")
                     if "BOT_METHOD_INVALID" in str(stream_err) or "PeerIdInvalid" in str(stream_err) or "ChannelPrivate" in str(stream_err):
-                        logger.info(f"Falling back to Bot API get_messages batch mode for {target_peer}...")
+                        logger.info(f"Falling back to Bot API get_messages batch mode for {chat.id}...")
                         max_id = 7388
                         for i in range(1, max_id + 1, 100):
                             batch_list = list(range(i, min(i + 100, max_id + 1)))
                             msgs = None
                             for attempt in range(3):
                                 try:
-                                    msgs = await client.get_messages(target_peer, message_ids=batch_list)
+                                    msgs = await client.get_messages(chat.id, message_ids=batch_list)
                                     break
                                 except FloodWait as e:
                                     await asyncio.sleep(e.value)
@@ -2322,10 +2332,9 @@ async def _async_channel_indexer_task(client: Client, message: Message, status_m
                                     if media and getattr(media, "file_id", None):
                                         total_media += 1
                                         file_id = media.file_id
-                                        file_name = getattr(media, "file_name", None) or msg.caption or "Unknown"
+                                        clean_title = (getattr(media, "file_name", None) or msg.caption or "Unknown").replace(".", " ").replace("_", " ").replace("-", " ")
                                         file_size = getattr(media, "file_size", 0)
                                         caption = msg.caption or ""
-                                        clean_title = file_name.replace(".", " ").replace("_", " ").replace("-", " ")
                                         cursor.execute(
                                             "INSERT OR IGNORE INTO movies (file_id, file_name, file_size, caption) VALUES (?, ?, ?, ?)",
                                             (file_id, clean_title, file_size, caption)
@@ -2335,7 +2344,7 @@ async def _async_channel_indexer_task(client: Client, message: Message, status_m
                                         try:
                                             cursor.execute(
                                                 "UPDATE movies SET title = COALESCE(title, ?), message_id = COALESCE(message_id, ?), channel_id = COALESCE(channel_id, ?) WHERE file_id = ?",
-                                                (clean_title, int(msg.id), target_peer, file_id)
+                                                (clean_title, int(msg.id), chat.id, file_id)
                                             )
                                         except Exception:
                                             pass
@@ -2350,7 +2359,7 @@ async def _async_channel_indexer_task(client: Client, message: Message, status_m
                                     total_in_db = cursor.execute("SELECT COUNT(*) FROM movies;").fetchone()[0]
                                     await status_msg.edit_text(
                                         f"⏳ **Indexing in Progress (Bot API Batch Mode)...**\n\n"
-                                        f"• **Current Channel:** `{target_title}` (`{target_peer}`)\n"
+                                        f"• **Current Channel:** `{target_title}` (`{chat.id}`)\n"
                                         f"• **Scanning Range:** IDs `{batch_list[0]}` - `{batch_list[-1]}` (of `{max_id}`)\n"
                                         f"• **Messages Scanned:** `{total_scanned}`\n"
                                         f"• **Videos/Files Found:** `{total_media}`\n"
@@ -2366,7 +2375,7 @@ async def _async_channel_indexer_task(client: Client, message: Message, status_m
                 try:
                     with db._get_connection() as sconn, sqlite3.connect(movies_db_path) as mconn:
                         mcur = mconn.cursor()
-                        rows = sconn.execute("SELECT file_id, file_name, file_size, caption, title, message_id, channel_id FROM movies WHERE channel_id = ?", (target_peer,)).fetchall()
+                        rows = sconn.execute("SELECT file_id, file_name, file_size, caption, title, message_id, channel_id FROM movies WHERE channel_id = ?", (chat.id,)).fetchall()
                         for r in rows:
                             mcur.execute(
                                 "INSERT OR IGNORE INTO movies (file_id, file_name, file_size, caption, title, message_id, channel_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -3406,6 +3415,13 @@ async def _start_pyrogram_client():
             await app.start()
             logger.info("✅ Pyrogram bot client connected and authenticated successfully!")
             await set_bot_commands(app)
+            # Resolve target channels as admin on startup
+            for scid in TARGET_CHANNELS:
+                try:
+                    schat = await app.get_chat(int(scid))
+                    logger.info(f"✅ Resolved channel entity on startup: {getattr(schat, 'title', '')} ({schat.id})")
+                except Exception as sc_err:
+                    logger.warning(f"Could not resolve channel {scid} on startup: {sc_err}")
             break
         except FloodWait as e:
             wait_time = int(getattr(e, "value", getattr(e, "x", 60)))

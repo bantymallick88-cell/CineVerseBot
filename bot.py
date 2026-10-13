@@ -1011,7 +1011,8 @@ def format_search_text(query: str, total: int, page: int, total_pages: int) -> s
         "├─ ⚡ Direct high-speed personal chat delivery\n"
         "└─ ⏱️ Auto-delete in 60s for a clean chat history\n\n"
         "──────────────────────────────────────────\n"
-        "⚠️ *This search result auto-deletes in 60 seconds.*\n"
+        "⏱️ *This search result auto-deletes in 60 seconds.*\n"
+        "🧹 *Dhanyawad! Help us keep our CineVerse Main Group clean & active!*\n"
         "⚖️ *DMCA Notice: We index public channels. Use /dmca.*"
     )
 
@@ -1344,11 +1345,8 @@ async def deliver_movie_file(client: Client, user_id: int, msg_id: int):
             f"├─ 🌟 **Rating:** `8.5/10 ★` │ 🎬 **Quality:** `{meta['quality']}`\n"
             f"├─ 🔊 **Audio:** `{meta['audio']}` │ 💾 **Size:** `{size_str}`\n"
             "└─ ⚡ **Powered by CineVerse Network**\n\n"
-            "┌──────────────────────────────────────────┐\n"
-            "│  ⚠️  A U T O - D E L E T E :  2  M I N S │\n"
-            "│  Forward or save to Saved Messages now!  │\n"
-            "└──────────────────────────────────────────┘\n\n"
-            "⚠️ **AUTO-DELETE: 2 mins | Forward or save to Saved Messages now!**"
+            "⏱️ *This movie file will auto-delete in 2 minutes to prevent copyright issues. Forward/save it now!*\n\n"
+            "🧹 *Dhanyawad! Help us keep our bot & CineVerse Main Group clean & active!*"
         )
 
         sent_file = None
@@ -1384,6 +1382,8 @@ async def deliver_movie_file(client: Client, user_id: int, msg_id: int):
         if timer_msg:
             try:
                 await timer_msg.delete()
+            except (MessageDeleteForbidden, MessageIdInvalid, RPCError):
+                pass
             except Exception as del_err:
                 logger.debug(f"Timer message cleanup error: {del_err}")
 
@@ -1484,7 +1484,7 @@ async def send_gplinks_verification_card(client: Client, target_chat: Any, user_
             logger.error(f"Error sending GPLinks verification card: {e}")
 
     if verify_msg:
-        asyncio.create_task(auto_delete(verify_msg, 180, reply_to_message=reply_to_message))
+        asyncio.create_task(auto_delete(verify_msg, 60, reply_to_message=reply_to_message))
 
 send_arolinks_verification_card = send_gplinks_verification_card
 
@@ -1744,8 +1744,7 @@ async def start_handler(client: Client, message: Message):
         return
     user_id = message.from_user.id
     command_text = (message.text or "").strip()
-    is_file_flow = any(command_text.startswith(p) for p in ["/start file_", "/start get_", "/start verify_"])
-    asyncio.create_task(auto_delete(message, 180 if is_file_flow else 60))
+    asyncio.create_task(auto_delete(message, 60))
     await db.add_user(user_id)
 
     # 1. If /start was sent in a Group: check authorization first, then politely redirect
@@ -1862,7 +1861,7 @@ async def start_handler(client: Client, message: Message):
                 disable_web_page_preview=True
             )
             if bypass_msg:
-                asyncio.create_task(auto_delete(bypass_msg, 180, reply_to_message=message))
+                asyncio.create_task(auto_delete(bypass_msg, 60, reply_to_message=message))
             return
         elif param.isdigit():
             file_msg_id = int(param)
@@ -1979,7 +1978,7 @@ async def start_handler(client: Client, message: Message):
                 quote=True
             )
             if cooldown_msg:
-                asyncio.create_task(auto_delete(cooldown_msg, 120, reply_to_message=message))
+                asyncio.create_task(auto_delete(cooldown_msg, 60, reply_to_message=message))
             return
 
         # Direct Delivery (No Ads): Deliver movie file instantly and record download timestamp
@@ -2028,8 +2027,8 @@ async def stats_handler(client: Client, message: Message):
             quote=True
         )
         if denied_msg:
-            asyncio.create_task(auto_delete(denied_msg, 10, reply_to_message=message))
-        asyncio.create_task(auto_delete(message, 10))
+            asyncio.create_task(auto_delete(denied_msg, 60, reply_to_message=message))
+        asyncio.create_task(auto_delete(message, 60))
         return
 
     asyncio.create_task(auto_delete(message, 60))
@@ -2357,8 +2356,8 @@ async def index_handler(client: Client, message: Message):
             quote=True
         )
         if denied_msg:
-            asyncio.create_task(auto_delete(denied_msg, 10, reply_to_message=message))
-        asyncio.create_task(auto_delete(message, 10))
+            asyncio.create_task(auto_delete(denied_msg, 60, reply_to_message=message))
+        asyncio.create_task(auto_delete(message, 60))
         return
 
     await db.add_user(user_id)
@@ -2807,7 +2806,7 @@ async def group_security_and_antispam_handler(client: Client, message: Message):
                     try:
                         w_msg = await client.send_message(message.chat.id, warn_text)
                         if w_msg:
-                            asyncio.create_task(auto_delete(w_msg, 20))
+                            asyncio.create_task(auto_delete(w_msg, 60))
                     except Exception:
                         pass
                 else:
@@ -2869,10 +2868,7 @@ async def incoming_user_message_tracker(client: Client, message: Message):
             enums.ChatType.SUPERGROUP
         ]:
             msg_text = (message.text or message.caption or "").strip()
-            is_file_flow = message.chat.type == enums.ChatType.PRIVATE and any(
-                msg_text.startswith(p) for p in ["/start file_", "/start get_", "/start verify_"]
-            )
-            asyncio.create_task(auto_delete(message, 180 if is_file_flow else 60))
+            asyncio.create_task(auto_delete(message, 60))
     except Exception as e:
         logger.debug(f"Tracker error: {e}")
 

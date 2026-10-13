@@ -162,28 +162,40 @@ def sanitize_button_url(url: Optional[str], default: str = "https://t.me/CineVer
         return default
     return url
 
-FSUB_CHANNEL_LINK = sanitize_button_url(os.getenv("FSUB_CHANNEL_LINK", "https://t.me/CineVerseFlimSearch"), "https://t.me/CineVerseFlimSearch")
-FSUB_GROUP_ID = -1004427640174
-FSUB_GROUP_LINK = FSUB_CHANNEL_LINK
+# Channel 1: Request Channel / Group Configuration
+REQUEST_CHANNEL_ID = get_env_int("REQUEST_CHANNEL_ID", get_env_int("REQUEST_GROUP_ID", get_env_int("FSUB_GROUP_ID", -1004427640174)))
+REQUEST_CHANNEL_LINK = sanitize_button_url(
+    os.getenv("REQUEST_CHANNEL_LINK") or os.getenv("REQUEST_GROUP_LINK") or os.getenv("FSUB_GROUP_LINK") or "https://t.me/FlimRequest_01",
+    "https://t.me/FlimRequest_01"
+)
+FSUB_GROUP_ID = REQUEST_CHANNEL_ID
+FSUB_GROUP_LINK = REQUEST_CHANNEL_LINK
 
-MAIN_GROUP_ID = FSUB_GROUP_ID
-MAIN_GROUP_LINK = FSUB_CHANNEL_LINK
-REQUEST_GROUP_ID = get_env_int("REQUEST_GROUP_ID", FSUB_GROUP_ID)
-REQUEST_GROUP_LINK = sanitize_button_url(get_env_str("REQUEST_GROUP_LINK", FSUB_CHANNEL_LINK), FSUB_CHANNEL_LINK)
-BACKUP_GROUP_ID = get_env_int("BACKUP_GROUP_ID", FSUB_GROUP_ID)
-BACKUP_GROUP_LINK = sanitize_button_url(get_env_str("BACKUP_GROUP_LINK", FSUB_CHANNEL_LINK), FSUB_CHANNEL_LINK)
+# Channel 2: Backup / Official Channel Configuration
+BACKUP_CHANNEL_ID = get_env_int("BACKUP_CHANNEL_ID", get_env_int("BACKUP_GROUP_ID", get_env_int("FSUB_CHANNEL_ID", -1004427640174)))
+BACKUP_CHANNEL_LINK = sanitize_button_url(
+    os.getenv("BACKUP_CHANNEL_LINK") or os.getenv("BACKUP_GROUP_LINK") or os.getenv("FSUB_CHANNEL_LINK") or "https://t.me/CineVerseFlimSearch",
+    "https://t.me/CineVerseFlimSearch"
+)
+FSUB_CHANNEL_ID = BACKUP_CHANNEL_ID
+FSUB_CHANNEL_LINK = BACKUP_CHANNEL_LINK
 
-# Strict Allowed Chat Access List: Main Group, Request Group, Backup Group, DB Channels
-ALLOWED_CHAT_IDS = [MAIN_GROUP_ID, REQUEST_GROUP_ID, BACKUP_GROUP_ID] + [cid for cid in DB_CHANNEL_IDS if isinstance(cid, int)]
+# Main Search Group Configuration (where movie queries are accepted)
+MAIN_GROUP_ID = get_env_int("MAIN_GROUP_ID", FSUB_GROUP_ID)
+MAIN_GROUP_LINK = sanitize_button_url(
+    os.getenv("MAIN_GROUP_LINK") or os.getenv("SEARCH_GROUP_LINK") or REQUEST_CHANNEL_LINK,
+    REQUEST_CHANNEL_LINK
+)
+
+# Strict Allowed Chat Access List: Main Group, Request Channel, Backup Channel, DB Channels
+ALLOWED_CHAT_IDS = [MAIN_GROUP_ID, REQUEST_CHANNEL_ID, BACKUP_CHANNEL_ID] + [cid for cid in DB_CHANNEL_IDS if isinstance(cid, int)]
 
 # Aliases for backwards compatibility
-REQ_GROUP_ID = REQUEST_GROUP_ID
-REQ_GROUP_LINK = REQUEST_GROUP_LINK
-BACKUP_CHANNEL_ID = BACKUP_GROUP_ID
-BACKUP_CHANNEL_LINK = BACKUP_GROUP_LINK
-SEARCH_GROUP_ID = FSUB_GROUP_ID
-SEARCH_GROUP_LINK = FSUB_CHANNEL_LINK
-CHANNEL_LINK = FSUB_CHANNEL_LINK
+REQ_GROUP_ID = REQUEST_CHANNEL_ID
+REQ_GROUP_LINK = REQUEST_CHANNEL_LINK
+SEARCH_GROUP_ID = MAIN_GROUP_ID
+SEARCH_GROUP_LINK = MAIN_GROUP_LINK
+CHANNEL_LINK = BACKUP_CHANNEL_LINK
 DEVELOPER_LINK = sanitize_button_url(os.getenv("DEVELOPER_LINK"), "https://t.me/CineVerseFlimSearch")
 WELCOME_IMAGE_URL = get_env_str(
     "WELCOME_IMAGE_URL",
@@ -1154,6 +1166,48 @@ async def deliver_movie_file(client: Client, user_id: int, msg_id: int):
         size_str = format_size(file_info.get("file_size", 0)) if file_info else "N/A"
 
         meta = extract_movie_metadata(title)
+
+        # STYLISH POPUP ANIMATION (2-3 SECONDS):
+        # Display a temporary, ultra-stylish 2-3 second loading/popup message
+        loading_msg = None
+        try:
+            loading_msg = await client.send_message(
+                chat_id=user_id,
+                text=(
+                    "┌──────────────────────────────────────────┐\n"
+                    "│   ⚡  C I N E V E R S E   V A U L T      │\n"
+                    "│        Secure File Link Generator        │\n"
+                    "└──────────────────────────────────────────┘\n\n"
+                    f"🎬 **Movie:** `{meta['clean_title']}`\n"
+                    "⏳ **Generating Secure High-Speed Download Link...**\n"
+                    "├─ 🔐 Encrypting media stream...\n"
+                    "├─ 🚀 Bypassing server throttle...\n"
+                    "└─ 💎 Preparing ultra-fast stream delivery...\n\n"
+                    "✨ *Please wait 2-3 seconds...*"
+                ),
+                disable_web_page_preview=True
+            )
+            await asyncio.sleep(1.2)
+            if loading_msg:
+                try:
+                    await loading_msg.edit_text(
+                        "┌──────────────────────────────────────────┐\n"
+                        "│   ⚡  C I N E V E R S E   V A U L T      │\n"
+                        "│        Ready For High-Speed Download     │\n"
+                        "└──────────────────────────────────────────┘\n\n"
+                        f"🎬 **Movie:** `{meta['clean_title']}`\n"
+                        "⚡ **Link Ready! Delivering file to your chat...**\n"
+                        "├─ 📦 Fetching file from CineVerse Vault...\n"
+                        "└─ 🍿 File arriving in a moment!\n\n"
+                        "🚀 *Sending your movie now...*",
+                        disable_web_page_preview=True
+                    )
+                except Exception:
+                    pass
+            await asyncio.sleep(1.0)
+        except Exception as anim_err:
+            logger.warning(f"Note on delivery animation: {anim_err}")
+
         caption = (
             "┌──────────────────────────────────────────┐\n"
             "│    🍿  C I N E V E R S E   V A U L T     │\n"
@@ -1199,6 +1253,14 @@ async def deliver_movie_file(client: Client, user_id: int, msg_id: int):
                 except Exception as copy_err:
                     logger.warning(f"copy_message failed for {target_msg_id}: {copy_err}")
                     sent_file = None
+
+        # Auto-delete the loading popup message after delivery
+        if loading_msg:
+            try:
+                await loading_msg.delete()
+            except Exception:
+                pass
+
         if sent_file:
             asyncio.create_task(auto_delete(sent_file, 120))
     except UserIsBlocked:
@@ -1336,45 +1398,40 @@ async def check_chat_membership(client: Client, chat_id: Any, user_id: int, fall
         logger.warning(f"Error checking chat membership for {chat_id} (user {user_id}): {e}")
         return False
 
-async def check_fsub(client: Client, user_id: int) -> bool:
+async def is_user_fully_joined(client: Client, user_id: int) -> bool:
+    """
+    Checks if user is a member of BOTH required channels/groups:
+    1. Request Channel / FSUB_GROUP_ID
+    2. Backup Channel / FSUB_CHANNEL_ID
+    """
     if user_id == 7831101047 or str(user_id) == "7831101047" or user_id in [7831101047, 783110149] or str(user_id) in ["7831101047", "783110149"]:
         return True
     if user_id == ADMIN_ID or user_id == OWNER_ID or user_id in ADMIN_IDS:
         return True
 
-    return await check_chat_membership(
-        client,
-        FSUB_GROUP_ID,
-        user_id,
-        fallback_username="CineVerseFlimSearch"
-    )
+    # 1. Check Request Channel / Group
+    req_target = REQUEST_CHANNEL_ID or FSUB_GROUP_ID
+    req_username = "FlimRequest_01" if "FlimRequest_01" in REQUEST_CHANNEL_LINK else "database_Cineverse01"
+    is_req = await check_chat_membership(client, req_target, user_id, fallback_username=req_username)
+    if not is_req:
+        return False
 
-async def is_user_subscribed(client: Client, user_id: int) -> bool:
-    if user_id == 7831101047 or str(user_id) == "7831101047" or user_id in [7831101047, 783110149] or str(user_id) in ["7831101047", "783110149"]:
-        return True
-    return await check_fsub(client, user_id)
+    # 2. Check Backup Channel / Official Channel
+    backup_target = BACKUP_CHANNEL_ID or FSUB_CHANNEL_ID
+    backup_username = "CineVerseFlimSearch"
+    if str(backup_target) != str(req_target) or backup_username != req_username:
+        is_backup = await check_chat_membership(client, backup_target, user_id, fallback_username=backup_username)
+        if not is_backup:
+            return False
 
-fsub_check = is_user_subscribed
+    return True
 
-async def is_user_joined_group(client: Client, user_id: int) -> bool:
-    if user_id == 7831101047 or str(user_id) == "7831101047" or user_id in [7831101047, 783110149] or str(user_id) in ["7831101047", "783110149"]:
-        return True
-    return await fsub_check(client, user_id)
-
-async def is_user_fully_joined(client: Client, user_id: int) -> bool:
-    if user_id == 7831101047 or str(user_id) == "7831101047" or user_id in [7831101047, 783110149] or str(user_id) in ["7831101047", "783110149"]:
-        return True
-    return await fsub_check(client, user_id)
-
-async def force_sub(client: Client, user_id: int) -> bool:
-    if user_id == 7831101047 or str(user_id) == "7831101047" or user_id in [7831101047, 783110149] or str(user_id) in ["7831101047", "783110149"]:
-        return True
-    return await check_fsub(client, user_id)
-
-async def middleware_handler(client: Client, user_id: int) -> bool:
-    if user_id == 7831101047 or str(user_id) == "7831101047" or user_id in [7831101047, 783110149] or str(user_id) in ["7831101047", "783110149"]:
-        return True
-    return await check_fsub(client, user_id)
+is_user_subscribed = is_user_fully_joined
+is_user_joined_group = is_user_fully_joined
+check_fsub = is_user_fully_joined
+fsub_check = is_user_fully_joined
+force_sub = is_user_fully_joined
+middleware_handler = is_user_fully_joined
 
 async def is_authorized_user(user_id: int) -> bool:
     if user_id == 7831101047 or str(user_id) == "7831101047" or user_id in [7831101047, 783110149] or str(user_id) in ["7831101047", "783110149"]:
@@ -1383,10 +1440,33 @@ async def is_authorized_user(user_id: int) -> bool:
         return True
     return await db.is_approved_user(user_id)
 
+def build_force_sub_text(user_name: str) -> str:
+    return (
+        "┌──────────────────────────────────────────┐\n"
+        "│   🔒  A C C E S S   R E Q U I R E D      │\n"
+        "│     CineVerse Force Subscribe Gate       │\n"
+        "└──────────────────────────────────────────┘\n\n"
+        f"👋 Hello **{user_name}**,\n\n"
+        "To unlock & receive your requested movie file, you **MUST** join **BOTH** of our official channels below:\n\n"
+        "◈ **Required Channels:**\n"
+        "├─ 📢 **Channel 1:** Request Channel\n"
+        "└─ 🍿 **Channel 2:** Backup & Main Channel\n\n"
+        "📌 **Steps to Unlock:**\n"
+        "1️⃣ Tap **'Join Request Channel'** & join\n"
+        "2️⃣ Tap **'Join Backup Channel'** & join\n"
+        "3️⃣ Tap **'Try Again / Verified'** button below!\n\n"
+        "⚡ *Your file will be delivered instantly after joining!*"
+    )
+
 def build_force_join_markup(retry_callback: str = "cb_check_join") -> InlineKeyboardMarkup:
+    req_url = sanitize_button_url(REQUEST_CHANNEL_LINK, "https://t.me/FlimRequest_01")
+    backup_url = sanitize_button_url(BACKUP_CHANNEL_LINK, "https://t.me/CineVerseFlimSearch")
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🍿 Join CineVerse Channel", url=FSUB_CHANNEL_LINK)
+            InlineKeyboardButton("📢 1. Join Request Channel ↗", url=req_url)
+        ],
+        [
+            InlineKeyboardButton("🍿 2. Join Backup Channel ↗", url=backup_url)
         ],
         [
             InlineKeyboardButton("🔄 Try Again / Verified", callback_data=retry_callback)
@@ -1583,17 +1663,7 @@ async def start_handler(client: Client, message: Message):
     if file_msg_id:
         if not is_owner and not await is_user_fully_joined(client, user_id):
             user_name = message.from_user.first_name if message.from_user and message.from_user.first_name else "Friend"
-            fsub_text = (
-                "┌──────────────────────────────────────────┐\n"
-                "│   🔒  A C C E S S   R E Q U I R E D      │\n"
-                "│     CineVerse Force Subscribe Gate       │\n"
-                "└──────────────────────────────────────────┘\n\n"
-                f"👋 Hello **{user_name}**,\n\n"
-                "To unlock and receive your movie file, you **MUST** join our official channel:\n\n"
-                "◈ **Required Channel:**\n"
-                "└─ 🍿 **CineVerse Official** (`@CineVerseFlimSearch`)\n\n"
-                "👉 *Join below and tap 'Try Again / Verified':*"
-            )
+            fsub_text = build_force_sub_text(user_name)
             fsub_msg = await message.reply_text(
                 fsub_text,
                 reply_markup=build_force_join_markup(retry_callback=f"get_{file_msg_id}"),
@@ -1638,17 +1708,7 @@ async def start_handler(client: Client, message: Message):
     # 4. Normal /start command (no file parameter): Check Force Join
     if not is_owner and not await is_user_fully_joined(client, user_id):
         user_name = message.from_user.first_name if message.from_user and message.from_user.first_name else "Friend"
-        fsub_text = (
-            "┌──────────────────────────────────────────┐\n"
-            "│   🔒  A C C E S S   R E Q U I R E D      │\n"
-            "│     CineVerse Force Subscribe Gate       │\n"
-            "└──────────────────────────────────────────┘\n\n"
-            f"👋 Hello **{user_name}**,\n\n"
-            "To access CineVerse Bot features, you **MUST** join our official channel:\n\n"
-            "◈ **Required Channel:**\n"
-            "└─ 🍿 **CineVerse Official** (`@CineVerseFlimSearch`)\n\n"
-            "👉 *Join below and tap 'Try Again / Verified':*"
-        )
+        fsub_text = build_force_sub_text(user_name)
         fsub_msg = await message.reply_text(
             fsub_text,
             reply_markup=build_force_join_markup("cb_check_join"),
@@ -2490,6 +2550,30 @@ async def auto_filter_handler(client: Client, message: Message):
     if text.startswith("/"):
         return
 
+    # 1. RESTRICT SEARCH TO MAIN GROUP:
+    # In private PM chat, disable search handling and redirect user to main CineVerse group
+    if message.chat and message.chat.type == enums.ChatType.PRIVATE:
+        pm_notice = (
+            "┌──────────────────────────────────────────┐\n"
+            "│   🍿  C I N E V E R S E   S E A R C H    │\n"
+            "│          Search Restricted to Group      │\n"
+            "└──────────────────────────────────────────┘\n\n"
+            f"👋 Hello **{message.from_user.first_name or 'Friend'}**!\n\n"
+            "◈ **Movie Search is only available in our Main Group!**\n"
+            "├─ 💬 Movie queries are disabled in private PM chat.\n"
+            "├─ 🔍 Please tap the button below to join & search in our group.\n"
+            "└─ ⚡ Instant results & high-speed downloads guaranteed!\n\n"
+            "👉 **Send your query in CineVerse Group:**"
+        )
+        group_button = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🍿 Search in CineVerse Group ↗", url=MAIN_GROUP_LINK)],
+            [InlineKeyboardButton("📢 Official Channel ↗", url=BACKUP_CHANNEL_LINK)]
+        ])
+        pm_msg = await message.reply_text(pm_notice, reply_markup=group_button, quote=True)
+        if pm_msg:
+            asyncio.create_task(auto_delete(pm_msg, 60, reply_to_message=message))
+        return
+
     # Code-Level Deduplication Lock on search query within 5 seconds
     search_lock_key = f"search_{message.chat.id}_{text.lower()}"
     if is_duplicate_request(search_lock_key, expiry=REQUEST_LOCK_EXPIRY):
@@ -2515,17 +2599,7 @@ async def auto_filter_handler(client: Client, message: Message):
     # 3. Mandatory Force-Subscription Check for non-owner (Group and PM)
     if not is_owner and not await is_user_fully_joined(client, user_id):
         user_name = (message.from_user.first_name if (message.chat and message.chat.type == enums.ChatType.PRIVATE) else (message.from_user.mention if message.from_user else "Friend"))
-        fsub_text = (
-            "┌──────────────────────────────────────────┐\n"
-            "│   🔒  A C C E S S   R E Q U I R E D      │\n"
-            "│     CineVerse Force Subscribe Gate       │\n"
-            "└──────────────────────────────────────────┘\n\n"
-            f"👋 Hello **{user_name}**,\n\n"
-            "To access CineVerse Bot search, you **MUST** join our official channel:\n\n"
-            "◈ **Required Channel:**\n"
-            "└─ 🍿 **CineVerse Official** (`@CineVerseFlimSearch`)\n\n"
-            "👉 *Join below and tap 'Try Again / Verified':*"
-        )
+        fsub_text = build_force_sub_text(user_name)
         fsub_markup = build_force_join_markup("cb_check_join")
         block_msg = await message.reply_text(
             fsub_text,
@@ -2765,17 +2839,17 @@ async def callback_router(client: Client, query: CallbackQuery):
                     "│       Membership Verified & Unlocked     │\n"
                     "└──────────────────────────────────────────┘\n\n"
                     "🎉 **Welcome to CineVerse Search Network!**\n\n"
-                    "Your membership in CineVerse Channel has been verified successfully.\n\n"
+                    "Your membership in both official channels has been verified successfully.\n\n"
                     "◈ **Next Step:**\n"
-                    "💬 Search any movie title directly in CineVerse!",
+                    "🍿 Search any movie title directly in CineVerse Group!",
                     reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("📢 Official Channel ↗", url=FSUB_CHANNEL_LINK)]
+                        [InlineKeyboardButton("🍿 Go to CineVerse Group ↗", url=MAIN_GROUP_LINK)]
                     ])
                 )
             except Exception:
                 pass
         else:
-            await query.answer("❌ You must join CineVerse Channel first!", show_alert=True)
+            await query.answer("❌ You haven't joined BOTH channels yet! Please join and retry.", show_alert=True)
         return
 
     elif data == "cb_close":
@@ -3081,19 +3155,11 @@ async def callback_router(client: Client, query: CallbackQuery):
     elif data.startswith("get_"):
         msg_id = int(data.split("_")[1])
 
-        # Strict Force Join Check (Request Group & Backup Channel)
+        # Strict Force Join Check (Request Channel & Backup Channel)
         if not is_owner and not await is_user_fully_joined(client, user_id):
-            await query.answer("❌ You must join CineVerse Channel first!", show_alert=True)
+            await query.answer("❌ You must join BOTH channels first!", show_alert=True)
             user_name = query.from_user.first_name if query.from_user else "Friend"
-            fsub_text = (
-                "┌──────────────────────────────────────────┐\n"
-                "│   🔒  A C C E S S   R E Q U I R E D      │\n"
-                "│     CineVerse Force Subscribe Gate       │\n"
-                "└──────────────────────────────────────────┘\n\n"
-                f"👋 Hello **{user_name}**,\n\n"
-                "You **MUST** be a member of **CineVerse Official** (`@CineVerseFlimSearch`) to download files!\n\n"
-                "👉 *Please join using the button below, then tap Verified:* \n"
-            )
+            fsub_text = build_force_sub_text(user_name)
             fsub_markup = build_force_join_markup(f"get_{msg_id}")
             try:
                 block_msg = await query.message.reply_text(

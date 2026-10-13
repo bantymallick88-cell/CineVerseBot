@@ -92,7 +92,7 @@ API_HASH = get_env_str("API_HASH", "e5e4c9c88d0c5c2654d8fbe985523c9c")
 BOT_TOKEN = get_env_str("BOT_TOKEN", "8994566569:AAG8pdApyO7ut1BrG6xdstrkdWL1ZUProfY")
 
 def parse_db_channel_ids() -> List[Union[int, str]]:
-    raw = os.getenv("DB_CHANNEL_ID") or os.getenv("DB_CHANNEL_IDS") or os.getenv("DB_CHANNELS") or "-1004312780149, -1004391530222"
+    raw = os.getenv("DB_CHANNEL_ID") or os.getenv("DB_CHANNEL_IDS") or os.getenv("DB_CHANNELS") or "@database_Cineverse01, @database_Cineverse"
     channels: List[Union[int, str]] = []
     # Read DB_CHANNEL_ID environment variable as comma-separated string entries (supporting usernames like @database_Cineverse01)
     for entry in str(raw).split(","):
@@ -104,13 +104,13 @@ def parse_db_channel_ids() -> List[Union[int, str]]:
         except ValueError:
             channels.append(entry)
     if not channels:
-        channels = [-1004312780149, -1004391530222]
+        channels = ["@database_Cineverse01", "@database_Cineverse"]
     return channels
 
 DB_CHANNEL_IDS = parse_db_channel_ids()
-TARGET_CHANNELS = list(DB_CHANNEL_IDS)
-DEFAULT_DB_CHANNELS = list(DB_CHANNEL_IDS)
-DB_CHANNEL_ID = DB_CHANNEL_IDS[0] if DB_CHANNEL_IDS else -1004312780149
+TARGET_CHANNELS = ["@database_Cineverse01", "@database_Cineverse"]
+DEFAULT_DB_CHANNELS = ["@database_Cineverse01", "@database_Cineverse"]
+DB_CHANNEL_ID = DB_CHANNEL_IDS[0] if DB_CHANNEL_IDS else "@database_Cineverse01"
 CHANNEL_ID = DB_CHANNEL_ID
 
 ADMIN_ID = 7831101047
@@ -541,139 +541,108 @@ class Database:
             logger.error(f"Error detecting table columns: {e}")
             return "movies", "file_name", "file_id", "file_size", "message_id", "channel_id", "caption"
 
+    def search_movies(self, query: str, limit: int = 15) -> List[Dict[str, Any]]:
+        q = query.strip().lower()
+        if not q:
+            return []
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT file_id, file_name, file_size, caption FROM movies WHERE LOWER(file_name) LIKE ? OR LOWER(caption) LIKE ? LIMIT 15",
+                    (f"%{q}%", f"%{q}%")
+                )
+                raw_rows = cursor.fetchall()
+                results = []
+                for row in raw_rows:
+                    f_id = str(row[0] or "")
+                    name = str(row[1] or "Movie")
+                    f_size = int(row[2] or 0)
+                    cap = str(row[3] or "")
+                    m_id = None
+                    try:
+                        row_extra = conn.execute("SELECT message_id FROM movies WHERE file_id = ? LIMIT 1;", (f_id,)).fetchone()
+                        if row_extra and row_extra[0]:
+                            m_id = row_extra[0]
+                    except Exception:
+                        pass
+                    results.append({
+                        "file_id": f_id,
+                        "title": name,
+                        "file_name": name,
+                        "file_size": f_size,
+                        "caption": cap,
+                        "message_id": m_id or f_id
+                    })
+                return results
+        except Exception as e:
+            logger.error(f"Error in search_movies: {e}")
+            return []
+
     def _search_files(self, query: str, offset: int = 0, limit: int = PAGE_SIZE) -> Tuple[List[Dict[str, Any]], int]:
         try:
-            clean_query = query.strip()
-            if not clean_query:
+            q = query.strip().lower()
+            if not q:
                 return [], 0
 
-            # Clean user search query: remove punctuation and split words for fuzzy matching
-            cleaned_query_str = re.sub(r"[^a-zA-Z0-9\s]", " ", clean_query)
-            raw_words = [w.strip() for w in cleaned_query_str.split() if w.strip()]
-            if not raw_words:
-                raw_words = [clean_query]
-
             with self._get_connection() as conn:
-                target_table, title_col, file_id_col, size_col, msg_id_col, channel_id_col, caption_col = self._detect_table_and_columns(conn)
-
-                col_info = [r[1].lower() for r in conn.execute(f"PRAGMA table_info({target_table});").fetchall()]
-                search_cols = []
-                for c in ["file_name", "caption", "title"]:
-                    if c in col_info and c not in search_cols:
-                        search_cols.append(c)
-                if not search_cols:
-                    search_cols = [title_col]
-
-                conditions = []
-                params: List[Any] = []
-                for w in raw_words:
-                    if w.upper().startswith("S") and len(w) == 3 and w[1:].isdigit():
-                        season_num = int(w[1:])
-                        s_patterns = [
-                            f"%S{season_num:02d}%",
-                            f"%S{season_num}%",
-                            f"%Season {season_num}%",
-                            f"%Season {season_num:02d}%"
-                        ]
-                        sub_conds = []
-                        for col in search_cols:
-                            for pat in s_patterns:
-                                sub_conds.append(f"LOWER({col}) LIKE ?")
-                                params.append(pat.lower())
-                        conditions.append(f"({' OR '.join(sub_conds)})")
-                    elif w.upper() in ["S15+", "S15"]:
-                        sub_conds = []
-                        for col in search_cols:
-                            for pat in ["%S15%", "%Season 15%", "%S16%", "%Season 16%"]:
-                                sub_conds.append(f"LOWER({col}) LIKE ?")
-                                params.append(pat.lower())
-                        conditions.append(f"({' OR '.join(sub_conds)})")
-                    elif w.upper() == "4K":
-                        sub_conds = []
-                        for col in search_cols:
-                            for pat in ["%4K%", "%2160p%", "%UHD%"]:
-                                sub_conds.append(f"LOWER({col}) LIKE ?")
-                                params.append(pat.lower())
-                        conditions.append(f"({' OR '.join(sub_conds)})")
-                    elif w.upper() == "HEVC":
-                        sub_conds = []
-                        for col in search_cols:
-                            for pat in ["%HEVC%", "%x265%"]:
-                                sub_conds.append(f"LOWER({col}) LIKE ?")
-                                params.append(pat.lower())
-                        conditions.append(f"({' OR '.join(sub_conds)})")
-                    elif w.lower() == "odia":
-                        sub_conds = []
-                        for col in search_cols:
-                            for pat in ["%Odia%", "%Oriya%"]:
-                                sub_conds.append(f"LOWER({col}) LIKE ?")
-                                params.append(pat.lower())
-                        conditions.append(f"({' OR '.join(sub_conds)})")
-                    elif w.lower() == "bengali":
-                        sub_conds = []
-                        for col in search_cols:
-                            for pat in ["%Bengali%", "%Bangla%"]:
-                                sub_conds.append(f"LOWER({col}) LIKE ?")
-                                params.append(pat.lower())
-                        conditions.append(f"({' OR '.join(sub_conds)})")
-                    else:
-                        sub_conds = [f"LOWER({col}) LIKE ?" for col in search_cols]
-                        conditions.append(f"({' OR '.join(sub_conds)})")
-                        params.extend([f"%{w.lower()}%" for _ in search_cols])
-
-                where_sql = " AND ".join(conditions)
-
                 cursor = conn.cursor()
-                count_sql = f"SELECT COUNT(*) FROM {target_table} WHERE {where_sql};"
-                total_res = cursor.execute(count_sql, params).fetchone()
-                total = int(total_res[0]) if total_res else 0
-                if total == 0:
-                    # Direct case-insensitive wildcard (LIKE '%query%') across file_name and caption
-                    direct_wildcard = f"%{clean_query.lower()}%"
-                    sub_conds = [f"LOWER({col}) LIKE ?" for col in search_cols]
-                    where_sql = f"({' OR '.join(sub_conds)})"
-                    params = [direct_wildcard for _ in search_cols]
-                    count_sql = f"SELECT COUNT(*) FROM {target_table} WHERE {where_sql};"
-                    total_res = cursor.execute(count_sql, params).fetchone()
-                    total = int(total_res[0]) if total_res else 0
-                    if total == 0 and len(raw_words) > 1:
-                        # Sequence wildcard e.g. %sanam%bewafa%
-                        seq_wildcard = "%" + "%".join([w.lower() for w in raw_words]) + "%"
-                        params = [seq_wildcard for _ in search_cols]
-                        total_res = cursor.execute(count_sql, params).fetchone()
-                        total = int(total_res[0]) if total_res else 0
-
-                    if total == 0:
-                        return [], 0
-
-                primary_col = "file_name" if "file_name" in search_cols else title_col
-                cap_col = "caption" if "caption" in search_cols else primary_col
-                order_params = [f"%{clean_query.lower()}%", f"%{clean_query.lower()}%"]
-                if msg_id_col:
-                    order_clause = f"ORDER BY (CASE WHEN LOWER({primary_col}) LIKE ? THEN 1 WHEN LOWER({cap_col}) LIKE ? THEN 2 ELSE 3 END), {msg_id_col} DESC"
-                else:
-                    order_clause = f"ORDER BY (CASE WHEN LOWER({primary_col}) LIKE ? THEN 1 WHEN LOWER({cap_col}) LIKE ? THEN 2 ELSE 3 END)"
-
-                search_sql = f"SELECT * FROM {target_table} WHERE {where_sql} {order_clause} LIMIT ? OFFSET ?;"
-                cursor.execute(search_sql, params + order_params + [limit, offset])
+                cursor.execute(
+                    "SELECT file_id, file_name, file_size, caption FROM movies WHERE LOWER(file_name) LIKE ? OR LOWER(caption) LIKE ? LIMIT ? OFFSET ?",
+                    (f"%{q}%", f"%{q}%", limit, offset)
+                )
                 raw_rows = cursor.fetchall()
+
+                count_res = cursor.execute(
+                    "SELECT COUNT(*) FROM movies WHERE LOWER(file_name) LIKE ? OR LOWER(caption) LIKE ?",
+                    (f"%{q}%", f"%{q}%")
+                ).fetchone()
+                total = int(count_res[0]) if count_res else len(raw_rows)
+
+                if total == 0 and (" " in q or "_" in q or "." in q):
+                    words = [w for w in re.split(r"[\s._-]+", q) if w]
+                    if len(words) > 1:
+                        word_conds = []
+                        word_params = []
+                        for w in words:
+                            word_conds.append("(LOWER(file_name) LIKE ? OR LOWER(caption) LIKE ?)")
+                            word_params.extend([f"%{w}%", f"%{w}%"])
+                        multi_where = " AND ".join(word_conds)
+                        cursor.execute(
+                            f"SELECT file_id, file_name, file_size, caption FROM movies WHERE {multi_where} LIMIT ? OFFSET ?",
+                            word_params + [limit, offset]
+                        )
+                        raw_rows = cursor.fetchall()
+                        count_res = cursor.execute(
+                            f"SELECT COUNT(*) FROM movies WHERE {multi_where}",
+                            word_params
+                        ).fetchone()
+                        total = int(count_res[0]) if count_res else len(raw_rows)
 
                 normalized_rows: List[Dict[str, Any]] = []
                 for row in raw_rows:
-                    r = dict(row)
-                    name = str(r.get("file_name") or r.get(title_col) or r.get("title") or r.get("caption") or "Movie")
-                    f_id = str(r.get(file_id_col) or r.get("file_id") or r.get("id") or "")
-                    f_size = int(r.get(size_col) if size_col else (r.get("file_size") or 0))
-                    m_id = int(r.get(msg_id_col) if msg_id_col else (r.get("message_id") or r.get("msg_id") or 0))
-                    cid = r.get("channel_id") or DB_CHANNEL_ID
-                    cap = str(r.get("caption") or name)
+                    f_id = str(row[0] or "")
+                    name = str(row[1] or "Movie")
+                    f_size = int(row[2] or 0)
+                    cap = str(row[3] or "")
+                    m_id = None
+                    cid = DB_CHANNEL_ID
+                    try:
+                        row_extra = conn.execute("SELECT message_id, channel_id FROM movies WHERE file_id = ? LIMIT 1;", (f_id,)).fetchone()
+                        if row_extra:
+                            if row_extra[0]:
+                                m_id = row_extra[0]
+                            if row_extra[1]:
+                                cid = row_extra[1]
+                    except Exception:
+                        pass
 
                     normalized_rows.append({
                         "file_id": f_id,
                         "title": name,
                         "file_name": name,
                         "file_size": f_size,
-                        "message_id": m_id,
+                        "message_id": m_id or f_id,
                         "channel_id": cid,
                         "caption": cap
                     })
@@ -683,19 +652,23 @@ class Database:
             logger.error(f"Database search exception for query '{query}': {e}", exc_info=True)
             return [], 0
 
-    def _get_file_by_msg_id(self, message_id: int) -> Optional[Dict[str, Any]]:
+    def _get_file_by_msg_id(self, message_id: Any) -> Optional[Dict[str, Any]]:
         try:
             with self._get_connection() as conn:
                 target_table, title_col, file_id_col, size_col, msg_id_col, channel_id_col, caption_col = self._detect_table_and_columns(conn)
                 msg_col = msg_id_col or "message_id"
-                row = conn.execute(f"SELECT * FROM {target_table} WHERE {msg_col} = ? LIMIT 1;", (message_id,)).fetchone()
+                row = None
+                if isinstance(message_id, int) or (isinstance(message_id, str) and str(message_id).isdigit()):
+                    row = conn.execute(f"SELECT * FROM {target_table} WHERE {msg_col} = ? OR file_id = ? LIMIT 1;", (int(message_id), str(message_id))).fetchone()
+                if not row:
+                    row = conn.execute(f"SELECT * FROM {target_table} WHERE file_id = ? LIMIT 1;", (str(message_id),)).fetchone()
                 if not row:
                     return None
                 r = dict(row)
                 name = str(r.get("file_name") or r.get(title_col) or r.get("title") or r.get("caption") or "Movie")
                 f_id = str(r.get(file_id_col) or r.get("file_id") or r.get("id") or "")
                 f_size = int(r.get(size_col) if size_col else (r.get("file_size") or 0))
-                m_id = int(r.get(msg_col) or message_id)
+                m_id = int(r.get(msg_col) or 0) if (r.get(msg_col) is not None and str(r.get(msg_col)).isdigit()) else message_id
                 cid = r.get("channel_id") or DB_CHANNEL_ID
                 cap = str(r.get("caption") or name)
                 return {
@@ -1350,14 +1323,22 @@ async def deliver_movie_file(client: Client, user_id: int, msg_id: int):
                 sent_file = None
 
         if not sent_file:
-            channel_target = file_info.get("channel_id") if file_info else None
-            peer = await resolve_channel_peer(client, channel_target)
-            sent_file = await client.copy_message(
-                chat_id=user_id,
-                from_chat_id=peer,
-                message_id=msg_id,
-                caption=caption
-            )
+            target_msg_id = file_info.get("message_id") if file_info else None
+            if not target_msg_id and (isinstance(msg_id, int) or (isinstance(msg_id, str) and str(msg_id).isdigit())):
+                target_msg_id = int(msg_id)
+            if target_msg_id and isinstance(target_msg_id, int) and target_msg_id > 0:
+                channel_target = file_info.get("channel_id") if file_info else None
+                peer = await resolve_channel_peer(client, channel_target)
+                try:
+                    sent_file = await client.copy_message(
+                        chat_id=user_id,
+                        from_chat_id=peer,
+                        message_id=target_msg_id,
+                        caption=caption
+                    )
+                except Exception as copy_err:
+                    logger.warning(f"copy_message failed for {target_msg_id}: {copy_err}")
+                    sent_file = None
         if sent_file:
             asyncio.create_task(auto_delete(sent_file, 120))
     except UserIsBlocked:
@@ -1659,11 +1640,13 @@ async def start_handler(client: Client, message: Message):
         param = command_parts[1].strip()
         if param.startswith("verify_"):
             verify_token = param[7:].strip()
-        elif param.startswith("get_") and param[4:].isdigit():
-            file_msg_id = int(param[4:])
+        elif param.startswith("get_"):
+            clean_p = param[4:].strip()
+            file_msg_id = int(clean_p) if clean_p.isdigit() else clean_p
             is_get_flow = True
-        elif param.startswith("file_") and param[5:].isdigit():
-            file_msg_id = int(param[5:])
+        elif param.startswith("file_"):
+            clean_p = param[5:].strip()
+            file_msg_id = int(clean_p) if clean_p.isdigit() else clean_p
             is_get_flow = False
         elif param.isdigit():
             file_msg_id = int(param)
@@ -2214,8 +2197,24 @@ async def index_handler(client: Client, message: Message):
 
     await db.add_user(user_id)
 
-    # Resolve channels from DB_CHANNEL_IDS (supporting usernames like @database_Cineverse01)
-    target_channels = [cid for cid in DB_CHANNEL_IDS if cid != -1004427640174 and str(cid) != "-1004427640174"]
+    # 1. Reset table on index: run cursor.execute("DELETE FROM movies;") before scanning
+    with db._get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM movies;")
+        conn.commit()
+    logger.info("Purged all old records from movies table on /index command start.")
+
+    movies_db_path = os.path.join(os.getcwd(), "database", "movies.db")
+    if os.path.exists(movies_db_path) and os.path.abspath(movies_db_path) != os.path.abspath(db.db_path):
+        try:
+            with sqlite3.connect(movies_db_path) as mconn:
+                mconn.execute("DELETE FROM movies;")
+                mconn.commit()
+        except Exception:
+            pass
+
+    # Target channels: scan @database_Cineverse01 and @database_Cineverse
+    target_channels = ["@database_Cineverse01", "@database_Cineverse"]
 
     status_msg = await message.reply_text(
         "⏳ **Starting Channel Indexing...**\n\n"
@@ -2230,13 +2229,12 @@ async def index_handler(client: Client, message: Message):
 async def _async_channel_indexer_task(client: Client, message: Message, status_msg: Message, target_channels: List[Any]):
     status_msg_id = status_msg.id
 
-    # Deduplicate Database on Index Start: clears duplicate records and rebuilds unique constraints on file_id
-    try:
-        purged_dupes = await db.deduplicate_movies()
-        if purged_dupes > 0:
-            logger.info(f"Purged {purged_dupes} duplicate movie records on /index start.")
-    except Exception as dedup_err:
-        logger.warning(f"Error during index startup deduplication: {dedup_err}")
+    # Reset movies table on index before scanning
+    with db._get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM movies;")
+        conn.commit()
+    logger.info("Reset movies table at start of _async_channel_indexer_task.")
 
     added = 0
     total_scanned = 0
@@ -2316,16 +2314,18 @@ async def _async_channel_indexer_task(client: Client, message: Message, status_m
                             if not msg:
                                 continue
                             total_scanned += 1
-                            media = msg.document or msg.video or msg.audio or msg.animation
+                            # Extract only valid media (msg.document or msg.video)
+                            media = msg.document or msg.video
                             if media and getattr(media, "file_id", None):
                                 total_media += 1
                                 file_id = media.file_id
                                 raw_title = getattr(media, "file_name", None) or msg.caption or "Unknown"
                                 clean_title = raw_title.replace(".", " ").replace("_", " ").replace("-", " ")
                                 file_size = getattr(media, "file_size", 0)
+                                caption = msg.caption or ""
                                 cursor.execute(
                                     "INSERT OR IGNORE INTO movies (file_id, file_name, file_size, caption) VALUES (?, ?, ?, ?)",
-                                    (file_id, clean_title, file_size, msg.caption or "")
+                                    (file_id, clean_title, file_size, caption)
                                 )
                                 if cursor.rowcount > 0:
                                     added += 1
@@ -2416,7 +2416,7 @@ async def _async_channel_indexer_task(client: Client, message: Message, status_m
 # ---------------------------------------------------------------------------
 # AUTO-INDEX NEW UPLOADS IN CHANNEL
 # ---------------------------------------------------------------------------
-@app.on_message((filters.document | filters.video | filters.audio | filters.animation) & ~filters.private)
+@app.on_message((filters.document | filters.video) & ~filters.private)
 async def auto_index_channel(client: Client, message: Message):
     if message.from_user and (message.from_user.id in [7831101047, 783110149] or str(message.from_user.id) in ["7831101047", "783110149"]):
         # Skip subscription verification completely for owner
@@ -2431,10 +2431,10 @@ async def auto_index_channel(client: Client, message: Message):
         except Exception:
             pass
 
-    if not matched and str(message.chat.username or "").lower() not in ["cenahub01"] and message.chat.id not in DB_CHANNEL_IDS:
+    if not matched and str(message.chat.username or "").lower() not in ["database_cineverse01", "database_cineverse", "cenahub01"] and message.chat.id not in DB_CHANNEL_IDS:
         return
 
-    media = message.document or message.video or message.audio or message.animation
+    media = message.document or message.video
     if not media:
         return
 
@@ -2442,29 +2442,27 @@ async def auto_index_channel(client: Client, message: Message):
     if not file_id:
         return
 
-    doc_name = getattr(message.document, "file_name", None) if message.document else None
-    vid_name = getattr(message.video, "file_name", None) if message.video else None
-    raw_name = doc_name or vid_name or message.caption or getattr(media, "file_name", None) or "Unknown"
-    sanitized_title = re.sub(r"[._-]+", " ", str(raw_name)).strip()
-    if not sanitized_title:
-        sanitized_title = "Unknown"
-
-    title = sanitized_title
-    caption = str(message.caption).strip() if message.caption else title
+    raw_title = getattr(media, "file_name", None) or message.caption or "Unknown"
+    clean_title = raw_title.replace(".", " ").replace("_", " ").replace("-", " ")
+    caption = str(message.caption or "").strip()
     file_size = getattr(media, "file_size", 0) or 0
     cid = message.chat.id
 
-    success = await db.add_movie(
-        file_id=file_id,
-        title=title,
-        file_size=file_size,
-        message_id=message.id,
-        channel_id=cid,
-        file_name=title,
-        caption=caption
-    )
-    if success:
-        logger.info(f"[AUTO-INDEX] Saved '{title}' from chat {cid} (ID: {message.id})")
+    with db._get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR IGNORE INTO movies (file_id, file_name, file_size, caption) VALUES (?, ?, ?, ?)",
+            (file_id, clean_title, file_size, caption)
+        )
+        try:
+            cursor.execute(
+                "UPDATE movies SET title = COALESCE(title, ?), message_id = COALESCE(message_id, ?), channel_id = COALESCE(channel_id, ?) WHERE file_id = ?",
+                (clean_title, int(message.id), cid, file_id)
+            )
+        except Exception:
+            pass
+        conn.commit()
+    logger.info(f"[AUTO-INDEX] Saved '{clean_title}' from chat {cid} (ID: {message.id})")
 
 # ---------------------------------------------------------------------------
 # STRICT GROUP ACCESS & MULTI-GROUP ANTI-SPAM MODERATOR (GROUP -2)
@@ -2693,8 +2691,11 @@ async def auto_filter_handler(client: Client, message: Message):
             asyncio.create_task(auto_delete(block_msg, 60, reply_to_message=message))
         return
 
+    # Clean query (q = message.text.strip().lower())
+    q = message.text.strip().lower()
+
     # 4. Search Query Validation: Handle queries < 2 chars as invalid queries
-    if len(text) < 2:
+    if len(q) < 2:
         short_msg = await message.reply_text(
             "┌──────────────────────────────────────────┐\n"
             "│   ⚠️  I N V A L I D   Q U E R Y          │\n"
@@ -2709,9 +2710,48 @@ async def auto_filter_handler(client: Client, message: Message):
         return
 
     try:
-        files, total = await db.search_files(text, offset=0, limit=PAGE_SIZE)
-        logger.info(f"Database search for '{text}' in chat {message.chat.id} returned {total} results")
-        if total == 0:
+        # Search using wildcard SQL:
+        # SELECT file_id, file_name, file_size, caption FROM movies WHERE LOWER(file_name) LIKE ? OR LOWER(caption) LIKE ? LIMIT 15
+        # passing (f"%{q}%", f"%{q}%")
+        with db._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT file_id, file_name, file_size, caption FROM movies WHERE LOWER(file_name) LIKE ? OR LOWER(caption) LIKE ? LIMIT 15",
+                (f"%{q}%", f"%{q}%")
+            )
+            raw_rows = cursor.fetchall()
+            count_row = cursor.execute(
+                "SELECT COUNT(*) FROM movies WHERE LOWER(file_name) LIKE ? OR LOWER(caption) LIKE ?",
+                (f"%{q}%", f"%{q}%")
+            ).fetchone()
+            total = int(count_row[0]) if count_row else len(raw_rows)
+
+        files = []
+        for r in raw_rows:
+            f_id = str(r[0] or "")
+            f_name = str(r[1] or "Movie")
+            f_size = int(r[2] or 0)
+            cap = str(r[3] or "")
+            m_id = None
+            try:
+                with db._get_connection() as mconn:
+                    row_mid = mconn.execute("SELECT message_id FROM movies WHERE file_id = ? LIMIT 1;", (f_id,)).fetchone()
+                    if row_mid and row_mid[0]:
+                        m_id = row_mid[0]
+            except Exception:
+                pass
+
+            files.append({
+                "file_id": f_id,
+                "title": f_name,
+                "file_name": f_name,
+                "file_size": f_size,
+                "caption": cap,
+                "message_id": m_id or f_id
+            })
+
+        logger.info(f"Database search for '{q}' in chat {message.chat.id} returned {total} results")
+        if total == 0 or not files:
             # On zero search results, send request alert directly to @FlimRequest_01
             try:
                 user_first = message.from_user.first_name if (message.from_user and message.from_user.first_name) else "User"
@@ -2750,7 +2790,7 @@ async def auto_filter_handler(client: Client, message: Message):
 
         cache_id = uuid.uuid4().hex[:8]
         SEARCH_CACHE[cache_id] = text
-        total_pages = math.ceil(total / PAGE_SIZE)
+        total_pages = math.ceil(total / PAGE_SIZE) if total > PAGE_SIZE else 1
         bot_uname = await get_bot_username(client)
         markup = await build_pagination_markup(files, cache_id, 1, total_pages, bot_username=bot_uname)
         response_text = format_search_text(text, total, 1, total_pages)

@@ -2220,7 +2220,7 @@ async def index_handler(client: Client, message: Message):
     status_msg = await message.reply_text(
         "⏳ **Starting Channel Indexing...**\n\n"
         f"• **Target Channels:** `{', '.join(str(c) for c in target_channels)}`\n"
-        "• Direct streaming history scanning in progress...",
+        "• Direct Bot API batch scanning in progress...",
         quote=True
     )
 
@@ -2262,130 +2262,106 @@ async def _async_channel_indexer_task(client: Client, message: Message, status_m
 
             target_title = getattr(chat, "title", str(chat.id))
             indexed_channels.append(f"{target_title} (`{chat.id}`)")
-            logger.info(f"Indexing channel {target_title} ({chat.id}) via get_chat_history streaming...")
+            logger.info(f"Indexing channel {target_title} ({chat.id}) via Bot API get_messages batching...")
 
-            channel_scanned = 0
-            last_edit_time = time.time()
+            # Discover max_id via probe message or fallback to 10000
+            max_id = 0
+            try:
+                dummy = await client.send_message(chat.id, ".")
+                if dummy and getattr(dummy, "id", None):
+                    max_id = dummy.id
+                    try:
+                        await dummy.delete()
+                    except Exception:
+                        pass
+            except FloodWait as e:
+                logger.warning(f"FloodWait probing channel {chat.id}: sleeping {e.value}s")
+                await asyncio.sleep(e.value)
+            except Exception as dummy_err:
+                logger.warning(f"Could not probe max_id on {chat.id}: {dummy_err}")
 
-            with db._get_connection() as conn:
-                cursor = conn.cursor()
+            if not max_id:
                 try:
-                    async for msg in client.get_chat_history(chat.id):
-                        if not msg:
-                            continue
-                        total_scanned += 1
-                        channel_scanned += 1
-                        media = msg.document or msg.video or msg.audio or msg.animation
-                        if media and getattr(media, "file_id", None):
-                            total_media += 1
-                            file_id = media.file_id
-                            clean_title = (getattr(media, "file_name", None) or msg.caption or "Unknown").replace(".", " ").replace("_", " ").replace("-", " ")
-                            file_size = getattr(media, "file_size", 0)
-                            caption = msg.caption or ""
-                            cursor.execute(
-                                "INSERT OR IGNORE INTO movies (file_id, file_name, file_size, caption) VALUES (?, ?, ?, ?)",
-                                (file_id, clean_title, file_size, caption)
-                            )
-                            if cursor.rowcount > 0:
-                                added += 1
-                            try:
+                    with db._get_connection() as conn:
+                        row = conn.execute("SELECT MAX(message_id) FROM movies WHERE channel_id = ?", (chat.id,)).fetchone()
+                        if row and row[0]:
+                            max_id = int(row[0]) + 150
+                except Exception:
+                    pass
+            if not max_id or max_id < 10000:
+                max_id = max(max_id or 0, 10000)
+
+            logger.info(f"Scanning channel {chat.id} from ID 1 to {max_id} in batches of 100...")
+
+            for i in range(1, max_id + 1, 100):
+                batch_ids = list(range(i, min(i + 100, max_id + 1)))
+                messages = None
+                for attempt in range(3):
+                    try:
+                        messages = await client.get_messages(chat.id, message_ids=batch_ids)
+                        break
+                    except FloodWait as e:
+                        logger.warning(f"FloodWait on batch {batch_ids[0]}-{batch_ids[-1]}: sleeping {e.value}s")
+                        await asyncio.sleep(e.value)
+                    except Exception as batch_err:
+                        logger.warning(f"Batch fetch attempt {attempt + 1} error on {batch_ids[0]}-{batch_ids[-1]}: {batch_err}")
+                        await asyncio.sleep(0.5)
+
+                if messages:
+                    if not isinstance(messages, list):
+                        messages = [messages]
+                    with db._get_connection() as conn:
+                        cursor = conn.cursor()
+                        for msg in messages:
+                            if not msg:
+                                continue
+                            total_scanned += 1
+                            media = msg.document or msg.video or msg.audio or msg.animation
+                            if media and getattr(media, "file_id", None):
+                                total_media += 1
+                                file_id = media.file_id
+                                raw_title = getattr(media, "file_name", None) or msg.caption or "Unknown"
+                                clean_title = raw_title.replace(".", " ").replace("_", " ").replace("-", " ")
+                                file_size = getattr(media, "file_size", 0)
                                 cursor.execute(
-                                    "UPDATE movies SET title = COALESCE(title, ?), message_id = COALESCE(message_id, ?), channel_id = COALESCE(channel_id, ?) WHERE file_id = ?",
-                                    (clean_title, int(msg.id), chat.id, file_id)
+                                    "INSERT OR IGNORE INTO movies (file_id, file_name, file_size, caption) VALUES (?, ?, ?, ?)",
+                                    (file_id, clean_title, file_size, msg.caption or "")
                                 )
-                            except Exception:
-                                pass
-
-                        if channel_scanned % 50 == 0:
-                            conn.commit()
-                            now = time.time()
-                            if now - last_edit_time >= 3.0:
-                                last_edit_time = now
+                                if cursor.rowcount > 0:
+                                    added += 1
                                 try:
-                                    total_in_db = cursor.execute("SELECT COUNT(*) FROM movies;").fetchone()[0]
-                                    await status_msg.edit_text(
-                                        f"⏳ **Indexing in Progress (Streaming History Mode)...**\n\n"
-                                        f"• **Current Channel:** `{target_title}` (`{chat.id}`)\n"
-                                        f"• **Messages Scanned:** `{total_scanned}`\n"
-                                        f"• **Videos/Files Found:** `{total_media}`\n"
-                                        f"• **Newly Imported:** `{added}`\n"
-                                        f"🎬 **Total Movies in DB:** `{total_in_db}`"
-                                    )
-                                except MessageNotModified:
-                                    pass
-                                except FloodWait as e:
-                                    logger.warning(f"FloodWait during status edit: sleeping {e.value}s")
-                                    await asyncio.sleep(e.value)
-                                except Exception as edit_err:
-                                    logger.debug(f"Could not edit status message {status_msg_id}: {edit_err}")
-
-                    conn.commit()
-
-                except Exception as stream_err:
-                    conn.commit()
-                    logger.warning(f"Streaming get_chat_history error on {chat.id}: {stream_err}")
-                    if "BOT_METHOD_INVALID" in str(stream_err) or "PeerIdInvalid" in str(stream_err) or "ChannelPrivate" in str(stream_err):
-                        logger.info(f"Falling back to Bot API get_messages batch mode for {chat.id}...")
-                        max_id = 7388
-                        for i in range(1, max_id + 1, 100):
-                            batch_list = list(range(i, min(i + 100, max_id + 1)))
-                            msgs = None
-                            for attempt in range(3):
-                                try:
-                                    msgs = await client.get_messages(chat.id, message_ids=batch_list)
-                                    break
-                                except FloodWait as e:
-                                    await asyncio.sleep(e.value)
-                                except Exception:
-                                    await asyncio.sleep(0.5)
-
-                            if msgs:
-                                if not isinstance(msgs, list):
-                                    msgs = [msgs]
-                                for msg in msgs:
-                                    if not msg:
-                                        continue
-                                    total_scanned += 1
-                                    media = msg.document or msg.video or msg.audio or msg.animation
-                                    if media and getattr(media, "file_id", None):
-                                        total_media += 1
-                                        file_id = media.file_id
-                                        clean_title = (getattr(media, "file_name", None) or msg.caption or "Unknown").replace(".", " ").replace("_", " ").replace("-", " ")
-                                        file_size = getattr(media, "file_size", 0)
-                                        caption = msg.caption or ""
-                                        cursor.execute(
-                                            "INSERT OR IGNORE INTO movies (file_id, file_name, file_size, caption) VALUES (?, ?, ?, ?)",
-                                            (file_id, clean_title, file_size, caption)
-                                        )
-                                        if cursor.rowcount > 0:
-                                            added += 1
-                                        try:
-                                            cursor.execute(
-                                                "UPDATE movies SET title = COALESCE(title, ?), message_id = COALESCE(message_id, ?), channel_id = COALESCE(channel_id, ?) WHERE file_id = ?",
-                                                (clean_title, int(msg.id), chat.id, file_id)
-                                            )
-                                        except Exception:
-                                            pass
-                                conn.commit()
-                            else:
-                                total_scanned += len(batch_list)
-
-                            now = time.time()
-                            if now - last_edit_time >= 3.0:
-                                last_edit_time = now
-                                try:
-                                    total_in_db = cursor.execute("SELECT COUNT(*) FROM movies;").fetchone()[0]
-                                    await status_msg.edit_text(
-                                        f"⏳ **Indexing in Progress (Bot API Batch Mode)...**\n\n"
-                                        f"• **Current Channel:** `{target_title}` (`{chat.id}`)\n"
-                                        f"• **Scanning Range:** IDs `{batch_list[0]}` - `{batch_list[-1]}` (of `{max_id}`)\n"
-                                        f"• **Messages Scanned:** `{total_scanned}`\n"
-                                        f"• **Videos/Files Found:** `{total_media}`\n"
-                                        f"• **Newly Imported:** `{added}`\n"
-                                        f"🎬 **Total Movies in DB:** `{total_in_db}`"
+                                    cursor.execute(
+                                        "UPDATE movies SET title = COALESCE(title, ?), message_id = COALESCE(message_id, ?), channel_id = COALESCE(channel_id, ?) WHERE file_id = ?",
+                                        (clean_title, int(msg.id), chat.id, file_id)
                                     )
                                 except Exception:
                                     pass
+                        conn.commit()
+                else:
+                    total_scanned += len(batch_ids)
+
+                # Edit the status message after every 100 messages showing imported count from SELECT COUNT(*) FROM movies
+                try:
+                    with db._get_connection() as count_conn:
+                        total_in_db = count_conn.execute("SELECT COUNT(*) FROM movies;").fetchone()[0]
+                    await status_msg.edit_text(
+                        f"⏳ **Indexing in Progress (Bot API Batch Mode)...**\n\n"
+                        f"• **Current Channel:** `{target_title}` (`{chat.id}`)\n"
+                        f"• **Scanning Range:** IDs `{batch_ids[0]}` - `{batch_ids[-1]}` (of `{max_id}`)\n"
+                        f"• **Messages Scanned:** `{total_scanned}`\n"
+                        f"• **Videos/Files Found:** `{total_media}`\n"
+                        f"• **Newly Imported:** `{added}`\n"
+                        f"🎬 **Total Movies in DB:** `{total_in_db}`"
+                    )
+                except MessageNotModified:
+                    pass
+                except FloodWait as e:
+                    logger.warning(f"FloodWait during status edit: sleeping {e.value}s")
+                    await asyncio.sleep(e.value)
+                except Exception as edit_err:
+                    logger.debug(f"Could not edit status message {status_msg_id}: {edit_err}")
+
+                await asyncio.sleep(0.05)
 
             # Mirror to secondary database/movies.db if present
             movies_db_path = os.path.join(os.getcwd(), "database", "movies.db")

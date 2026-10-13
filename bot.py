@@ -262,6 +262,7 @@ class Database:
         self.authorized_groups = self.db["authorized_groups"]
         self.user_downloads = self.db["user_downloads"]
         self.group_warnings = self.db["group_warnings"]
+        self.member_adds = self.db["member_adds"]
 
         self._indexes_created = False
 
@@ -292,6 +293,8 @@ class Database:
             await self.authorized_groups.create_index("group_id", unique=True)
             await self.user_downloads.create_index("user_id", unique=True)
             await self.group_warnings.create_index([("user_id", 1), ("chat_id", 1)], unique=True)
+            await self.member_adds.create_index([("adder_id", 1), ("member_id", 1)], unique=True)
+            await self.member_adds.create_index("adder_id")
             self._indexes_created = True
             logger.info("MongoDB indexes verified successfully.")
         except Exception as e:
@@ -352,6 +355,92 @@ class Database:
             )
         except Exception as e:
             logger.error(f"Error updating user_downloads for {user_id}: {e}")
+
+    async def record_member_add(self, adder_id: int, member_id: int, chat_id: int = 0) -> Tuple[bool, int, int, bool]:
+        """
+        Records a newly added member in MongoDB.
+        Prevents self-referral and duplicate counting.
+        Every 3 unique members added grants +1 download credit and instantly clears active 7-hour cooldown.
+        Returns: (is_new, total_added, credits, new_credit_earned)
+        """
+        if not adder_id or not member_id or adder_id == member_id:
+            return False, 0, 0, False
+
+        try:
+            # Check if this member was already recorded for this adder
+            existing = await self.member_adds.find_one({"adder_id": adder_id, "member_id": member_id})
+            if existing:
+                total_added = await self.member_adds.count_documents({"adder_id": adder_id})
+                credits = await self.get_user_credits(adder_id)
+                return False, total_added, credits, False
+
+            # Insert new record
+            await self.member_adds.insert_one({
+                "adder_id": adder_id,
+                "member_id": member_id,
+                "chat_id": chat_id,
+                "added_at": time.time()
+            })
+
+            total_added = await self.member_adds.count_documents({"adder_id": adder_id})
+            new_credit_earned = False
+
+            # Every 3 members added = 1 Instant File Download Credit (Cooldown Removed)
+            if total_added > 0 and (total_added % 3 == 0):
+                await self.user_downloads.update_one(
+                    {"user_id": adder_id},
+                    {
+                        "$inc": {"download_credits": 1},
+                        "$set": {"last_download_timestamp": 0.0}
+                    },
+                    upsert=True
+                )
+                USER_DOWNLOAD_CACHE[adder_id] = 0.0
+                new_credit_earned = True
+
+            credits = await self.get_user_credits(adder_id)
+            return True, total_added, credits, new_credit_earned
+        except Exception as e:
+            logger.error(f"Error recording member add in MongoDB for {adder_id} -> {member_id}: {e}")
+            return False, 0, 0, False
+
+    async def get_user_added_members_count(self, user_id: int) -> int:
+        try:
+            return await self.member_adds.count_documents({"adder_id": user_id})
+        except Exception as e:
+            logger.error(f"Error getting member add count for {user_id}: {e}")
+            return 0
+
+    async def get_user_credits(self, user_id: int) -> int:
+        try:
+            doc = await self.user_downloads.find_one({"user_id": user_id})
+            if doc and "download_credits" in doc:
+                return max(0, int(doc.get("download_credits", 0)))
+        except Exception as e:
+            logger.error(f"Error fetching download credits for {user_id}: {e}")
+        return 0
+
+    async def consume_user_credit(self, user_id: int) -> bool:
+        try:
+            res = await self.user_downloads.update_one(
+                {"user_id": user_id, "download_credits": {"$gt": 0}},
+                {"$inc": {"download_credits": -1}}
+            )
+            return res.modified_count > 0
+        except Exception as e:
+            logger.error(f"Error consuming credit for {user_id}: {e}")
+            return False
+
+    async def clear_user_cooldown(self, user_id: int):
+        USER_DOWNLOAD_CACHE[user_id] = 0.0
+        try:
+            await self.user_downloads.update_one(
+                {"user_id": user_id},
+                {"$set": {"last_download_timestamp": 0.0}},
+                upsert=True
+            )
+        except Exception as e:
+            logger.error(f"Error clearing cooldown for {user_id}: {e}")
 
     async def add_user(self, user_id: int):
         try:
@@ -1510,6 +1599,52 @@ def build_force_join_markup(retry_callback: str = "cb_check_join") -> InlineKeyb
         ]
     ])
 
+def build_cooldown_markup(file_msg_id: Any = None) -> InlineKeyboardMarkup:
+    target_param = str(file_msg_id) if file_msg_id else "general"
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🔓 Unlock Instant Download (Bypass Cooldown)", callback_data=f"bypass_{target_param}")
+        ],
+        [
+            InlineKeyboardButton("📢 Official Channel ↗", url=FSUB_CHANNEL_LINK)
+        ]
+    ])
+
+def build_bypass_task_card(user_id: int, added_count: int, credits: int, file_msg_id: Any = None, bot_uname: str = "CineVerseFilterBot") -> Tuple[str, InlineKeyboardMarkup]:
+    needed = 3 - (added_count % 3)
+    ref_link = f"https://t.me/{bot_uname}?start=ref_{user_id}"
+    share_text = urllib.parse.quote_plus("🍿 Join CineVerse for unlimited fast movie downloads & exclusive HD releases! ⚡")
+    share_url = f"https://t.me/share/url?url={ref_link}&text={share_text}"
+    group_url = sanitize_button_url(MAIN_GROUP_LINK, "https://t.me/CineVerseFlimSearch")
+
+    text = (
+        "┌──────────────────────────────────────────┐\n"
+        "│  🚀  B Y P A S S   C O O L D O W N       │\n"
+        "│         &   U N L O C K   F I L E        │\n"
+        "└──────────────────────────────────────────┘\n\n"
+        "**Want to download immediately without waiting?**\n\n"
+        "👥 **Option 1:** Add 3 Members to our main CineVerse Group!\n"
+        "📢 **Option 2:** Share your referral link with friends or in 2 public groups!\n\n"
+        "🎁 *Every 3 members added = 1 Instant File Download Credit (Cooldown Removed)!*\n\n"
+        "──────────────────────────────────────────\n"
+        "📊 **Your Task Progress:**\n"
+        f"├─ 👥 **Members Added:** `{added_count}` (Need `{needed}` more for next credit)\n"
+        f"├─ 🎟 **Instant Credits Available:** `{credits}`\n"
+        f"└─ 🔗 **Your Referral Link:**\n`{ref_link}`"
+    )
+
+    verify_cb = f"verify_bypass_{file_msg_id}" if file_msg_id and str(file_msg_id) != "general" else "verify_bypass"
+    buttons = [
+        [InlineKeyboardButton("👥 1. Add Members to CineVerse Group ↗", url=group_url)],
+        [InlineKeyboardButton("📢 2. Share Referral Link ↗", url=share_url)],
+        [InlineKeyboardButton("🔄 Verify My Added Members / Unblock", callback_data=verify_cb)]
+    ]
+    if file_msg_id and str(file_msg_id) != "general":
+        buttons.append([
+            InlineKeyboardButton("« Back to Download", callback_data=f"get_{file_msg_id}")
+        ])
+    return text, InlineKeyboardMarkup(buttons)
+
 async def is_sender_chat_admin(client: Client, chat_id: int, user_id: int) -> bool:
     if user_id == 7831101047 or str(user_id) == "7831101047" or user_id in [7831101047, 783110149] or str(user_id) in ["7831101047", "783110149"]:
         return True
@@ -1639,6 +1774,51 @@ async def start_handler(client: Client, message: Message):
             clean_p = param[5:].strip()
             file_msg_id = int(clean_p) if clean_p.isdigit() else clean_p
             is_get_flow = False
+        elif param.startswith("ref_"):
+            ref_adder_str = param[4:].strip()
+            if ref_adder_str.isdigit():
+                ref_adder_id = int(ref_adder_str)
+                if ref_adder_id != user_id:
+                    is_new, total_added, credits, new_credit_earned = await db.record_member_add(
+                        adder_id=ref_adder_id,
+                        member_id=user_id,
+                        chat_id=0
+                    )
+                    if is_new and new_credit_earned:
+                        try:
+                            await client.send_message(
+                                chat_id=ref_adder_id,
+                                text=(
+                                    "🎉 **Cooldown Bypass Unlocked!**\n\n"
+                                    f"A friend joined via your referral link! (Total: **{total_added} referrals**)\n"
+                                    "🎁 **+1 Instant File Download Credit has been granted!**\n"
+                                    "⚡ Your active 7-hour Cooldown has been cleared.\n\n"
+                                    "🍿 You can now download your movie immediately!"
+                                )
+                            )
+                        except Exception:
+                            pass
+        elif param.startswith("bypass_") or param == "bypass":
+            clean_p = param[7:].strip() if param.startswith("bypass_") else "general"
+            added_count = await db.get_user_added_members_count(user_id)
+            credits = await db.get_user_credits(user_id)
+            bot_uname = await get_bot_username(client)
+            card_text, card_markup = build_bypass_task_card(
+                user_id=user_id,
+                added_count=added_count,
+                credits=credits,
+                file_msg_id=clean_p,
+                bot_uname=bot_uname
+            )
+            bypass_msg = await message.reply_text(
+                card_text,
+                reply_markup=card_markup,
+                quote=True,
+                disable_web_page_preview=True
+            )
+            if bypass_msg:
+                asyncio.create_task(auto_delete(bypass_msg, 180, reply_to_message=message))
+            return
         elif param.isdigit():
             file_msg_id = int(param)
             is_get_flow = False
@@ -1730,6 +1910,13 @@ async def start_handler(client: Client, message: Message):
         last_dl = await db.get_user_last_download(user_id)
         elapsed = now - last_dl
         if not (user_id == OWNER_ID or user_id in ADMIN_IDS) and elapsed < FILE_COOLDOWN_SECONDS:
+            credits = await db.get_user_credits(user_id)
+            if credits > 0:
+                await db.consume_user_credit(user_id)
+                await db.set_user_last_download(user_id, now)
+                await deliver_movie_file(client, user_id, file_msg_id)
+                return
+
             remaining = int(FILE_COOLDOWN_SECONDS - elapsed)
             rem_hours = remaining // 3600
             rem_mins = (remaining % 3600) // 60
@@ -1738,17 +1925,16 @@ async def start_handler(client: Client, message: Message):
                 "│   ⚠️  C O O L D O W N   A C T I V E      │\n"
                 "└──────────────────────────────────────────┘\n\n"
                 f"⚠️ Cooldown Active! You can only request 1 file every 7 hours. Please wait {rem_hours} hours {rem_mins} minutes.\n\n"
-                "🍿 Search again later in CineVerse Search Group!"
+                "🍿 Search again later in CineVerse Search Group!\n\n"
+                "💡 **Don't want to wait 7 hours?** Unlock instant download right now!"
             )
             cooldown_msg = await message.reply_text(
                 cooldown_text,
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("📢 Official Channel ↗", url=FSUB_CHANNEL_LINK)]
-                ]),
+                reply_markup=build_cooldown_markup(file_msg_id),
                 quote=True
             )
             if cooldown_msg:
-                asyncio.create_task(auto_delete(cooldown_msg, 60, reply_to_message=message))
+                asyncio.create_task(auto_delete(cooldown_msg, 120, reply_to_message=message))
             return
 
         # Direct Delivery (No Ads): Deliver movie file instantly and record download timestamp
@@ -2432,57 +2618,142 @@ async def on_bot_chat_member_updated(client: Client, member_update: ChatMemberUp
         old_member = member_update.old_chat_member
         chat = member_update.chat
 
-        if not chat or not new_member or not new_member.user or new_member.user.id != me_id:
+        if not chat or not new_member or not new_member.user:
             return
 
-        # Check if this update represents the bot being added/joined to a group or channel
-        was_not_in_chat = (
-            old_member is None or 
-            old_member.status in [enums.ChatMemberStatus.LEFT, enums.ChatMemberStatus.BANNED]
-        )
-        is_now_in_chat = new_member.status in [
-            enums.ChatMemberStatus.MEMBER,
-            enums.ChatMemberStatus.ADMINISTRATOR,
-            enums.ChatMemberStatus.RESTRICTED
-        ]
-
-        if not (was_not_in_chat and is_now_in_chat):
-            return
-
-        adder = member_update.from_user
-        adder_id = adder.id if adder else None
-        chat_title = getattr(chat, 'title', '') or 'Unknown Chat'
-
-        logger.info(f"Bot added to chat: '{chat_title}' (Chat ID: {chat.id}) by user {adder_id}")
-        print(f"Bot added to chat: '{chat_title}' (Chat ID: {chat.id}) by user {adder_id}")
-
-        # AUTO-LEAVE UNAUTHORIZED GROUPS:
-        # If the bot is added by anyone OTHER THAN the OWNER_ID (or ADMIN_ID),
-        # send warning and immediately leave the chat.
-        if not is_owner_or_admin(adder_id):
-            logger.warning(
-                f"⚠️ Unauthorized group addition! Chat '{chat_title}' ({chat.id}) "
-                f"added by non-owner {adder_id}. Leaving immediately..."
+        # 1. BOT ADDED / JOINED TO GROUP EVENT (AUTO-LEAVE GUARD)
+        if new_member.user.id == me_id:
+            was_not_in_chat = (
+                old_member is None or 
+                old_member.status in [enums.ChatMemberStatus.LEFT, enums.ChatMemberStatus.BANNED]
             )
-            try:
-                await client.send_message(
-                    chat.id,
-                    "⚠️ Unauthorized group addition! Only the Owner can add this bot."
-                )
-            except Exception as send_err:
-                logger.warning(f"Could not send warning message before leaving chat {chat.id}: {send_err}")
+            is_now_in_chat = new_member.status in [
+                enums.ChatMemberStatus.MEMBER,
+                enums.ChatMemberStatus.ADMINISTRATOR,
+                enums.ChatMemberStatus.RESTRICTED
+            ]
 
-            try:
-                await client.leave_chat(chat.id)
-                logger.warning(f"🚪 Auto-left unauthorized chat: '{chat_title}' ({chat.id})")
-                print(f"🚪 Auto-left unauthorized chat: '{chat_title}' ({chat.id})")
-            except Exception as leave_err:
-                logger.error(f"Failed to leave chat {chat.id}: {leave_err}")
-            return
-        else:
-            logger.info(f"✅ Bot added to '{chat_title}' ({chat.id}) by authorized Owner/Admin {adder_id}")
+            if not (was_not_in_chat and is_now_in_chat):
+                return
+
+            adder = member_update.from_user
+            adder_id = adder.id if adder else None
+            chat_title = getattr(chat, 'title', '') or 'Unknown Chat'
+
+            logger.info(f"Bot added to chat: '{chat_title}' (Chat ID: {chat.id}) by user {adder_id}")
+            print(f"Bot added to chat: '{chat_title}' (Chat ID: {chat.id}) by user {adder_id}")
+
+            # AUTO-LEAVE UNAUTHORIZED GROUPS:
+            if not is_owner_or_admin(adder_id):
+                logger.warning(
+                    f"⚠️ Unauthorized group addition! Chat '{chat_title}' ({chat.id}) "
+                    f"added by non-owner {adder_id}. Leaving immediately..."
+                )
+                try:
+                    await client.send_message(
+                        chat.id,
+                        "⚠️ Unauthorized group addition! Only the Owner can add this bot."
+                    )
+                except Exception as send_err:
+                    logger.warning(f"Could not send warning message before leaving chat {chat.id}: {send_err}")
+
+                try:
+                    await client.leave_chat(chat.id)
+                    logger.warning(f"🚪 Auto-left unauthorized chat: '{chat_title}' ({chat.id})")
+                    print(f"🚪 Auto-left unauthorized chat: '{chat_title}' ({chat.id})")
+                except Exception as leave_err:
+                    logger.error(f"Failed to leave chat {chat.id}: {leave_err}")
+                return
+            else:
+                logger.info(f"✅ Bot added to '{chat_title}' ({chat.id}) by authorized Owner/Admin {adder_id}")
+                return
+
+        # 2. MEMBER ADD COUNTER IN MAIN GROUP (COOLDOWN BYPASS TASK)
+        is_main_group = (
+            chat.id == MAIN_GROUP_ID or
+            str(chat.id) == str(MAIN_GROUP_ID) or
+            chat.id == SEARCH_GROUP_ID or
+            str(chat.id) == str(SEARCH_GROUP_ID)
+        )
+        if is_main_group and not new_member.user.is_bot:
+            was_not_in_chat = (
+                old_member is None or
+                old_member.status in [enums.ChatMemberStatus.LEFT, enums.ChatMemberStatus.BANNED]
+            )
+            is_now_in_chat = new_member.status in [
+                enums.ChatMemberStatus.MEMBER,
+                enums.ChatMemberStatus.RESTRICTED
+            ]
+            if was_not_in_chat and is_now_in_chat:
+                adder = member_update.from_user
+                if adder and adder.id != new_member.user.id and not adder.is_bot:
+                    is_new, total_added, credits, new_credit_earned = await db.record_member_add(
+                        adder_id=adder.id,
+                        member_id=new_member.user.id,
+                        chat_id=chat.id
+                    )
+                    if is_new:
+                        logger.info(f"User {adder.id} added new member {new_member.user.id} to main group (Total added: {total_added})")
+                        if new_credit_earned:
+                            try:
+                                await client.send_message(
+                                    chat_id=adder.id,
+                                    text=(
+                                        "🎉 **Cooldown Bypass Unlocked!**\n\n"
+                                        f"You successfully added **{total_added} members** to CineVerse Group!\n"
+                                        "🎁 **+1 Instant File Download Credit has been granted!**\n"
+                                        "⚡ Your active 7-hour Cooldown has been cleared.\n\n"
+                                        "🍿 You can now download your movie immediately!"
+                                    )
+                                )
+                            except Exception as notify_err:
+                                logger.debug(f"Could not notify user {adder.id} in PM: {notify_err}")
     except Exception as e:
         logger.debug(f"Chat member update error: {e}")
+
+@app.on_message(filters.group & filters.new_chat_members)
+async def on_new_chat_members_added(client: Client, message: Message):
+    try:
+        chat = message.chat
+        if not chat:
+            return
+        is_main_group = (
+            chat.id == MAIN_GROUP_ID or
+            str(chat.id) == str(MAIN_GROUP_ID) or
+            chat.id == SEARCH_GROUP_ID or
+            str(chat.id) == str(SEARCH_GROUP_ID)
+        )
+        if not is_main_group:
+            return
+
+        adder = message.from_user
+        if not adder or adder.is_bot:
+            return
+
+        for new_user in message.new_chat_members:
+            if new_user.is_bot or new_user.id == adder.id:
+                continue
+            is_new, total_added, credits, new_credit_earned = await db.record_member_add(
+                adder_id=adder.id,
+                member_id=new_user.id,
+                chat_id=chat.id
+            )
+            if is_new and new_credit_earned:
+                try:
+                    await client.send_message(
+                        chat_id=adder.id,
+                        text=(
+                            "🎉 **Cooldown Bypass Unlocked!**\n\n"
+                            f"You successfully added **{total_added} members** to CineVerse Group!\n"
+                            "🎁 **+1 Instant File Download Credit has been granted!**\n"
+                            "⚡ Your active 7-hour Cooldown has been cleared.\n\n"
+                            "🍿 You can now download your movie immediately!"
+                        )
+                    )
+                except Exception:
+                    pass
+    except Exception as e:
+        logger.error(f"Error handling new_chat_members: {e}")
 
 @app.on_message(filters.group, group=-2)
 async def group_security_and_antispam_handler(client: Client, message: Message):
@@ -3330,10 +3601,36 @@ async def callback_router(client: Client, query: CallbackQuery):
         last_dl = await db.get_user_last_download(user_id)
         elapsed = now - last_dl
         if not (user_id == OWNER_ID or user_id in ADMIN_IDS) and elapsed < FILE_COOLDOWN_SECONDS:
+            credits = await db.get_user_credits(user_id)
+            if credits > 0:
+                await db.consume_user_credit(user_id)
+                await db.set_user_last_download(user_id, now)
+                await query.answer("🎟 Instant Download Credit applied! Delivering file...", show_alert=False)
+                try:
+                    await query.message.delete()
+                except Exception:
+                    pass
+                await deliver_movie_file(client, user_id, msg_id)
+                return
+
             remaining = int(FILE_COOLDOWN_SECONDS - elapsed)
             rem_hours = remaining // 3600
             rem_mins = (remaining % 3600) // 60
-            await query.answer(f"⚠️ Cooldown Active! You can only request 1 file every 7 hours. Please wait {rem_hours} hours {rem_mins} minutes.", show_alert=True)
+            cooldown_text = (
+                "┌──────────────────────────────────────────┐\n"
+                "│   ⚠️  C O O L D O W N   A C T I V E      │\n"
+                "└──────────────────────────────────────────┘\n\n"
+                f"⚠️ Cooldown Active! You can only request 1 file every 7 hours. Please wait {rem_hours} hours {rem_mins} minutes.\n\n"
+                "🍿 Search again later in CineVerse Search Group!\n\n"
+                "💡 **Don't want to wait 7 hours?** Unlock instant download right now!"
+            )
+            try:
+                await query.message.edit_text(
+                    cooldown_text,
+                    reply_markup=build_cooldown_markup(msg_id)
+                )
+            except Exception:
+                await query.answer(f"⚠️ Cooldown Active! Please wait {rem_hours}h {rem_mins}m or unlock via Bypass task.", show_alert=True)
             return
 
         # Direct Delivery (No Ads): Deliver movie file instantly
@@ -3344,6 +3641,106 @@ async def callback_router(client: Client, query: CallbackQuery):
         except Exception:
             pass
         await deliver_movie_file(client, user_id, msg_id)
+        return
+
+    elif data.startswith("bypass_"):
+        file_target = data[7:].strip()
+        added_count = await db.get_user_added_members_count(user_id)
+        credits = await db.get_user_credits(user_id)
+        bot_uname = await get_bot_username(client)
+        card_text, card_markup = build_bypass_task_card(
+            user_id=user_id,
+            added_count=added_count,
+            credits=credits,
+            file_msg_id=file_target,
+            bot_uname=bot_uname
+        )
+        try:
+            await query.message.edit_text(
+                card_text,
+                reply_markup=card_markup,
+                disable_web_page_preview=True
+            )
+        except Exception:
+            try:
+                await query.message.reply_text(
+                    card_text,
+                    reply_markup=card_markup,
+                    disable_web_page_preview=True
+                )
+            except Exception:
+                pass
+        await query.answer()
+        return
+
+    elif data.startswith("verify_bypass_") or data == "verify_bypass":
+        file_target = data.replace("verify_bypass_", "").replace("verify_bypass", "").strip()
+        target_msg_id = int(file_target) if file_target.isdigit() else None
+
+        added_count = await db.get_user_added_members_count(user_id)
+        credits = await db.get_user_credits(user_id)
+        now = time.time()
+        last_dl = await db.get_user_last_download(user_id)
+        elapsed = now - last_dl
+        is_cooldown_active = not (user_id == OWNER_ID or user_id in ADMIN_IDS) and elapsed < FILE_COOLDOWN_SECONDS
+
+        if credits > 0:
+            await db.consume_user_credit(user_id)
+            await db.clear_user_cooldown(user_id)
+            await query.answer("🎉 Verified! 1 Download Credit applied & Cooldown cleared!", show_alert=True)
+            if target_msg_id:
+                try:
+                    await query.message.delete()
+                except Exception:
+                    pass
+                await deliver_movie_file(client, user_id, target_msg_id)
+                return
+            else:
+                bot_uname = await get_bot_username(client)
+                card_text, card_markup = build_bypass_task_card(
+                    user_id=user_id,
+                    added_count=added_count,
+                    credits=credits - 1,
+                    file_msg_id=file_target,
+                    bot_uname=bot_uname
+                )
+                try:
+                    await query.message.edit_text(card_text, reply_markup=card_markup, disable_web_page_preview=True)
+                except Exception:
+                    pass
+                return
+
+        if not is_cooldown_active:
+            await query.answer("✅ Cooldown is not active! Delivering your file...", show_alert=False)
+            if target_msg_id:
+                try:
+                    await query.message.delete()
+                except Exception:
+                    pass
+                await deliver_movie_file(client, user_id, target_msg_id)
+                return
+            else:
+                return
+
+        rem_in_cycle = added_count % 3
+        needed = 3 - rem_in_cycle
+        await query.answer(
+            f"⚠️ Verification: You've added {added_count} member(s) ({rem_in_cycle}/3).\n"
+            f"Please add {needed} more member(s) to unlock +1 download credit!",
+            show_alert=True
+        )
+        bot_uname = await get_bot_username(client)
+        card_text, card_markup = build_bypass_task_card(
+            user_id=user_id,
+            added_count=added_count,
+            credits=credits,
+            file_msg_id=file_target,
+            bot_uname=bot_uname
+        )
+        try:
+            await query.message.edit_text(card_text, reply_markup=card_markup, disable_web_page_preview=True)
+        except Exception:
+            pass
         return
 
     elif data.startswith("check_token_"):

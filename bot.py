@@ -2732,21 +2732,6 @@ async def auto_filter_handler(client: Client, message: Message):
             asyncio.create_task(auto_delete(denied_msg, 60, reply_to_message=message))
         return
 
-    # 3. Mandatory Force-Subscription Check for non-owner (Group and PM)
-    if not is_owner and not await is_user_fully_joined(client, user_id):
-        user_name = (message.from_user.first_name if (message.chat and message.chat.type == enums.ChatType.PRIVATE) else (message.from_user.mention if message.from_user else "Friend"))
-        fsub_text = build_force_sub_text(user_name)
-        fsub_markup = build_force_join_markup("cb_check_join")
-        block_msg = await message.reply_text(
-            fsub_text,
-            reply_markup=fsub_markup,
-            quote=True,
-            disable_web_page_preview=True
-        )
-        if block_msg:
-            asyncio.create_task(auto_delete(block_msg, 60, reply_to_message=message))
-        return
-
     # Clean query (q = message.text.strip().lower())
     q = message.text.strip().lower()
 
@@ -3308,7 +3293,8 @@ async def callback_router(client: Client, query: CallbackQuery):
         await query.answer()
 
     elif data.startswith("get_"):
-        msg_id = int(data.split("_")[1])
+        raw_id = data.split("_", 1)[1]
+        msg_id = int(raw_id) if raw_id.isdigit() else raw_id
 
         # Strict Force Join Check (Request Channel & Backup Channel)
         if not is_owner and not await is_user_fully_joined(client, user_id):

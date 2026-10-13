@@ -6,7 +6,6 @@ import math
 import time
 import uuid
 import json
-import sqlite3
 import logging
 import threading
 import urllib.request
@@ -177,21 +176,20 @@ SEARCH_CACHE: Dict[str, str] = {}
 processed_requests: Dict[Any, float] = {}
 PROCESSED_REQUESTS = processed_requests  # Global processed_requests cache with timestamp expiry
 REQUEST_LOCK_EXPIRY = 5.0  # 5-second deduplication lock window
-MONGO_URI = get_env_str("MONGO_URI", get_env_str("MONGODB_URI", "mongodb://localhost:27017"))
-DATABASE_NAME = get_env_str("DATABASE_NAME", "cineverse")
-DB_FILE = os.path.join(os.getcwd(), "database.db")
+MONGO_URI = os.getenv("MONGO_URI") or "mongodb://localhost:27017"
+DATABASE_NAME = os.getenv("DATABASE_NAME", "cineverse")
 TARGET_RESOLVED_CHAT_ID: Optional[Any] = None
 FSUB_RESOLVED_CHAT_ID: Optional[Any] = None
 USER_DOWNLOAD_CACHE: Dict[int, float] = {}
 FILE_COOLDOWN_SECONDS: int = 25200  # 7 hours = 7 * 3600 seconds
 
 # ---------------------------------------------------------------------------
-# DATABASE MANAGER (MONGODB MOTOR - FULL ASYNC ARCHITECTURE)
+# DATABASE MANAGER (MONGODB ATLAS MOTOR - FULL ASYNC ARCHITECTURE)
 # ---------------------------------------------------------------------------
 class Database:
-    def __init__(self, uri: str = MONGO_URI, db_name: str = DATABASE_NAME):
-        self.uri = uri
-        self.db_name = db_name
+    def __init__(self, uri: str = None, db_name: str = None):
+        self.uri = uri or os.getenv("MONGO_URI") or "mongodb://localhost:27017"
+        self.db_name = db_name or os.getenv("DATABASE_NAME", "cineverse")
         self.client = motor.motor_asyncio.AsyncIOMotorClient(self.uri)
         try:
             default_db = self.client.get_default_database()
@@ -220,10 +218,6 @@ class Database:
 
     def __getitem__(self, name: str):
         return self.db[name]
-
-    def _get_connection(self):
-        """Fallback connection for legacy SQLite migration if referenced."""
-        return sqlite3.connect(DB_FILE, check_same_thread=False)
 
     async def init_indexes(self):
         if self._indexes_created:

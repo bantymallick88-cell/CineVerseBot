@@ -228,6 +228,14 @@ class Database:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_channel_id ON movies(channel_id);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_title ON movies(title);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_msg_id ON movies(message_id);")
+
+            # Deduplicate database and rebuild unique constraints on file_id
+            try:
+                conn.execute("DELETE FROM movies WHERE rowid NOT IN (SELECT MIN(rowid) FROM movies GROUP BY file_id);")
+                conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_movies_unique_file_id ON movies(file_id);")
+            except Exception as e:
+                logger.warning(f"Note on initial deduplication/unique index: {e}")
+
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     user_id INTEGER PRIMARY KEY,
@@ -477,6 +485,30 @@ class Database:
             logger.error(f"Error inserting batch: {e}")
             return 0
 
+    def _deduplicate_movies(self) -> int:
+        purged = 0
+        try:
+            with self._get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("DELETE FROM movies WHERE rowid NOT IN (SELECT MIN(rowid) FROM movies GROUP BY file_id);")
+                purged = cur.rowcount
+                conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_movies_unique_file_id ON movies(file_id);")
+                conn.commit()
+                # Mirror deduplication if mirror db exists
+                movies_db_path = os.path.join(os.getcwd(), "database", "movies.db")
+                if os.path.exists(movies_db_path) and os.path.abspath(movies_db_path) != os.path.abspath(self.db_path):
+                    try:
+                        with sqlite3.connect(movies_db_path) as mconn:
+                            mconn.execute("DELETE FROM movies WHERE rowid NOT IN (SELECT MIN(rowid) FROM movies GROUP BY file_id);")
+                            mconn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_movies_unique_file_id ON movies(file_id);")
+                            mconn.commit()
+                    except Exception:
+                        pass
+                logger.info(f"SQLite deduplication completed: purged {purged} duplicate records.")
+        except Exception as e:
+            logger.error(f"Error during SQLite deduplication: {e}", exc_info=True)
+        return purged
+
     def _detect_table_and_columns(self, conn: sqlite3.Connection):
         try:
             cur = conn.cursor()
@@ -666,7 +698,7 @@ class Database:
     def _get_stats(self) -> Dict[str, int]:
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            total_movies = cursor.execute("SELECT COUNT(*) FROM movies;").fetchone()[0]
+            total_movies = cursor.execute("SELECT COUNT(DISTINCT file_id) FROM movies;").fetchone()[0]
             total_users = cursor.execute("SELECT COUNT(*) FROM users;").fetchone()[0]
             return {"movies": total_movies, "users": total_users}
 
@@ -803,6 +835,9 @@ class Database:
 
     async def get_file_by_msg_id(self, message_id: int) -> Optional[Dict[str, Any]]:
         return await asyncio.to_thread(self._get_file_by_msg_id, message_id)
+
+    async def deduplicate_movies(self) -> int:
+        return await asyncio.to_thread(self._deduplicate_movies)
 
     async def get_stats(self) -> Dict[str, int]:
         return await asyncio.to_thread(self._get_stats)
@@ -2169,6 +2204,14 @@ async def index_handler(client: Client, message: Message):
         quote=True
     )
     status_msg_id = status_msg.id
+
+    # 1. Deduplicate Database on Index Start: clears duplicate records and rebuilds unique constraints on file_id
+    try:
+        purged_dupes = await db.deduplicate_movies()
+        if purged_dupes > 0:
+            logger.info(f"Purged {purged_dupes} duplicate movie records on /index start.")
+    except Exception as dedup_err:
+        logger.warning(f"Error during index startup deduplication: {dedup_err}")
 
     added = 0
     total_scanned = 0

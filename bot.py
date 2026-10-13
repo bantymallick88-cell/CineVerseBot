@@ -220,6 +220,10 @@ WELCOME_IMAGE_URL = get_env_str(
     "WELCOME_IMAGE_URL",
     "https://images.unsplash.com/photo-1536440136628-849c177e76a1?q=80&w=1200&auto=format&fit=crop"
 )
+POPUP_ANIMATION_URL = get_env_str(
+    "POPUP_ANIMATION_URL",
+    os.getenv("VAULT_ANIMATION_URL", "https://media.giphy.com/media/xUPGcC4A6ElcqtUJd6/giphy.gif")
+)
 
 # Profanity and Abusive Words pattern for Anti-Spam moderation
 SPAM_WORDS_PATTERN = re.compile(
@@ -1200,46 +1204,42 @@ async def deliver_movie_file(client: Client, user_id: int, msg_id: int):
 
         meta = extract_movie_metadata(title)
 
-        # STYLISH POPUP ANIMATION (2-3 SECONDS):
-        # Display a temporary, ultra-stylish 2-3 second loading/popup message
-        loading_msg = None
+        # 1. VISUAL ANIMATION POPUP (2.5 SECONDS):
+        # Right after Force Sub verification in PM, send high-quality animated media popup
+        pop_msg = None
         try:
-            loading_msg = await client.send_message(
-                chat_id=user_id,
-                text=(
-                    "┌──────────────────────────────────────────┐\n"
-                    "│   ⚡  C I N E V E R S E   V A U L T      │\n"
-                    "│        Secure File Link Generator        │\n"
-                    "└──────────────────────────────────────────┘\n\n"
-                    f"🎬 **Movie:** `{meta['clean_title']}`\n"
-                    "⏳ **Generating Secure High-Speed Download Link...**\n"
-                    "├─ 🔐 Encrypting media stream...\n"
-                    "├─ 🚀 Bypassing server throttle...\n"
-                    "└─ 💎 Preparing ultra-fast stream delivery...\n\n"
-                    "✨ *Please wait 2-3 seconds...*"
-                ),
-                disable_web_page_preview=True
-            )
-            await asyncio.sleep(1.2)
-            if loading_msg:
+            try:
+                pop_msg = await client.send_animation(
+                    chat_id=user_id,
+                    animation=POPUP_ANIMATION_URL,
+                    caption="⏳ Preparing your media vault file..."
+                )
+            except Exception as anim_err:
+                logger.warning(f"send_animation failed ({anim_err}), attempting send_video...")
                 try:
-                    await loading_msg.edit_text(
-                        "┌──────────────────────────────────────────┐\n"
-                        "│   ⚡  C I N E V E R S E   V A U L T      │\n"
-                        "│        Ready For High-Speed Download     │\n"
-                        "└──────────────────────────────────────────┘\n\n"
-                        f"🎬 **Movie:** `{meta['clean_title']}`\n"
-                        "⚡ **Link Ready! Delivering file to your chat...**\n"
-                        "├─ 📦 Fetching file from CineVerse Vault...\n"
-                        "└─ 🍿 File arriving in a moment!\n\n"
-                        "🚀 *Sending your movie now...*",
-                        disable_web_page_preview=True
+                    pop_msg = await client.send_video(
+                        chat_id=user_id,
+                        video=POPUP_ANIMATION_URL,
+                        caption="⏳ Preparing your media vault file..."
                     )
-                except Exception:
-                    pass
-            await asyncio.sleep(1.0)
-        except Exception as anim_err:
-            logger.warning(f"Note on delivery animation: {anim_err}")
+                except Exception as vid_err:
+                    logger.warning(f"send_video failed ({vid_err}), falling back to text notification...")
+                    pop_msg = await client.send_message(
+                        chat_id=user_id,
+                        text="⏳ Preparing your media vault file..."
+                    )
+        except Exception as e:
+            logger.warning(f"Could not send animated popup media: {e}")
+
+        # Keep it visible for exactly 2.5 seconds
+        await asyncio.sleep(2.5)
+
+        # 2. CLEANUP: Delete the animated popup video message after 2.5 seconds
+        if pop_msg:
+            try:
+                await pop_msg.delete()
+            except Exception as del_err:
+                logger.debug(f"Popup cleanup error: {del_err}")
 
         caption = (
             "┌──────────────────────────────────────────┐\n"
@@ -1286,13 +1286,6 @@ async def deliver_movie_file(client: Client, user_id: int, msg_id: int):
                 except Exception as copy_err:
                     logger.warning(f"copy_message failed for {target_msg_id}: {copy_err}")
                     sent_file = None
-
-        # Auto-delete the loading popup message after delivery
-        if loading_msg:
-            try:
-                await loading_msg.delete()
-            except Exception:
-                pass
 
         if sent_file:
             asyncio.create_task(auto_delete(sent_file, 120))

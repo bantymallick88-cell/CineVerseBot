@@ -40,7 +40,8 @@ from pyrogram.types import (
     BotCommand,
     BotCommandScopeDefault,
     BotCommandScopeChat,
-    WebAppInfo
+    WebAppInfo,
+    ChatMemberUpdated
 )
 from pyrogram.errors import (
     FloodWait,
@@ -132,6 +133,24 @@ def parse_admin_ids() -> set:
 
 ADMIN_IDS = parse_admin_ids()
 
+def is_owner_or_admin(user_id: Optional[Union[int, str]]) -> bool:
+    """
+    Checks if a user ID belongs to the Bot Owner or authorized Admins.
+    """
+    if user_id is None:
+        return False
+    try:
+        uid = int(user_id)
+        return (
+            uid in ADMIN_IDS or 
+            uid == OWNER_ID or 
+            uid == ADMIN_ID or 
+            uid in [7831101047, 783110149] or 
+            str(uid) in ["7831101047", "783110149"]
+        )
+    except (ValueError, TypeError):
+        return str(user_id) in ["7831101047", "783110149"]
+
 # GPLinks Shortener API Configuration (Strict 1 File = 1 Ad Flow)
 GPLINKS_API_KEY = os.getenv("GPLINKS_API_KEY") or get_env_str("GPLINKS_API_KEY", get_env_str("AROLINKS_API_KEY", ""))
 AROLINKS_API_KEY = GPLINKS_API_KEY  # Backward compatibility alias
@@ -163,7 +182,7 @@ def sanitize_button_url(url: Optional[str], default: str = "https://t.me/CineVer
     return url
 
 # Channel 1: Request Channel / Group Configuration
-REQUEST_CHANNEL_ID = get_env_int("REQUEST_CHANNEL_ID", get_env_int("REQUEST_GROUP_ID", -1004427640174))
+REQUEST_CHANNEL_ID = get_env_int("REQUEST_CHANNEL_ID", get_env_int("REQUEST_GROUP_ID", 0))
 REQUEST_CHANNEL_LINK = sanitize_button_url(
     os.getenv("REQUEST_CHANNEL_LINK") or os.getenv("REQUEST_GROUP_LINK") or "https://t.me/FlimRequest_01",
     "https://t.me/FlimRequest_01"
@@ -181,7 +200,7 @@ FSUB_CHANNEL_ID = BACKUP_CHANNEL_ID
 FSUB_CHANNEL_LINK = BACKUP_CHANNEL_LINK
 
 # Main Search Group Configuration (where movie queries are accepted)
-MAIN_GROUP_ID = get_env_int("MAIN_GROUP_ID", get_env_int("SEARCH_GROUP_ID", -1004427640174))
+MAIN_GROUP_ID = get_env_int("MAIN_GROUP_ID", get_env_int("SEARCH_GROUP_ID", get_env_int("FSUB_GROUP_ID", -1004427640174)))
 MAIN_GROUP_LINK = sanitize_button_url(
     os.getenv("MAIN_GROUP_LINK") or os.getenv("SEARCH_GROUP_LINK") or "https://t.me/CineVerseFlimSearch",
     "https://t.me/CineVerseFlimSearch"
@@ -1140,19 +1159,33 @@ async def resolve_channel_peer(client: Client, target_channel: Any = None) -> An
     return resolved
 
 BOT_USERNAME: Optional[str] = None
+BOT_USER_ID: Optional[int] = None
 
 async def get_bot_username(client: Client) -> str:
     global BOT_USERNAME
     if BOT_USERNAME:
         return BOT_USERNAME
     try:
-        me = await client.get_me()
+        me = getattr(client, "me", None) or await client.get_me()
         if me and me.username:
             BOT_USERNAME = me.username
             return BOT_USERNAME
     except Exception as e:
         logger.warning(f"Error fetching bot username: {e}")
     return os.getenv("BOT_USERNAME", "CineVerseFilterBot")
+
+async def get_bot_id(client: Client) -> int:
+    global BOT_USER_ID
+    if BOT_USER_ID:
+        return BOT_USER_ID
+    try:
+        me = getattr(client, "me", None) or await client.get_me()
+        if me and me.id:
+            BOT_USER_ID = me.id
+            return BOT_USER_ID
+    except Exception as e:
+        logger.warning(f"Error fetching bot ID: {e}")
+    return 0
 
 async def deliver_movie_file(client: Client, user_id: int, msg_id: int):
     # Code-Level Deduplication Lock: Ignore duplicate delivery within 5 seconds
@@ -1489,15 +1522,29 @@ async def is_sender_chat_admin(client: Client, chat_id: int, user_id: int) -> bo
 
 async def check_group_authorization(client: Client, message: Message) -> bool:
     """
-    Fallback Mode: Temporarily allow search queries from ANY group while logging chat ID.
+    Validates if the group/chat is an authorized chat for CineVerse bot.
+    Authorized chats include: MAIN_GROUP_ID, REQUEST_CHANNEL_ID, BACKUP_CHANNEL_ID, and DB Channels.
     """
-    user_id = message.from_user.id if message.from_user else None
-    if user_id == 7831101047 or str(user_id) == "7831101047":
+    if not message.chat or message.chat.type == enums.ChatType.PRIVATE:
         return True
-    if message.chat:
-        logger.info(f"Incoming Search Chat ID: {message.chat.id} | Title: '{getattr(message.chat, 'title', '')}'")
-        print(f"Incoming Search Chat ID: {message.chat.id} | Title: '{getattr(message.chat, 'title', '')}'")
-    return True
+
+    chat_id = message.chat.id
+    if (
+        chat_id == MAIN_GROUP_ID or
+        str(chat_id) == str(MAIN_GROUP_ID) or
+        (REQUEST_CHANNEL_ID and (chat_id == REQUEST_CHANNEL_ID or str(chat_id) == str(REQUEST_CHANNEL_ID))) or
+        (BACKUP_CHANNEL_ID and (chat_id == BACKUP_CHANNEL_ID or str(chat_id) == str(BACKUP_CHANNEL_ID))) or
+        chat_id in [cid for cid in DB_CHANNEL_IDS if isinstance(cid, int)] or
+        str(chat_id) in [str(cid) for cid in DB_CHANNEL_IDS]
+    ):
+        return True
+
+    sender_id = message.from_user.id if message.from_user else None
+    if is_owner_or_admin(sender_id):
+        return True
+
+    logger.warning(f"🚫 Unauthorized chat access: chat {chat_id} ('{getattr(message.chat, 'title', '')}') from user {sender_id}")
+    return False
 
 # ---------------------------------------------------------------------------
 # COMMAND HANDLERS
@@ -2374,18 +2421,62 @@ async def auto_index_channel(client: Client, message: Message):
 # STRICT GROUP ACCESS & MULTI-GROUP ANTI-SPAM MODERATOR (GROUP -2)
 # ---------------------------------------------------------------------------
 @app.on_chat_member_updated()
-async def on_bot_chat_member_updated(client: Client, member_update):
-    if getattr(member_update, "from_user", None) and (member_update.from_user.id in [7831101047, 783110149] or str(member_update.from_user.id) in ["7831101047", "783110149"]):
-        # Skip subscription verification completely for owner
-        pass
+async def on_bot_chat_member_updated(client: Client, member_update: ChatMemberUpdated):
     try:
-        me = await client.get_me()
+        me_id = await get_bot_id(client)
         new_member = member_update.new_chat_member
-        if new_member and new_member.user and new_member.user.id == me.id:
-            chat = member_update.chat
-            if chat:
-                logger.info(f"Bot added to chat: '{getattr(chat, 'title', '')}' (Chat ID: {chat.id})")
-                print(f"Bot added to chat: '{getattr(chat, 'title', '')}' (Chat ID: {chat.id})")
+        old_member = member_update.old_chat_member
+        chat = member_update.chat
+
+        if not chat or not new_member or not new_member.user or new_member.user.id != me_id:
+            return
+
+        # Check if this update represents the bot being added/joined to a group or channel
+        was_not_in_chat = (
+            old_member is None or 
+            old_member.status in [enums.ChatMemberStatus.LEFT, enums.ChatMemberStatus.BANNED]
+        )
+        is_now_in_chat = new_member.status in [
+            enums.ChatMemberStatus.MEMBER,
+            enums.ChatMemberStatus.ADMINISTRATOR,
+            enums.ChatMemberStatus.RESTRICTED
+        ]
+
+        if not (was_not_in_chat and is_now_in_chat):
+            return
+
+        adder = member_update.from_user
+        adder_id = adder.id if adder else None
+        chat_title = getattr(chat, 'title', '') or 'Unknown Chat'
+
+        logger.info(f"Bot added to chat: '{chat_title}' (Chat ID: {chat.id}) by user {adder_id}")
+        print(f"Bot added to chat: '{chat_title}' (Chat ID: {chat.id}) by user {adder_id}")
+
+        # AUTO-LEAVE UNAUTHORIZED GROUPS:
+        # If the bot is added by anyone OTHER THAN the OWNER_ID (or ADMIN_ID),
+        # send warning and immediately leave the chat.
+        if not is_owner_or_admin(adder_id):
+            logger.warning(
+                f"⚠️ Unauthorized group addition! Chat '{chat_title}' ({chat.id}) "
+                f"added by non-owner {adder_id}. Leaving immediately..."
+            )
+            try:
+                await client.send_message(
+                    chat.id,
+                    "⚠️ Unauthorized group addition! Only the Owner can add this bot."
+                )
+            except Exception as send_err:
+                logger.warning(f"Could not send warning message before leaving chat {chat.id}: {send_err}")
+
+            try:
+                await client.leave_chat(chat.id)
+                logger.warning(f"🚪 Auto-left unauthorized chat: '{chat_title}' ({chat.id})")
+                print(f"🚪 Auto-left unauthorized chat: '{chat_title}' ({chat.id})")
+            except Exception as leave_err:
+                logger.error(f"Failed to leave chat {chat.id}: {leave_err}")
+            return
+        else:
+            logger.info(f"✅ Bot added to '{chat_title}' ({chat.id}) by authorized Owner/Admin {adder_id}")
     except Exception as e:
         logger.debug(f"Chat member update error: {e}")
 
@@ -2509,12 +2600,42 @@ async def service_message_cleaner(client: Client, message: Message):
     if is_duplicate_message(message):
         return
 
-    # Unauthorized Group Protection: If bot was added to a group
+    # AUTO-LEAVE UNAUTHORIZED GROUPS:
+    # If the bot is added to any group via service message by anyone OTHER THAN OWNER_ID/ADMIN_ID,
+    # send warning and immediately leave the chat.
     if getattr(message, "new_chat_members", None):
-        me = await client.get_me()
-        if any(u.id == me.id for u in message.new_chat_members):
-            if not await check_group_authorization(client, message):
+        me_id = await get_bot_id(client)
+        if any(u.id == me_id for u in message.new_chat_members):
+            adder = message.from_user
+            adder_id = adder.id if adder else None
+            chat = message.chat
+            chat_title = getattr(chat, 'title', '') or 'Unknown Chat'
+
+            if not is_owner_or_admin(adder_id):
+                logger.warning(
+                    f"⚠️ Unauthorized group addition via service message! Chat '{chat_title}' ({chat.id}) "
+                    f"added by non-owner {adder_id}. Leaving immediately..."
+                )
+                try:
+                    await message.reply_text("⚠️ Unauthorized group addition! Only the Owner can add this bot.")
+                except Exception:
+                    try:
+                        await client.send_message(
+                            chat.id,
+                            "⚠️ Unauthorized group addition! Only the Owner can add this bot."
+                        )
+                    except Exception as send_err:
+                        logger.warning(f"Could not send warning message before leaving chat {chat.id}: {send_err}")
+
+                try:
+                    await client.leave_chat(chat.id)
+                    logger.warning(f"🚪 Auto-left unauthorized chat: '{chat_title}' ({chat.id})")
+                    print(f"🚪 Auto-left unauthorized chat: '{chat_title}' ({chat.id})")
+                except Exception as leave_err:
+                    logger.error(f"Failed to leave chat {chat.id}: {leave_err}")
                 return
+            else:
+                logger.info(f"✅ Bot added to '{chat_title}' ({chat.id}) by authorized Owner/Admin {adder_id}")
 
     asyncio.create_task(auto_delete(message, 60))
 
@@ -2536,22 +2657,13 @@ async def auto_filter_handler(client: Client, message: Message):
     if not message.from_user:
         return
     user_id = message.from_user.id
-    is_owner = (user_id in [7831101047, 783110149] or str(user_id) in ["7831101047", "783110149"])
-
-    # Print / Log incoming message chat ID (Fallback Mode)
-    if message.chat:
-        logger.info(f"Incoming Search Chat ID: {message.chat.id} | Chat Type: {message.chat.type} | Group Title: '{getattr(message.chat, 'title', '')}' | User: {user_id} | Query: '{text}'")
-        print(f"Incoming Search Chat ID: {message.chat.id} | Group Title: '{getattr(message.chat, 'title', '')}' | Query: '{text}'")
-
-    # Enforce 60-second auto-delete on user message
-    asyncio.create_task(auto_delete(message, 60))
+    is_owner = is_owner_or_admin(user_id)
 
     # Ignore command messages so dedicated command handlers can process them
     if text.startswith("/"):
         return
 
-    # 1. RESTRICT SEARCH TO MAIN GROUP:
-    # In private PM chat, disable search handling and redirect user to main CineVerse group
+    # 1. PM RESTRICTION: Disable search handling in private PM chat and redirect user to main CineVerse group
     if message.chat and message.chat.type == enums.ChatType.PRIVATE:
         pm_notice = (
             "┌──────────────────────────────────────────┐\n"
@@ -2573,6 +2685,30 @@ async def auto_filter_handler(client: Client, message: Message):
         if pm_msg:
             asyncio.create_task(auto_delete(pm_msg, 60, reply_to_message=message))
         return
+
+    # 2. STRICT MAIN GROUP SEARCH ONLY:
+    # Restrict search query execution exclusively to the configured MAIN_GROUP_ID.
+    # Completely ignore or block search functionality in database channels, request groups, or any unauthorized group/channel.
+    is_main_search_chat = (
+        message.chat and (
+            message.chat.id == MAIN_GROUP_ID or 
+            str(message.chat.id) == str(MAIN_GROUP_ID)
+        )
+    )
+    if not is_main_search_chat:
+        logger.info(
+            f"🚫 [SEARCH BLOCKED] Search query '{text}' from user {user_id} ignored: "
+            f"Chat {getattr(message.chat, 'id', None)} ('{getattr(message.chat, 'title', '')}') "
+            f"is NOT configured MAIN_GROUP_ID ({MAIN_GROUP_ID})."
+        )
+        return
+
+    # Print / Log incoming message in Main Group
+    logger.info(f"Incoming Main Group Search: chat {message.chat.id} ('{getattr(message.chat, 'title', '')}') | User: {user_id} | Query: '{text}'")
+    print(f"Incoming Main Group Search: chat {message.chat.id} | Query: '{text}'")
+
+    # Enforce 60-second auto-delete on user search query message in Main Group
+    asyncio.create_task(auto_delete(message, 60))
 
     # Code-Level Deduplication Lock on search query within 5 seconds
     search_lock_key = f"search_{message.chat.id}_{text.lower()}"

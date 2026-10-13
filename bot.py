@@ -163,9 +163,9 @@ def sanitize_button_url(url: Optional[str], default: str = "https://t.me/CineVer
     return url
 
 # Channel 1: Request Channel / Group Configuration
-REQUEST_CHANNEL_ID = get_env_int("REQUEST_CHANNEL_ID", get_env_int("REQUEST_GROUP_ID", get_env_int("FSUB_GROUP_ID", -1004427640174)))
+REQUEST_CHANNEL_ID = get_env_int("REQUEST_CHANNEL_ID", get_env_int("REQUEST_GROUP_ID", -1004427640174))
 REQUEST_CHANNEL_LINK = sanitize_button_url(
-    os.getenv("REQUEST_CHANNEL_LINK") or os.getenv("REQUEST_GROUP_LINK") or os.getenv("FSUB_GROUP_LINK") or "https://t.me/FlimRequest_01",
+    os.getenv("REQUEST_CHANNEL_LINK") or os.getenv("REQUEST_GROUP_LINK") or "https://t.me/FlimRequest_01",
     "https://t.me/FlimRequest_01"
 )
 FSUB_GROUP_ID = REQUEST_CHANNEL_ID
@@ -181,10 +181,10 @@ FSUB_CHANNEL_ID = BACKUP_CHANNEL_ID
 FSUB_CHANNEL_LINK = BACKUP_CHANNEL_LINK
 
 # Main Search Group Configuration (where movie queries are accepted)
-MAIN_GROUP_ID = get_env_int("MAIN_GROUP_ID", FSUB_GROUP_ID)
+MAIN_GROUP_ID = get_env_int("MAIN_GROUP_ID", get_env_int("SEARCH_GROUP_ID", -1004427640174))
 MAIN_GROUP_LINK = sanitize_button_url(
-    os.getenv("MAIN_GROUP_LINK") or os.getenv("SEARCH_GROUP_LINK") or REQUEST_CHANNEL_LINK,
-    REQUEST_CHANNEL_LINK
+    os.getenv("MAIN_GROUP_LINK") or os.getenv("SEARCH_GROUP_LINK") or "https://t.me/CineVerseFlimSearch",
+    "https://t.me/CineVerseFlimSearch"
 )
 
 # Strict Allowed Chat Access List: Main Group, Request Channel, Backup Channel, DB Channels
@@ -2751,15 +2751,24 @@ async def auto_filter_handler(client: Client, message: Message):
             except Exception as fwd_err:
                 logger.warning(f"Could not send request alert to @FlimRequest_01: {fwd_err}")
 
+            not_found_markup = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("📝 Request This Movie", url=REQUEST_CHANNEL_LINK)
+                ],
+                [
+                    InlineKeyboardButton("📢 Official Channel ↗", url=FSUB_CHANNEL_LINK)
+                ]
+            ])
             not_found_msg = await message.reply_text(
                 "┌──────────────────────────────────────────┐\n"
                 "│   ❌  F I L E   N O T   F O U N D        │\n"
                 "└──────────────────────────────────────────┘\n\n"
                 f"◈ **Searched:** `{text}`\n"
                 "├─ ⚠️ No matching file available in current vault.\n"
-                "├─ 🚀 Your request has been sent to @FlimRequest_01!\n"
+                "├─ 📝 Tap below to post your request in Movie Request Group!\n"
                 "├─ 💡 Tip: Check spelling or try searching with release year.\n"
                 f"└─ 🍿 Official Channel: {FSUB_CHANNEL_LINK}",
+                reply_markup=not_found_markup,
                 quote=True,
                 disable_web_page_preview=True
             )
@@ -2782,14 +2791,24 @@ async def auto_filter_handler(client: Client, message: Message):
         logger.error(f"❌ Database/Search error processing '{text}' in chat {message.chat.id}: {e}", exc_info=True)
         print(f"❌ Database/Search error for '{text}' in chat {message.chat.id}: {e}")
         try:
+            fallback_markup = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("📝 Request This Movie", url=REQUEST_CHANNEL_LINK)
+                ],
+                [
+                    InlineKeyboardButton("📢 Official Channel ↗", url=FSUB_CHANNEL_LINK)
+                ]
+            ])
             fallback_msg = await message.reply_text(
                 "┌──────────────────────────────────────────┐\n"
                 "│   ❌  F I L E   N O T   F O U N D        │\n"
                 "└──────────────────────────────────────────┘\n\n"
                 f"◈ **Searched:** `{text}`\n"
                 "├─ ⚠️ No matching file available in current vault.\n"
+                "├─ 📝 Tap below to post your request in Movie Request Group!\n"
                 "├─ 💡 Tip: Check spelling or try searching with release year.\n"
                 f"└─ 🍿 Official Channel: {FSUB_CHANNEL_LINK}",
+                reply_markup=fallback_markup,
                 quote=True,
                 disable_web_page_preview=True
             )

@@ -11,7 +11,7 @@ import logging
 import threading
 import urllib.request
 import urllib.parse
-from typing import List, Tuple, Dict, Any, Optional
+from typing import List, Tuple, Dict, Any, Optional, Union
 
 try:
     from flask import Flask, send_from_directory, request, redirect
@@ -91,10 +91,26 @@ API_ID = get_env_int("API_ID", 36971153)
 API_HASH = get_env_str("API_HASH", "e5e4c9c88d0c5c2654d8fbe985523c9c")
 BOT_TOKEN = get_env_str("BOT_TOKEN", "8994566569:AAG8pdApyO7ut1BrG6xdstrkdWL1ZUProfY")
 
-TARGET_CHANNELS = [-1004312780149, -1004391530222]
-DEFAULT_DB_CHANNELS = list(TARGET_CHANNELS)
-DB_CHANNEL_IDS = list(TARGET_CHANNELS)
-DB_CHANNEL_ID = TARGET_CHANNELS[0]
+def parse_db_channel_ids() -> List[Union[int, str]]:
+    raw = os.getenv("DB_CHANNEL_ID") or os.getenv("DB_CHANNEL_IDS") or os.getenv("DB_CHANNELS") or "-1004312780149, -1004391530222"
+    channels: List[Union[int, str]] = []
+    # Read DB_CHANNEL_ID environment variable as comma-separated string entries (supporting usernames like @database_Cineverse01)
+    for entry in str(raw).split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        try:
+            channels.append(int(entry))
+        except ValueError:
+            channels.append(entry)
+    if not channels:
+        channels = [-1004312780149, -1004391530222]
+    return channels
+
+DB_CHANNEL_IDS = parse_db_channel_ids()
+TARGET_CHANNELS = list(DB_CHANNEL_IDS)
+DEFAULT_DB_CHANNELS = list(DB_CHANNEL_IDS)
+DB_CHANNEL_ID = DB_CHANNEL_IDS[0] if DB_CHANNEL_IDS else -1004312780149
 CHANNEL_ID = DB_CHANNEL_ID
 
 ADMIN_ID = 7831101047
@@ -2166,16 +2182,17 @@ async def _resolve_channel_for_index(client: Client, target: Any) -> Optional[An
     return None
 
 async def get_target_chat(client: Client, cid: Any):
+    chat_identifier = int(cid) if (isinstance(cid, int) or (isinstance(cid, str) and str(cid).lstrip("-").isdigit())) else str(cid).strip()
     try:
-        return await client.get_chat(cid)
+        return await client.get_chat(chat_identifier)
     except Exception:
         try:
-            resolved = await _resolve_channel_for_index(client, cid)
+            resolved = await _resolve_channel_for_index(client, chat_identifier)
             if resolved:
                 return resolved
         except Exception:
             pass
-        return cid
+        return chat_identifier
 
 @app.on_message(filters.command("index"))
 async def index_handler(client: Client, message: Message):
@@ -2197,8 +2214,8 @@ async def index_handler(client: Client, message: Message):
 
     await db.add_user(user_id)
 
-    # Force hardcoded channel list strictly to TARGET_CHANNELS [-1004312780149, -1004391530222]
-    target_channels = [cid for cid in TARGET_CHANNELS if cid != -1004427640174]
+    # Resolve channels from DB_CHANNEL_IDS (supporting usernames like @database_Cineverse01)
+    target_channels = [cid for cid in DB_CHANNEL_IDS if cid != -1004427640174 and str(cid) != "-1004427640174"]
 
     status_msg = await message.reply_text(
         "⏳ **Starting Channel Indexing...**\n\n"
@@ -2229,17 +2246,18 @@ async def _async_channel_indexer_task(client: Client, message: Message, status_m
 
     try:
         for cid in target_channels:
+            chat_identifier = int(cid) if (isinstance(cid, int) or (isinstance(cid, str) and str(cid).lstrip("-").isdigit())) else str(cid).strip()
             try:
-                chat = await client.get_chat(int(cid))
+                chat = await client.get_chat(chat_identifier)
             except Exception as resolve_err:
-                logger.warning(f"get_chat({cid}) failed: {resolve_err}, trying fallback resolution...")
+                logger.warning(f"get_chat({chat_identifier}) failed: {resolve_err}, trying fallback resolution...")
                 try:
-                    chat = await _resolve_channel_for_index(client, cid)
+                    chat = await _resolve_channel_for_index(client, chat_identifier)
                 except Exception:
                     chat = None
             if not chat:
-                skipped_channels.append(str(cid))
-                logger.warning(f"Could not resolve channel {cid}")
+                skipped_channels.append(str(chat_identifier))
+                logger.warning(f"Could not resolve channel {chat_identifier}")
                 continue
 
             target_title = getattr(chat, "title", str(chat.id))
@@ -3418,7 +3436,8 @@ async def _start_pyrogram_client():
             # Resolve target channels as admin on startup
             for scid in TARGET_CHANNELS:
                 try:
-                    schat = await app.get_chat(int(scid))
+                    chat_ident = int(scid) if (isinstance(scid, int) or (isinstance(scid, str) and str(scid).lstrip("-").isdigit())) else str(scid).strip()
+                    schat = await app.get_chat(chat_ident)
                     logger.info(f"✅ Resolved channel entity on startup: {getattr(schat, 'title', '')} ({schat.id})")
                 except Exception as sc_err:
                     logger.warning(f"Could not resolve channel {scid} on startup: {sc_err}")

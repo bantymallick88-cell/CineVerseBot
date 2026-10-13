@@ -2165,6 +2165,18 @@ async def _resolve_channel_for_index(client: Client, target: Any) -> Optional[An
 
     return None
 
+async def get_target_chat(client: Client, cid: Any):
+    try:
+        return await client.get_chat(cid)
+    except Exception:
+        try:
+            resolved = await _resolve_channel_for_index(client, cid)
+            if resolved:
+                return resolved
+        except Exception:
+            pass
+        return cid
+
 @app.on_message(filters.command("index"))
 async def index_handler(client: Client, message: Message):
     if message.from_user and (message.from_user.id in [7831101047, 783110149] or str(message.from_user.id) in ["7831101047", "783110149"]):
@@ -2191,7 +2203,7 @@ async def index_handler(client: Client, message: Message):
     status_msg = await message.reply_text(
         "⏳ **Starting Channel Indexing...**\n\n"
         f"• **Target Channels:** `{', '.join(str(c) for c in target_channels)}`\n"
-        "• Direct Bot API batch scanning in progress...",
+        "• Direct streaming history scanning in progress...",
         quote=True
     )
 
@@ -2201,7 +2213,7 @@ async def index_handler(client: Client, message: Message):
 async def _async_channel_indexer_task(client: Client, message: Message, status_msg: Message, target_channels: List[Any]):
     status_msg_id = status_msg.id
 
-    # 1. Deduplicate Database on Index Start: clears duplicate records and rebuilds unique constraints on file_id
+    # Deduplicate Database on Index Start: clears duplicate records and rebuilds unique constraints on file_id
     try:
         purged_dupes = await db.deduplicate_movies()
         if purged_dupes > 0:
@@ -2216,154 +2228,163 @@ async def _async_channel_indexer_task(client: Client, message: Message, status_m
     skipped_channels: List[str] = []
 
     try:
-        for cid in target_channels:
-            resolved_chat = await _resolve_channel_for_index(client, cid)
-            target_peer = resolved_chat.id if (resolved_chat and getattr(resolved_chat, "id", None)) else cid
-            target_title = getattr(resolved_chat, "title", str(target_peer)) if resolved_chat else str(target_peer)
+        for channel_id in target_channels:
+            chat_obj = await get_target_chat(client, channel_id)
+            target_peer = chat_obj.id if hasattr(chat_obj, 'id') else chat_obj
+            target_title = getattr(chat_obj, "title", str(target_peer)) if hasattr(chat_obj, 'id') else str(target_peer)
             indexed_channels.append(f"{target_title} (`{target_peer}`)")
+            logger.info(f"Indexing channel {target_title} ({target_peer}) via get_chat_history streaming...")
 
-            # Step 1: Probe latest message ID (max_id) via dummy message or fallback up to ~7388
-            max_id = 0
-            try:
-                dummy = await client.send_message(target_peer, ".")
-                if dummy and getattr(dummy, "id", None):
-                    max_id = dummy.id
-                    try:
-                        await dummy.delete()
-                    except Exception:
-                        pass
-            except FloodWait as e:
-                logger.warning(f"FloodWait probing channel {target_peer}: sleeping {e.value}s")
-                await asyncio.sleep(e.value)
-            except Exception as dummy_err:
-                logger.warning(f"Could not send probe message to {target_peer}: {dummy_err}")
+            channel_scanned = 0
+            last_edit_time = time.time()
 
-            if not max_id:
+            with db._get_connection() as conn:
+                cursor = conn.cursor()
                 try:
-                    with db._get_connection() as conn:
-                        row = conn.execute("SELECT MAX(message_id) FROM movies WHERE channel_id = ?", (target_peer,)).fetchone()
-                        if row and row[0]:
-                            max_id = int(row[0]) + 150
-                except Exception:
-                    pass
-            if not max_id or max_id < 7388:
-                max_id = max(max_id or 0, 7388)
-
-            logger.info(f"Indexing channel {target_peer} from ID 1 to {max_id} in continuous batches of 100...")
-
-            # Step 2: Iterate message IDs in batches of 100 with auto-retry
-            for i in range(1, max_id + 1, 100):
-                batch_list = list(range(i, min(i + 100, max_id + 1)))
-                msgs = None
-
-                # Auto-retry batch fetch loop
-                for attempt in range(3):
-                    try:
-                        msgs = await client.get_messages(target_peer, message_ids=batch_list)
-                        break
-                    except FloodWait as e:
-                        logger.warning(f"FloodWait on batch {batch_list[0]}-{batch_list[-1]}: sleeping {e.value}s")
-                        await asyncio.sleep(e.value)
-                    except Exception as batch_err:
-                        logger.warning(f"Batch fetch attempt {attempt + 1} error on {batch_list[0]}-{batch_list[-1]}: {batch_err}")
-                        await asyncio.sleep(0.5)
-
-                if msgs:
-                    if not isinstance(msgs, list):
-                        msgs = [msgs]
-                    with db._get_connection() as conn:
-                        cursor = conn.cursor()
-                        for msg in msgs:
-                            if not msg:
-                                continue
-                            total_scanned += 1
-                            media = msg.document or msg.video or msg.audio or msg.animation
-                            if media and getattr(media, "file_id", None):
-                                total_media += 1
-                                file_id = media.file_id
-                                file_name = getattr(media, "file_name", None) or msg.caption or "Unknown"
-                                file_size = getattr(media, "file_size", 0)
-                                caption = msg.caption or ""
-                                # Clean title (replace '.', '_', '-' with spaces)
-                                clean_title = file_name.replace(".", " ").replace("_", " ").replace("-", " ")
+                    async for msg in client.get_chat_history(chat_obj.id if hasattr(chat_obj, 'id') else chat_obj):
+                        if not msg:
+                            continue
+                        total_scanned += 1
+                        channel_scanned += 1
+                        media = msg.document or msg.video or msg.audio or msg.animation
+                        if media and getattr(media, "file_id", None):
+                            total_media += 1
+                            file_id = media.file_id
+                            file_name = getattr(media, "file_name", None) or msg.caption or "Unknown"
+                            file_size = getattr(media, "file_size", 0)
+                            caption = msg.caption or ""
+                            clean_title = file_name.replace(".", " ").replace("_", " ").replace("-", " ")
+                            cursor.execute(
+                                "INSERT OR IGNORE INTO movies (file_id, file_name, file_size, caption) VALUES (?, ?, ?, ?)",
+                                (file_id, clean_title, file_size, caption)
+                            )
+                            if cursor.rowcount > 0:
+                                added += 1
+                            try:
                                 cursor.execute(
-                                    "INSERT OR IGNORE INTO movies (file_id, file_name, file_size, caption) VALUES (?, ?, ?, ?)",
-                                    (file_id, clean_title, file_size, caption)
+                                    "UPDATE movies SET title = COALESCE(title, ?), message_id = COALESCE(message_id, ?), channel_id = COALESCE(channel_id, ?) WHERE file_id = ?",
+                                    (clean_title, int(msg.id), target_peer, file_id)
                                 )
-                                if cursor.rowcount > 0:
-                                    added += 1
-                                try:
-                                    cursor.execute(
-                                        "UPDATE movies SET title = COALESCE(title, ?), message_id = COALESCE(message_id, ?), channel_id = COALESCE(channel_id, ?) WHERE file_id = ?",
-                                        (clean_title, int(msg.id), target_peer, file_id)
-                                    )
-                                except Exception:
-                                    pass
-                        conn.commit()
+                            except Exception:
+                                pass
 
-                    # Mirror to secondary database/movies.db if present
-                    movies_db_path = os.path.join(os.getcwd(), "database", "movies.db")
-                    if os.path.exists(movies_db_path) and os.path.abspath(movies_db_path) != os.path.abspath(db.db_path):
-                        try:
-                            with sqlite3.connect(movies_db_path) as mconn:
-                                mcur = mconn.cursor()
+                        if channel_scanned % 50 == 0:
+                            conn.commit()
+                            now = time.time()
+                            if now - last_edit_time >= 3.0:
+                                last_edit_time = now
+                                try:
+                                    total_in_db = cursor.execute("SELECT COUNT(*) FROM movies;").fetchone()[0]
+                                    await status_msg.edit_text(
+                                        f"⏳ **Indexing in Progress (Streaming History Mode)...**\n\n"
+                                        f"• **Current Channel:** `{target_title}` (`{target_peer}`)\n"
+                                        f"• **Messages Scanned:** `{total_scanned}`\n"
+                                        f"• **Videos/Files Found:** `{total_media}`\n"
+                                        f"• **Newly Imported:** `{added}`\n"
+                                        f"🎬 **Total Movies in DB:** `{total_in_db}`"
+                                    )
+                                except MessageNotModified:
+                                    pass
+                                except FloodWait as e:
+                                    logger.warning(f"FloodWait during status edit: sleeping {e.value}s")
+                                    await asyncio.sleep(e.value)
+                                except Exception as edit_err:
+                                    logger.debug(f"Could not edit status message {status_msg_id}: {edit_err}")
+
+                    conn.commit()
+
+                except Exception as stream_err:
+                    conn.commit()
+                    logger.warning(f"Streaming get_chat_history error on {target_peer}: {stream_err}")
+                    if "BOT_METHOD_INVALID" in str(stream_err) or "PeerIdInvalid" in str(stream_err) or "ChannelPrivate" in str(stream_err):
+                        logger.info(f"Falling back to Bot API get_messages batch mode for {target_peer}...")
+                        max_id = 7388
+                        for i in range(1, max_id + 1, 100):
+                            batch_list = list(range(i, min(i + 100, max_id + 1)))
+                            msgs = None
+                            for attempt in range(3):
+                                try:
+                                    msgs = await client.get_messages(target_peer, message_ids=batch_list)
+                                    break
+                                except FloodWait as e:
+                                    await asyncio.sleep(e.value)
+                                except Exception:
+                                    await asyncio.sleep(0.5)
+
+                            if msgs:
+                                if not isinstance(msgs, list):
+                                    msgs = [msgs]
                                 for msg in msgs:
                                     if not msg:
                                         continue
+                                    total_scanned += 1
                                     media = msg.document or msg.video or msg.audio or msg.animation
                                     if media and getattr(media, "file_id", None):
+                                        total_media += 1
                                         file_id = media.file_id
                                         file_name = getattr(media, "file_name", None) or msg.caption or "Unknown"
                                         file_size = getattr(media, "file_size", 0)
                                         caption = msg.caption or ""
                                         clean_title = file_name.replace(".", " ").replace("_", " ").replace("-", " ")
-                                        mcur.execute(
+                                        cursor.execute(
                                             "INSERT OR IGNORE INTO movies (file_id, file_name, file_size, caption) VALUES (?, ?, ?, ?)",
                                             (file_id, clean_title, file_size, caption)
                                         )
+                                        if cursor.rowcount > 0:
+                                            added += 1
                                         try:
-                                            mcur.execute(
+                                            cursor.execute(
                                                 "UPDATE movies SET title = COALESCE(title, ?), message_id = COALESCE(message_id, ?), channel_id = COALESCE(channel_id, ?) WHERE file_id = ?",
                                                 (clean_title, int(msg.id), target_peer, file_id)
                                             )
                                         except Exception:
                                             pass
-                                mconn.commit()
-                        except Exception:
-                            pass
-                else:
-                    total_scanned += len(batch_list)
+                                conn.commit()
+                            else:
+                                total_scanned += len(batch_list)
 
-                # Edit in-place status message with current progress after every batch
+                            now = time.time()
+                            if now - last_edit_time >= 3.0:
+                                last_edit_time = now
+                                try:
+                                    total_in_db = cursor.execute("SELECT COUNT(*) FROM movies;").fetchone()[0]
+                                    await status_msg.edit_text(
+                                        f"⏳ **Indexing in Progress (Bot API Batch Mode)...**\n\n"
+                                        f"• **Current Channel:** `{target_title}` (`{target_peer}`)\n"
+                                        f"• **Scanning Range:** IDs `{batch_list[0]}` - `{batch_list[-1]}` (of `{max_id}`)\n"
+                                        f"• **Messages Scanned:** `{total_scanned}`\n"
+                                        f"• **Videos/Files Found:** `{total_media}`\n"
+                                        f"• **Newly Imported:** `{added}`\n"
+                                        f"🎬 **Total Movies in DB:** `{total_in_db}`"
+                                    )
+                                except Exception:
+                                    pass
+
+            # Mirror to secondary database/movies.db if present
+            movies_db_path = os.path.join(os.getcwd(), "database", "movies.db")
+            if os.path.exists(movies_db_path) and os.path.abspath(movies_db_path) != os.path.abspath(db.db_path):
                 try:
-                    stats = await db.get_stats()
-                    await status_msg.edit_text(
-                        f"⏳ **Indexing in Progress (Bot API Batch Mode)...**\n\n"
-                        f"• **Current Channel:** `{target_title}` (`{target_peer}`)\n"
-                        f"• **Scanning Range:** IDs `{batch_list[0]}` - `{batch_list[-1]}` (of `{max_id}`)\n"
-                        f"• **Messages Scanned:** `{total_scanned}`\n"
-                        f"• **Videos/Files Found:** `{total_media}`\n"
-                        f"• **Newly Imported:** `{added}`\n"
-                        f"🎬 **Total Movies in DB:** `{stats['movies']}`"
-                    )
-                except MessageNotModified:
+                    with db._get_connection() as sconn, sqlite3.connect(movies_db_path) as mconn:
+                        mcur = mconn.cursor()
+                        rows = sconn.execute("SELECT file_id, file_name, file_size, caption, title, message_id, channel_id FROM movies WHERE channel_id = ?", (target_peer,)).fetchall()
+                        for r in rows:
+                            mcur.execute(
+                                "INSERT OR IGNORE INTO movies (file_id, file_name, file_size, caption, title, message_id, channel_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                (r[0], r[1], r[2], r[3], r[4], r[5], r[6])
+                            )
+                        mconn.commit()
+                except Exception:
                     pass
-                except FloodWait as e:
-                    logger.warning(f"FloodWait during status edit: sleeping {e.value}s")
-                    await asyncio.sleep(e.value)
-                except Exception as edit_err:
-                    logger.debug(f"Could not edit status message {status_msg_id}: {edit_err}")
 
-                await asyncio.sleep(0.05)
-
-        stats = await db.get_stats()
+        with db._get_connection() as count_conn:
+            total_in_db = count_conn.execute("SELECT COUNT(*) FROM movies;").fetchone()[0]
         summary_lines = [
             "✅ **Full Channel Indexing Complete!**\n",
             f"• **Channels Indexed:** {', '.join(indexed_channels) if indexed_channels else 'None'}",
             f"• **Total Messages Scanned:** `{total_scanned}`",
             f"• **Total Videos/Files Identified:** `{total_media}`",
             f"• **Newly Imported:** `{added}`",
-            f"🎬 **Total Movies in Database:** `{stats['movies']}`"
+            f"🎬 **Total Movies in Database:** `{total_in_db}`"
         ]
         if skipped_channels:
             summary_lines.append(f"• ⚠️ **Unresolvable Channels Skipped:** `{', '.join(skipped_channels)}`")
@@ -2377,13 +2398,14 @@ async def _async_channel_indexer_task(client: Client, message: Message, status_m
 
     except Exception as e:
         logger.error(f"Error in batch indexing: {e}", exc_info=True)
-        stats = await db.get_stats()
         try:
+            with db._get_connection() as count_conn:
+                total_in_db = count_conn.execute("SELECT COUNT(*) FROM movies;").fetchone()[0]
             await status_msg.edit_text(
                 f"⚠️ **Indexing Notice:** {e}\n\n"
                 f"• **Messages Scanned:** `{total_scanned}`\n"
                 f"• **Newly Imported:** `{added}`\n"
-                f"🎬 **Total Movies in Database:** `{stats['movies']}`"
+                f"🎬 **Total Movies in Database:** `{total_in_db}`"
             )
         except Exception:
             pass

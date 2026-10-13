@@ -32,3 +32,5 @@ services:
         value: https://t.me/CineVerseFlimSearch
       - key: DEVELOPER_LINK
         sync: false
+      - key: MONGO_URI
+        sync: false

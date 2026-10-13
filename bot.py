@@ -13,6 +13,10 @@ import urllib.request
 import urllib.parse
 from typing import List, Tuple, Dict, Any, Optional, Union
 
+import pymongo
+from pymongo import UpdateOne, ReturnDocument
+import motor.motor_asyncio
+
 try:
     from flask import Flask, send_from_directory, request, redirect
 except ImportError:
@@ -173,6 +177,8 @@ SEARCH_CACHE: Dict[str, str] = {}
 processed_requests: Dict[Any, float] = {}
 PROCESSED_REQUESTS = processed_requests  # Global processed_requests cache with timestamp expiry
 REQUEST_LOCK_EXPIRY = 5.0  # 5-second deduplication lock window
+MONGO_URI = get_env_str("MONGO_URI", get_env_str("MONGODB_URI", "mongodb://localhost:27017"))
+DATABASE_NAME = get_env_str("DATABASE_NAME", "cineverse")
 DB_FILE = os.path.join(os.getcwd(), "database.db")
 TARGET_RESOLVED_CHAT_ID: Optional[Any] = None
 FSUB_RESOLVED_CHAT_ID: Optional[Any] = None
@@ -180,210 +186,134 @@ USER_DOWNLOAD_CACHE: Dict[int, float] = {}
 FILE_COOLDOWN_SECONDS: int = 25200  # 7 hours = 7 * 3600 seconds
 
 # ---------------------------------------------------------------------------
-# DATABASE MANAGER (WAL MODE, PERSISTENT & SAFE)
+# DATABASE MANAGER (MONGODB MOTOR - FULL ASYNC ARCHITECTURE)
 # ---------------------------------------------------------------------------
 class Database:
-    def __init__(self, db_path: str = DB_FILE):
-        self.db_path = db_path
-        self._init_db()
-
-    def _get_connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode = WAL;")
-        conn.execute("PRAGMA busy_timeout = 30000;")
-        conn.execute("PRAGMA synchronous = NORMAL;")
-        return conn
-
-    def _init_db(self):
-        with self._get_connection() as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS movies (
-                    file_id TEXT PRIMARY KEY,
-                    title TEXT,
-                    file_size INTEGER,
-                    message_id INTEGER,
-                    channel_id INTEGER,
-                    file_name TEXT,
-                    caption TEXT
-                );
-            """)
-            # Ensure columns exist via ALTER TABLE
-            try:
-                cols = [r[1].lower() for r in conn.execute("PRAGMA table_info(movies);").fetchall()]
-                if "channel_id" not in cols:
-                    conn.execute("ALTER TABLE movies ADD COLUMN channel_id INTEGER;")
-                if "file_name" not in cols:
-                    conn.execute("ALTER TABLE movies ADD COLUMN file_name TEXT;")
-                if "caption" not in cols:
-                    conn.execute("ALTER TABLE movies ADD COLUMN caption TEXT;")
-                conn.execute("UPDATE movies SET file_name = title WHERE file_name IS NULL OR file_name = '';")
-                conn.execute("UPDATE movies SET caption = title WHERE caption IS NULL OR caption = '';")
-                conn.execute("UPDATE movies SET channel_id = -1004312780149 WHERE channel_id IS NULL;")
-            except Exception as e:
-                logger.warning(f"Note migrating movies schema columns: {e}")
-
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_file_name ON movies(file_name);")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_caption ON movies(caption);")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_channel_id ON movies(channel_id);")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_title ON movies(title);")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_msg_id ON movies(message_id);")
-
-            # Deduplicate database and rebuild unique constraints on file_id
-            try:
-                conn.execute("DELETE FROM movies WHERE rowid NOT IN (SELECT MIN(rowid) FROM movies GROUP BY file_id);")
-                conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_movies_unique_file_id ON movies(file_id);")
-            except Exception as e:
-                logger.warning(f"Note on initial deduplication/unique index: {e}")
-
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id INTEGER PRIMARY KEY,
-                    joined_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-            """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS approved_users (
-                    user_id INTEGER PRIMARY KEY,
-                    approved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-            """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS disapproved_users (
-                    user_id INTEGER PRIMARY KEY,
-                    disapproved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-            """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS file_tokens (
-                    token TEXT PRIMARY KEY,
-                    user_id INTEGER,
-                    message_id INTEGER,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    is_used INTEGER DEFAULT 0
-                );
-            """)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_token ON file_tokens(token);")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_token_user ON file_tokens(user_id);")
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS authorized_groups (
-                    group_id INTEGER PRIMARY KEY,
-                    added_by INTEGER,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-            """)
-            conn.execute(
-                "INSERT OR IGNORE INTO authorized_groups (group_id, added_by) VALUES (?, ?);",
-                (SEARCH_GROUP_ID, OWNER_ID)
-            )
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS user_downloads (
-                    user_id INTEGER PRIMARY KEY,
-                    last_download_timestamp REAL
-                );
-            """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS group_warnings (
-                    user_id INTEGER,
-                    chat_id INTEGER,
-                    warn_count INTEGER DEFAULT 0,
-                    last_warn_time REAL,
-                    PRIMARY KEY (user_id, chat_id)
-                );
-            """)
-            # Movie records preservation: never delete or truncate existing movie records
-
-            # Ensure files VIEW exists to support both files and movies tables interchangeably
-            try:
-                conn.execute("DROP VIEW IF EXISTS files;")
-                conn.execute("""
-                    CREATE VIEW IF NOT EXISTS files AS 
-                    SELECT file_id, COALESCE(file_name, title) AS file_name, file_size, message_id, channel_id, COALESCE(caption, title) AS caption, COALESCE(title, file_name) AS title 
-                    FROM movies;
-                """)
-            except Exception as e:
-                logger.warning(f"Note checking files/movies view: {e}")
-            conn.commit()
-
-    def _increment_user_warning(self, user_id: int, chat_id: int) -> int:
+    def __init__(self, uri: str = MONGO_URI, db_name: str = DATABASE_NAME):
+        self.uri = uri
+        self.db_name = db_name
+        self.client = motor.motor_asyncio.AsyncIOMotorClient(self.uri)
         try:
-            with self._get_connection() as conn:
-                conn.execute("""
-                    INSERT INTO group_warnings (user_id, chat_id, warn_count, last_warn_time)
-                    VALUES (?, ?, 1, ?)
-                    ON CONFLICT(user_id, chat_id) DO UPDATE SET
-                        warn_count = warn_count + 1,
-                        last_warn_time = excluded.last_warn_time;
-                """, (user_id, chat_id, time.time()))
-                conn.commit()
-                row = conn.execute(
-                    "SELECT warn_count FROM group_warnings WHERE user_id = ? AND chat_id = ?;",
-                    (user_id, chat_id)
-                ).fetchone()
-                return int(row["warn_count"]) if row else 1
+            default_db = self.client.get_default_database()
+            self.db = default_db if default_db is not None else self.client[self.db_name]
+        except Exception:
+            self.db = self.client[self.db_name]
+
+        # Collections
+        self.movies = self.db["movies"]
+        self.users = self.db["users"]
+        self.approved_users = self.db["approved_users"]
+        self.disapproved_users = self.db["disapproved_users"]
+        self.file_tokens = self.db["file_tokens"]
+        self.authorized_groups = self.db["authorized_groups"]
+        self.user_downloads = self.db["user_downloads"]
+        self.group_warnings = self.db["group_warnings"]
+
+        self._indexes_created = False
+
+    @property
+    def uri_masked(self) -> str:
+        return re.sub(r"://([^:]+):([^@]+)@", r"://\1:****@", self.uri)
+
+    def __getattr__(self, name: str):
+        return getattr(self.db, name)
+
+    def __getitem__(self, name: str):
+        return self.db[name]
+
+    def _get_connection(self):
+        """Fallback connection for legacy SQLite migration if referenced."""
+        return sqlite3.connect(DB_FILE, check_same_thread=False)
+
+    async def init_indexes(self):
+        if self._indexes_created:
+            return
+        try:
+            await self.movies.create_index("file_id", unique=True)
+            await self.movies.create_index("file_name")
+            await self.movies.create_index("caption")
+            await self.movies.create_index("channel_id")
+            await self.movies.create_index("message_id")
+            await self.users.create_index("user_id", unique=True)
+            await self.approved_users.create_index("user_id", unique=True)
+            await self.disapproved_users.create_index("user_id", unique=True)
+            await self.file_tokens.create_index("token", unique=True)
+            await self.file_tokens.create_index("user_id")
+            await self.authorized_groups.create_index("group_id", unique=True)
+            await self.user_downloads.create_index("user_id", unique=True)
+            await self.group_warnings.create_index([("user_id", 1), ("chat_id", 1)], unique=True)
+            self._indexes_created = True
+            logger.info("MongoDB indexes verified successfully.")
+        except Exception as e:
+            logger.warning(f"Note creating MongoDB indexes: {e}")
+
+    async def ensure_defaults(self):
+        try:
+            await self.authorized_groups.update_one(
+                {"group_id": SEARCH_GROUP_ID},
+                {"$set": {"group_id": SEARCH_GROUP_ID, "added_by": OWNER_ID, "created_at": time.time()}},
+                upsert=True
+            )
+        except Exception as e:
+            logger.warning(f"Note ensuring defaults: {e}")
+
+    async def increment_user_warning(self, user_id: int, chat_id: int) -> int:
+        try:
+            res = await self.group_warnings.find_one_and_update(
+                {"user_id": user_id, "chat_id": chat_id},
+                {
+                    "$inc": {"warn_count": 1},
+                    "$set": {"last_warn_time": time.time()}
+                },
+                upsert=True,
+                return_document=ReturnDocument.AFTER
+            )
+            return int(res.get("warn_count", 1)) if res else 1
         except Exception as e:
             logger.error(f"Error incrementing user warning: {e}")
             return 1
 
-    async def increment_user_warning(self, user_id: int, chat_id: int) -> int:
-        return await asyncio.to_thread(self._increment_user_warning, user_id, chat_id)
-
-    def _reset_user_warnings(self, user_id: int, chat_id: int):
+    async def reset_user_warnings(self, user_id: int, chat_id: int):
         try:
-            with self._get_connection() as conn:
-                conn.execute(
-                    "DELETE FROM group_warnings WHERE user_id = ? AND chat_id = ?;",
-                    (user_id, chat_id)
-                )
-                conn.commit()
+            await self.group_warnings.delete_one({"user_id": user_id, "chat_id": chat_id})
         except Exception as e:
             logger.error(f"Error resetting user warnings: {e}")
 
-    async def reset_user_warnings(self, user_id: int, chat_id: int):
-        await asyncio.to_thread(self._reset_user_warnings, user_id, chat_id)
-
-    def _get_user_last_download(self, user_id: int) -> float:
+    async def get_user_last_download(self, user_id: int) -> float:
         if user_id in USER_DOWNLOAD_CACHE:
             return USER_DOWNLOAD_CACHE[user_id]
         try:
-            with self._get_connection() as conn:
-                row = conn.execute("SELECT last_download_timestamp FROM user_downloads WHERE user_id = ?;", (user_id,)).fetchone()
-                if row:
-                    val = float(row["last_download_timestamp"])
-                    USER_DOWNLOAD_CACHE[user_id] = val
-                    return val
+            doc = await self.user_downloads.find_one({"user_id": user_id})
+            if doc and "last_download_timestamp" in doc:
+                val = float(doc["last_download_timestamp"])
+                USER_DOWNLOAD_CACHE[user_id] = val
+                return val
         except Exception as e:
             logger.error(f"Error reading user_downloads for {user_id}: {e}")
         return 0.0
 
-    async def get_user_last_download(self, user_id: int) -> float:
-        return await asyncio.to_thread(self._get_user_last_download, user_id)
-
-    def _set_user_last_download(self, user_id: int, timestamp: float):
+    async def set_user_last_download(self, user_id: int, timestamp: float):
         USER_DOWNLOAD_CACHE[user_id] = timestamp
         try:
-            with self._get_connection() as conn:
-                conn.execute("""
-                    INSERT INTO user_downloads (user_id, last_download_timestamp)
-                    VALUES (?, ?)
-                    ON CONFLICT(user_id) DO UPDATE SET last_download_timestamp = excluded.last_download_timestamp;
-                """, (user_id, timestamp))
-                conn.commit()
+            await self.user_downloads.update_one(
+                {"user_id": user_id},
+                {"$set": {"last_download_timestamp": timestamp}},
+                upsert=True
+            )
         except Exception as e:
             logger.error(f"Error updating user_downloads for {user_id}: {e}")
 
-    async def set_user_last_download(self, user_id: int, timestamp: float):
-        await asyncio.to_thread(self._set_user_last_download, user_id, timestamp)
-
-    def _add_user(self, user_id: int):
+    async def add_user(self, user_id: int):
         try:
-            with self._get_connection() as conn:
-                conn.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?);", (user_id,))
-                conn.commit()
+            await self.users.update_one(
+                {"user_id": user_id},
+                {"$setOnInsert": {"user_id": user_id, "joined_date": time.time()}},
+                upsert=True
+            )
         except Exception as e:
             logger.error(f"Error saving user {user_id}: {e}")
 
-    def _add_movie(
+    async def add_movie(
         self,
         file_id: str,
         title: str,
@@ -397,39 +327,29 @@ class Database:
             fname = file_name or title
             cap = caption or fname
             cid = channel_id or DB_CHANNEL_ID
-            with self._get_connection() as conn:
-                cur = conn.execute(
-                    """
-                    INSERT OR IGNORE INTO movies (file_id, title, file_size, message_id, channel_id, file_name, caption)
-                    VALUES (?, ?, ?, ?, ?, ?, ?);
-                    """,
-                    (file_id, fname, file_size, message_id, cid, fname, cap)
-                )
-                conn.commit()
-                # Mirror to database/movies.db
-                movies_db_path = os.path.join(os.getcwd(), "database", "movies.db")
-                if os.path.exists(movies_db_path) and os.path.abspath(movies_db_path) != os.path.abspath(self.db_path):
-                    try:
-                        with sqlite3.connect(movies_db_path, check_same_thread=False) as mconn:
-                            mconn.execute(
-                                """
-                                INSERT OR IGNORE INTO movies (file_id, title, file_size, message_id, channel_id, file_name, caption)
-                                VALUES (?, ?, ?, ?, ?, ?, ?);
-                                """,
-                                (file_id, fname, file_size, message_id, cid, fname, cap)
-                            )
-                            mconn.commit()
-                    except Exception:
-                        pass
-                return cur.rowcount > 0
+            movie_doc = {
+                "file_id": file_id,
+                "title": fname,
+                "file_name": fname,
+                "file_size": file_size,
+                "message_id": message_id,
+                "channel_id": cid,
+                "caption": cap
+            }
+            res = await self.movies.update_one(
+                {"file_id": file_id},
+                {"$set": movie_doc},
+                upsert=True
+            )
+            return res.upserted_id is not None or res.modified_count > 0
         except Exception as e:
             logger.error(f"Error inserting movie: {e}")
             return False
 
-    def _add_movies_batch(self, movies_data: List[Any]) -> int:
+    async def add_movies_batch(self, movies_data: List[Any]) -> int:
         if not movies_data:
             return 0
-        normalized = []
+        operations = []
         for item in movies_data:
             if len(item) == 4:
                 f_id, f_name, f_sz, m_id = item
@@ -450,436 +370,308 @@ class Database:
                 cid_int = int(cid) if cid is not None else DB_CHANNEL_ID
             except (ValueError, TypeError):
                 cid_int = DB_CHANNEL_ID
-            normalized.append((f_id, fname_str, int(f_sz or 0), int(m_id or 0), cid_int, fname_str, cap_str))
+            movie_doc = {
+                "file_id": str(f_id),
+                "title": fname_str,
+                "file_name": fname_str,
+                "file_size": int(f_sz or 0),
+                "message_id": int(m_id or 0),
+                "channel_id": cid_int,
+                "caption": cap_str
+            }
+            operations.append(
+                UpdateOne({"file_id": str(f_id)}, {"$set": movie_doc}, upsert=True)
+            )
 
-        if not normalized:
+        if not operations:
             return 0
-
         try:
-            with self._get_connection() as conn:
-                cur = conn.executemany(
-                    """
-                    INSERT OR IGNORE INTO movies (file_id, title, file_size, message_id, channel_id, file_name, caption)
-                    VALUES (?, ?, ?, ?, ?, ?, ?);
-                    """,
-                    normalized
-                )
-                conn.commit()
-                # Mirror to database/movies.db
-                movies_db_path = os.path.join(os.getcwd(), "database", "movies.db")
-                if os.path.exists(movies_db_path) and os.path.abspath(movies_db_path) != os.path.abspath(self.db_path):
-                    try:
-                        with sqlite3.connect(movies_db_path, check_same_thread=False) as mconn:
-                            mconn.executemany(
-                                """
-                                INSERT OR IGNORE INTO movies (file_id, title, file_size, message_id, channel_id, file_name, caption)
-                                VALUES (?, ?, ?, ?, ?, ?, ?);
-                                """,
-                                normalized
-                            )
-                            mconn.commit()
-                    except Exception:
-                        pass
-                return cur.rowcount
+            result = await self.movies.bulk_write(operations, ordered=False)
+            return (result.upserted_count or 0) + (result.modified_count or 0)
         except Exception as e:
             logger.error(f"Error inserting batch: {e}")
             return 0
 
-    def _deduplicate_movies(self) -> int:
-        purged = 0
+    async def deduplicate_movies(self) -> int:
         try:
-            with self._get_connection() as conn:
-                cur = conn.cursor()
-                cur.execute("DELETE FROM movies WHERE rowid NOT IN (SELECT MIN(rowid) FROM movies GROUP BY file_id);")
-                purged = cur.rowcount
-                conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_movies_unique_file_id ON movies(file_id);")
-                conn.commit()
-                # Mirror deduplication if mirror db exists
-                movies_db_path = os.path.join(os.getcwd(), "database", "movies.db")
-                if os.path.exists(movies_db_path) and os.path.abspath(movies_db_path) != os.path.abspath(self.db_path):
-                    try:
-                        with sqlite3.connect(movies_db_path, check_same_thread=False) as mconn:
-                            mconn.execute("DELETE FROM movies WHERE rowid NOT IN (SELECT MIN(rowid) FROM movies GROUP BY file_id);")
-                            mconn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_movies_unique_file_id ON movies(file_id);")
-                            mconn.commit()
-                    except Exception:
-                        pass
-                logger.info(f"SQLite deduplication completed: purged {purged} duplicate records.")
+            await self.movies.create_index("file_id", unique=True)
         except Exception as e:
-            logger.error(f"Error during SQLite deduplication: {e}", exc_info=True)
-        return purged
+            logger.error(f"Error ensuring unique index on movies: {e}")
+        return 0
 
-    def _detect_table_and_columns(self, conn: sqlite3.Connection):
-        try:
-            cur = conn.cursor()
-            tables = [r[0].lower() for r in cur.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'view');").fetchall()]
-
-            # Prefer 'movies' table if available, else 'files'
-            if "movies" in tables:
-                target_table = "movies"
-            elif "files" in tables:
-                target_table = "files"
-            else:
-                user_tables = [t for t in tables if not t.startswith("sqlite_") and t not in (
-                    "users", "approved_users", "disapproved_users", "file_tokens", "authorized_groups", "user_downloads", "group_warnings"
-                )]
-                target_table = user_tables[0] if user_tables else "movies"
-
-            col_info = cur.execute(f"PRAGMA table_info({target_table});").fetchall()
-            col_names = [c[1] for c in col_info]
-            col_names_lower = [c.lower() for c in col_names]
-
-            title_col = "file_name" if "file_name" in col_names_lower else ("title" if "title" in col_names_lower else col_names[1])
-            file_id_col = "file_id" if "file_id" in col_names_lower else ("id" if "id" in col_names_lower else col_names[0])
-            size_col = "file_size" if "file_size" in col_names_lower else ("size" if "size" in col_names_lower else None)
-            msg_id_col = "message_id" if "message_id" in col_names_lower else ("msg_id" if "msg_id" in col_names_lower else None)
-            channel_id_col = "channel_id" if "channel_id" in col_names_lower else None
-            caption_col = "caption" if "caption" in col_names_lower else None
-
-            return target_table, title_col, file_id_col, size_col, msg_id_col, channel_id_col, caption_col
-        except Exception as e:
-            logger.error(f"Error detecting table columns: {e}")
-            return "movies", "file_name", "file_id", "file_size", "message_id", "channel_id", "caption"
-
-    def search_movies(self, query: str, limit: int = 15) -> List[Dict[str, Any]]:
-        q = query.strip().lower()
+    async def search_movies(self, query: str, limit: int = 15) -> List[Dict[str, Any]]:
+        q = query.strip()
         if not q:
             return []
+        search_filter = {"$or": [{"file_name": {"$regex": q, "$options": "i"}}, {"caption": {"$regex": q, "$options": "i"}}]}
         try:
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "SELECT file_id, file_name, file_size, caption FROM movies WHERE LOWER(file_name) LIKE ? OR LOWER(caption) LIKE ? LIMIT 15",
-                    (f"%{q}%", f"%{q}%")
-                )
-                raw_rows = cursor.fetchall()
-                if not raw_rows:
-                    words = q.split()
-                    if words:
-                        conditions = []
-                        params = []
-                        for w in words:
-                            conditions.append("(LOWER(file_name) LIKE ? OR LOWER(caption) LIKE ?)")
-                            params.extend([f"%{w}%", f"%{w}%"])
-                        where_sql = " AND ".join(conditions)
-                        cursor.execute(
-                            f"SELECT file_id, file_name, file_size, caption FROM movies WHERE {where_sql} LIMIT 15",
-                            params
-                        )
-                        raw_rows = cursor.fetchall()
+            cursor = self.movies.find(search_filter).limit(limit)
+            raw_docs = await cursor.to_list(length=limit)
+        except Exception:
+            safe_q = re.escape(q)
+            search_filter = {"$or": [{"file_name": {"$regex": safe_q, "$options": "i"}}, {"caption": {"$regex": safe_q, "$options": "i"}}]}
+            cursor = self.movies.find(search_filter).limit(limit)
+            raw_docs = await cursor.to_list(length=limit)
 
-                results = []
-                for row in raw_rows:
-                    f_id = str(row[0] or "")
-                    name = str(row[1] or "Movie")
-                    f_size = int(row[2] or 0)
-                    cap = str(row[3] or "")
-                    m_id = None
-                    try:
-                        row_extra = conn.execute("SELECT message_id FROM movies WHERE file_id = ? LIMIT 1;", (f_id,)).fetchone()
-                        if row_extra and row_extra[0]:
-                            m_id = row_extra[0]
-                    except Exception:
-                        pass
-                    results.append({
-                        "file_id": f_id,
-                        "title": name,
-                        "file_name": name,
-                        "file_size": f_size,
-                        "caption": cap,
-                        "message_id": m_id or f_id
+        if not raw_docs:
+            words = q.split()
+            if words:
+                word_conditions = []
+                for w in words:
+                    safe_w = re.escape(w)
+                    word_conditions.append({
+                        "$or": [
+                            {"file_name": {"$regex": safe_w, "$options": "i"}},
+                            {"caption": {"$regex": safe_w, "$options": "i"}}
+                        ]
                     })
-                return results
-        except Exception as e:
-            logger.error(f"Error in search_movies: {e}")
-            return []
+                fallback_filter = {"$and": word_conditions}
+                try:
+                    cursor = self.movies.find(fallback_filter).limit(limit)
+                    raw_docs = await cursor.to_list(length=limit)
+                except Exception:
+                    raw_docs = []
 
-    def _search_files(self, query: str, offset: int = 0, limit: int = PAGE_SIZE) -> Tuple[List[Dict[str, Any]], int]:
+        results = []
+        for doc in raw_docs:
+            f_id = str(doc.get("file_id") or "")
+            name = str(doc.get("file_name") or doc.get("title") or "Movie")
+            f_size = int(doc.get("file_size") or 0)
+            cap = str(doc.get("caption") or "")
+            m_id = doc.get("message_id")
+            results.append({
+                "file_id": f_id,
+                "title": name,
+                "file_name": name,
+                "file_size": f_size,
+                "caption": cap,
+                "message_id": m_id or f_id,
+                "channel_id": doc.get("channel_id") or DB_CHANNEL_ID
+            })
+        return results
+
+    async def search_files(self, query: str, offset: int = 0, limit: int = PAGE_SIZE) -> Tuple[List[Dict[str, Any]], int]:
         try:
-            q = query.strip().lower()
+            q = query.strip()
             if not q:
                 return [], 0
 
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "SELECT file_id, file_name, file_size, caption FROM movies WHERE LOWER(file_name) LIKE ? OR LOWER(caption) LIKE ? LIMIT ? OFFSET ?",
-                    (f"%{q}%", f"%{q}%", limit, offset)
-                )
-                raw_rows = cursor.fetchall()
+            search_filter = {"$or": [{"file_name": {"$regex": q, "$options": "i"}}, {"caption": {"$regex": q, "$options": "i"}}]}
+            try:
+                total = await self.movies.count_documents(search_filter)
+                cursor = self.movies.find(search_filter).skip(offset).limit(limit)
+                raw_docs = await cursor.to_list(length=limit)
+            except Exception:
+                safe_q = re.escape(q)
+                search_filter = {"$or": [{"file_name": {"$regex": safe_q, "$options": "i"}}, {"caption": {"$regex": safe_q, "$options": "i"}}]}
+                total = await self.movies.count_documents(search_filter)
+                cursor = self.movies.find(search_filter).skip(offset).limit(limit)
+                raw_docs = await cursor.to_list(length=limit)
 
-                if not raw_rows:
-                    words = q.split()
-                    if words:
-                        word_conds = []
-                        word_params = []
-                        for w in words:
-                            word_conds.append("(LOWER(file_name) LIKE ? OR LOWER(caption) LIKE ?)")
-                            word_params.extend([f"%{w}%", f"%{w}%"])
-                        multi_where = " AND ".join(word_conds)
-                        cursor.execute(
-                            f"SELECT file_id, file_name, file_size, caption FROM movies WHERE {multi_where} LIMIT ? OFFSET ?",
-                            word_params + [limit, offset]
-                        )
-                        raw_rows = cursor.fetchall()
-                        count_res = cursor.execute(
-                            f"SELECT COUNT(*) FROM movies WHERE {multi_where}",
-                            word_params
-                        ).fetchone()
-                        total = int(count_res[0]) if count_res else len(raw_rows)
-                    else:
-                        total = 0
-                else:
-                    count_res = cursor.execute(
-                        "SELECT COUNT(*) FROM movies WHERE LOWER(file_name) LIKE ? OR LOWER(caption) LIKE ?",
-                        (f"%{q}%", f"%{q}%")
-                    ).fetchone()
-                    total = int(count_res[0]) if count_res else len(raw_rows)
-
-                normalized_rows: List[Dict[str, Any]] = []
-                for row in raw_rows:
-                    f_id = str(row[0] or "")
-                    name = str(row[1] or "Movie")
-                    f_size = int(row[2] or 0)
-                    cap = str(row[3] or "")
-                    m_id = None
-                    cid = DB_CHANNEL_ID
+            if total == 0:
+                words = q.split()
+                if words:
+                    word_conds = []
+                    for w in words:
+                        safe_w = re.escape(w)
+                        word_conds.append({
+                            "$or": [
+                                {"file_name": {"$regex": safe_w, "$options": "i"}},
+                                {"caption": {"$regex": safe_w, "$options": "i"}}
+                            ]
+                        })
+                    fallback_filter = {"$and": word_conds}
                     try:
-                        row_extra = conn.execute("SELECT message_id, channel_id FROM movies WHERE file_id = ? LIMIT 1;", (f_id,)).fetchone()
-                        if row_extra:
-                            if row_extra[0]:
-                                m_id = row_extra[0]
-                            if row_extra[1]:
-                                cid = row_extra[1]
+                        total = await self.movies.count_documents(fallback_filter)
+                        if total > 0:
+                            cursor = self.movies.find(fallback_filter).skip(offset).limit(limit)
+                            raw_docs = await cursor.to_list(length=limit)
                     except Exception:
                         pass
 
-                    normalized_rows.append({
-                        "file_id": f_id,
-                        "title": name,
-                        "file_name": name,
-                        "file_size": f_size,
-                        "message_id": m_id or f_id,
-                        "channel_id": cid,
-                        "caption": cap
-                    })
-
-                return normalized_rows, total
-        except Exception as e:
-            logger.error(f"Database search exception for query '{query}': {e}", exc_info=True)
-            return [], 0
-
-    def _get_file_by_msg_id(self, message_id: Any) -> Optional[Dict[str, Any]]:
-        try:
-            with self._get_connection() as conn:
-                target_table, title_col, file_id_col, size_col, msg_id_col, channel_id_col, caption_col = self._detect_table_and_columns(conn)
-                msg_col = msg_id_col or "message_id"
-                row = None
-                if isinstance(message_id, int) or (isinstance(message_id, str) and str(message_id).isdigit()):
-                    row = conn.execute(f"SELECT * FROM {target_table} WHERE {msg_col} = ? OR file_id = ? LIMIT 1;", (int(message_id), str(message_id))).fetchone()
-                if not row:
-                    row = conn.execute(f"SELECT * FROM {target_table} WHERE file_id = ? LIMIT 1;", (str(message_id),)).fetchone()
-                if not row:
-                    return None
-                r = dict(row)
-                name = str(r.get("file_name") or r.get(title_col) or r.get("title") or r.get("caption") or "Movie")
-                f_id = str(r.get(file_id_col) or r.get("file_id") or r.get("id") or "")
-                f_size = int(r.get(size_col) if size_col else (r.get("file_size") or 0))
-                m_id = int(r.get(msg_col) or 0) if (r.get(msg_col) is not None and str(r.get(msg_col)).isdigit()) else message_id
-                cid = r.get("channel_id") or DB_CHANNEL_ID
-                cap = str(r.get("caption") or name)
-                return {
+            normalized_rows = []
+            for doc in raw_docs:
+                f_id = str(doc.get("file_id") or "")
+                name = str(doc.get("file_name") or doc.get("title") or "Movie")
+                f_size = int(doc.get("file_size") or 0)
+                cap = str(doc.get("caption") or "")
+                m_id = doc.get("message_id")
+                cid = doc.get("channel_id") or DB_CHANNEL_ID
+                normalized_rows.append({
                     "file_id": f_id,
                     "title": name,
                     "file_name": name,
                     "file_size": f_size,
-                    "message_id": m_id,
+                    "message_id": m_id or f_id,
                     "channel_id": cid,
                     "caption": cap
-                }
+                })
+            return normalized_rows, total
+        except Exception as e:
+            logger.error(f"Database search exception for query '{query}': {e}", exc_info=True)
+            return [], 0
+
+    async def get_file_by_msg_id(self, message_id: Any) -> Optional[Dict[str, Any]]:
+        try:
+            query_conds = []
+            if isinstance(message_id, int) or (isinstance(message_id, str) and str(message_id).isdigit()):
+                query_conds.append({"message_id": int(message_id)})
+            query_conds.append({"file_id": str(message_id)})
+            filter_query = {"$or": query_conds} if len(query_conds) > 1 else query_conds[0]
+            doc = await self.movies.find_one(filter_query)
+            if not doc:
+                return None
+            name = str(doc.get("file_name") or doc.get("title") or "Movie")
+            f_id = str(doc.get("file_id") or "")
+            f_size = int(doc.get("file_size") or 0)
+            m_id = doc.get("message_id") or message_id
+            cid = doc.get("channel_id") or DB_CHANNEL_ID
+            cap = str(doc.get("caption") or name)
+            return {
+                "file_id": f_id,
+                "title": name,
+                "file_name": name,
+                "file_size": f_size,
+                "message_id": m_id,
+                "channel_id": cid,
+                "caption": cap
+            }
         except Exception as e:
             logger.error(f"Error fetching file by message_id {message_id}: {e}")
             return None
 
-    def _get_stats(self) -> Dict[str, int]:
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            total_movies = cursor.execute("SELECT COUNT(*) FROM movies;").fetchone()[0]
-            total_users = cursor.execute("SELECT COUNT(*) FROM users;").fetchone()[0]
+    async def get_stats(self) -> Dict[str, int]:
+        try:
+            total_movies = await self.movies.count_documents({})
+            total_users = await self.users.count_documents({})
             return {"movies": total_movies, "users": total_users}
+        except Exception as e:
+            logger.error(f"Error getting stats from MongoDB: {e}")
+            return {"movies": 0, "users": 0}
 
-    def _is_approved_user(self, user_id: int) -> bool:
+    async def is_approved_user(self, user_id: int) -> bool:
         if user_id == 7831101047 or str(user_id) == "7831101047" or user_id in [7831101047, 783110149] or str(user_id) in ["7831101047", "783110149"] or user_id == OWNER_ID or user_id in ADMIN_IDS:
             return True
-        with self._get_connection() as conn:
-            row = conn.execute("SELECT 1 FROM approved_users WHERE user_id = ?;", (user_id,)).fetchone()
-            return bool(row)
+        try:
+            doc = await self.approved_users.find_one({"user_id": user_id})
+            return bool(doc)
+        except Exception as e:
+            logger.error(f"Error checking approved user {user_id}: {e}")
+            return False
 
-    def _is_disapproved_user(self, user_id: int) -> bool:
+    async def is_disapproved_user(self, user_id: int) -> bool:
         if user_id == 7831101047 or str(user_id) == "7831101047" or user_id in [7831101047, 783110149] or str(user_id) in ["7831101047", "783110149"] or user_id == OWNER_ID:
             return False
-        with self._get_connection() as conn:
-            row = conn.execute("SELECT 1 FROM disapproved_users WHERE user_id = ?;", (user_id,)).fetchone()
-            return bool(row)
-
-    def _approve_user(self, user_id: int) -> bool:
-        with self._get_connection() as conn:
-            conn.execute("DELETE FROM disapproved_users WHERE user_id = ?;", (user_id,))
-            conn.execute("INSERT OR IGNORE INTO approved_users (user_id) VALUES (?);", (user_id,))
-            conn.commit()
-            return True
-
-    def _disapprove_user(self, user_id: int) -> bool:
-        with self._get_connection() as conn:
-            conn.execute("DELETE FROM approved_users WHERE user_id = ?;", (user_id,))
-            conn.execute("INSERT OR IGNORE INTO disapproved_users (user_id) VALUES (?);", (user_id,))
-            conn.commit()
-            return True
-
-    def _get_approved_users(self) -> List[int]:
-        with self._get_connection() as conn:
-            rows = conn.execute("SELECT user_id FROM approved_users;").fetchall()
-            return [r[0] for r in rows]
-
-    def _create_file_token(self, token: str, user_id: int, message_id: int) -> bool:
         try:
-            with self._get_connection() as conn:
-                conn.execute(
-                    "INSERT INTO file_tokens (token, user_id, message_id, is_used) VALUES (?, ?, ?, 0);",
-                    (token, user_id, message_id)
-                )
-                conn.commit()
-                return True
+            doc = await self.disapproved_users.find_one({"user_id": user_id})
+            return bool(doc)
+        except Exception as e:
+            logger.error(f"Error checking disapproved user {user_id}: {e}")
+            return False
+
+    async def approve_user(self, user_id: int) -> bool:
+        try:
+            await self.disapproved_users.delete_one({"user_id": user_id})
+            await self.approved_users.update_one(
+                {"user_id": user_id},
+                {"$set": {"user_id": user_id, "approved_at": time.time()}},
+                upsert=True
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Error approving user {user_id}: {e}")
+            return False
+
+    async def disapprove_user(self, user_id: int) -> bool:
+        try:
+            await self.approved_users.delete_one({"user_id": user_id})
+            await self.disapproved_users.update_one(
+                {"user_id": user_id},
+                {"$set": {"user_id": user_id, "disapproved_at": time.time()}},
+                upsert=True
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Error disapproving user {user_id}: {e}")
+            return False
+
+    async def get_approved_users(self) -> List[int]:
+        try:
+            cursor = self.approved_users.find({}, {"user_id": 1})
+            docs = await cursor.to_list(length=1000)
+            return [d["user_id"] for d in docs if "user_id" in d]
+        except Exception as e:
+            logger.error(f"Error getting approved users: {e}")
+            return []
+
+    async def create_file_token(self, token: str, user_id: int, message_id: int) -> bool:
+        try:
+            await self.file_tokens.insert_one({
+                "token": token,
+                "user_id": user_id,
+                "message_id": message_id,
+                "is_used": 0,
+                "created_at": time.time()
+            })
+            return True
         except Exception as e:
             logger.error(f"Error creating file token: {e}")
             return False
 
-    def _verify_and_consume_token(self, token: str, user_id: int) -> Optional[int]:
+    async def verify_and_consume_token(self, token: str, user_id: int) -> Optional[int]:
         try:
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                row = cursor.execute(
-                    "SELECT message_id, is_used FROM file_tokens WHERE token = ? AND user_id = ?;",
-                    (token, user_id)
-                ).fetchone()
-                if not row:
-                    row = cursor.execute(
-                        "SELECT message_id, is_used FROM file_tokens WHERE token = ?;",
-                        (token,)
-                    ).fetchone()
-                if row and row["is_used"] == 0:
-                    conn.execute("UPDATE file_tokens SET is_used = 1 WHERE token = ?;", (token,))
-                    conn.commit()
-                    return int(row["message_id"])
+            doc = await self.file_tokens.find_one_and_update(
+                {"token": token, "user_id": user_id, "is_used": 0},
+                {"$set": {"is_used": 1}}
+            )
+            if not doc:
+                doc = await self.file_tokens.find_one_and_update(
+                    {"token": token, "is_used": 0},
+                    {"$set": {"is_used": 1}}
+                )
+            if doc:
+                return int(doc["message_id"])
         except Exception as e:
             logger.error(f"Error consuming file token: {e}")
         return None
 
-    def _is_token_used(self, token: str) -> bool:
+    async def is_token_used(self, token: str) -> bool:
         try:
-            with self._get_connection() as conn:
-                row = conn.execute("SELECT is_used FROM file_tokens WHERE token = ?;", (token,)).fetchone()
-                return bool(row and row["is_used"] == 1)
-        except Exception:
+            doc = await self.file_tokens.find_one({"token": token})
+            return bool(doc and doc.get("is_used") == 1)
+        except Exception as e:
+            logger.error(f"Error checking token: {e}")
             return False
 
-    def _is_authorized_group(self, group_id: int) -> bool:
+    async def is_authorized_group(self, group_id: int) -> bool:
         if group_id == SEARCH_GROUP_ID:
             return True
         try:
-            with self._get_connection() as conn:
-                row = conn.execute("SELECT 1 FROM authorized_groups WHERE group_id = ?;", (group_id,)).fetchone()
-                return bool(row)
+            doc = await self.authorized_groups.find_one({"group_id": group_id})
+            return bool(doc)
         except Exception as e:
             logger.error(f"Error checking authorized group {group_id}: {e}")
             return False
 
-    def _add_authorized_group(self, group_id: int, added_by: int) -> bool:
+    async def add_authorized_group(self, group_id: int, added_by: int) -> bool:
         try:
-            with self._get_connection() as conn:
-                conn.execute(
-                    "INSERT OR REPLACE INTO authorized_groups (group_id, added_by) VALUES (?, ?);",
-                    (group_id, added_by)
-                )
-                conn.commit()
-                return True
+            await self.authorized_groups.update_one(
+                {"group_id": group_id},
+                {"$set": {"group_id": group_id, "added_by": added_by, "created_at": time.time()}},
+                upsert=True
+            )
+            return True
         except Exception as e:
             logger.error(f"Error adding authorized group {group_id}: {e}")
             return False
 
-    def _remove_authorized_group(self, group_id: int) -> bool:
+    async def remove_authorized_group(self, group_id: int) -> bool:
         try:
-            with self._get_connection() as conn:
-                conn.execute("DELETE FROM authorized_groups WHERE group_id = ?;", (group_id,))
-                conn.commit()
-                return True
+            await self.authorized_groups.delete_one({"group_id": group_id})
+            return True
         except Exception as e:
             logger.error(f"Error removing authorized group {group_id}: {e}")
             return False
-
-    # Async wrappers
-    async def add_user(self, user_id: int):
-        await asyncio.to_thread(self._add_user, user_id)
-
-    async def add_movie(
-        self,
-        file_id: str,
-        title: str,
-        file_size: int,
-        message_id: int,
-        channel_id: Optional[int] = None,
-        file_name: Optional[str] = None,
-        caption: Optional[str] = None
-    ) -> bool:
-        return await asyncio.to_thread(self._add_movie, file_id, title, file_size, message_id, channel_id, file_name, caption)
-
-    async def add_movies_batch(self, movies_data: List[Any]) -> int:
-        return await asyncio.to_thread(self._add_movies_batch, movies_data)
-
-    async def search_files(self, query: str, offset: int = 0, limit: int = PAGE_SIZE) -> Tuple[List[Dict[str, Any]], int]:
-        return await asyncio.to_thread(self._search_files, query, offset, limit)
-
-    async def get_file_by_msg_id(self, message_id: int) -> Optional[Dict[str, Any]]:
-        return await asyncio.to_thread(self._get_file_by_msg_id, message_id)
-
-    async def deduplicate_movies(self) -> int:
-        return await asyncio.to_thread(self._deduplicate_movies)
-
-    async def get_stats(self) -> Dict[str, int]:
-        return await asyncio.to_thread(self._get_stats)
-
-    async def is_approved_user(self, user_id: int) -> bool:
-        return await asyncio.to_thread(self._is_approved_user, user_id)
-
-    async def is_disapproved_user(self, user_id: int) -> bool:
-        return await asyncio.to_thread(self._is_disapproved_user, user_id)
-
-    async def approve_user(self, user_id: int) -> bool:
-        return await asyncio.to_thread(self._approve_user, user_id)
-
-    async def disapprove_user(self, user_id: int) -> bool:
-        return await asyncio.to_thread(self._disapprove_user, user_id)
-
-    async def get_approved_users(self) -> List[int]:
-        return await asyncio.to_thread(self._get_approved_users)
-
-    async def create_file_token(self, token: str, user_id: int, message_id: int) -> bool:
-        return await asyncio.to_thread(self._create_file_token, token, user_id, message_id)
-
-    async def verify_and_consume_token(self, token: str, user_id: int) -> Optional[int]:
-        return await asyncio.to_thread(self._verify_and_consume_token, token, user_id)
-
-    async def is_token_used(self, token: str) -> bool:
-        return await asyncio.to_thread(self._is_token_used, token)
-
-    async def is_authorized_group(self, group_id: int) -> bool:
-        return await asyncio.to_thread(self._is_authorized_group, group_id)
-
-    async def add_authorized_group(self, group_id: int, added_by: int) -> bool:
-        return await asyncio.to_thread(self._add_authorized_group, group_id, added_by)
-
-    async def remove_authorized_group(self, group_id: int) -> bool:
-        return await asyncio.to_thread(self._remove_authorized_group, group_id)
 
 
 db = Database()
@@ -2051,7 +1843,7 @@ async def about_handler(client: Client, message: Message):
         "◈ **System Overview:**\n"
         "├─ 🤖 Bot: `CineVerse Auto-Filter Engine`\n"
         f"├─ 👥 Total Registered Users: `{stats['users']}`\n"
-        "├─ ⚡ Architecture: `Ultra-Fast Async SQLite (WAL)`\n"
+        "├─ ⚡ Architecture: `Ultra-Fast Async MongoDB (Motor)`\n"
         "├─ 👑 Developer: `Banty`\n"
         "└─ ✨ Network: **CineVerse Cinematic Network**\n\n"
         "──────────────────────────────────────────\n"
@@ -2215,21 +2007,9 @@ async def index_handler(client: Client, message: Message):
 
     await db.add_user(user_id)
 
-    # 1. Reset table on index: run cursor.execute("DELETE FROM movies;") before scanning
-    with db._get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM movies;")
-        conn.commit()
-    logger.info("Purged all old records from movies table on /index command start.")
-
-    movies_db_path = os.path.join(os.getcwd(), "database", "movies.db")
-    if os.path.exists(movies_db_path) and os.path.abspath(movies_db_path) != os.path.abspath(db.db_path):
-        try:
-            with sqlite3.connect(movies_db_path, check_same_thread=False) as mconn:
-                mconn.execute("DELETE FROM movies;")
-                mconn.commit()
-        except Exception:
-            pass
+    # 1. Reset collection on index: wipe movies collection before scanning
+    await db.movies.delete_many({})
+    logger.info("Purged all old records from movies collection on /index command start.")
 
     # Target channels: scan @database_Cineverse01 and @database_Cineverse
     target_channels = ["@database_Cineverse01", "@database_Cineverse"]
@@ -2261,14 +2041,11 @@ async def _async_channel_indexer_task(client: Client, message: Optional[Message]
     if not target_channels:
         target_channels = ["@database_Cineverse01", "@database_Cineverse"]
 
-    # Reset movies table on index before scanning only if status_msg is provided (explicit /index) or if DB is empty
-    with db._get_connection() as conn:
-        cursor = conn.cursor()
-        curr_cnt = cursor.execute("SELECT COUNT(*) FROM movies;").fetchone()[0]
-        if status_msg is not None or curr_cnt == 0:
-            cursor.execute("DELETE FROM movies;")
-            conn.commit()
-            logger.info("Reset movies table at start of _async_channel_indexer_task.")
+    # Reset movies collection on index before scanning only if status_msg is provided (explicit /index) or if DB is empty
+    curr_cnt = await db.movies.count_documents({})
+    if status_msg is not None or curr_cnt == 0:
+        await db.movies.delete_many({})
+        logger.info("Reset movies collection at start of _async_channel_indexer_task.")
 
     added = 0
     total_scanned = 0
@@ -2314,10 +2091,9 @@ async def _async_channel_indexer_task(client: Client, message: Optional[Message]
 
             if not max_id:
                 try:
-                    with db._get_connection() as conn:
-                        row = conn.execute("SELECT MAX(message_id) FROM movies WHERE channel_id = ?", (chat.id,)).fetchone()
-                        if row and row[0]:
-                            max_id = int(row[0]) + 150
+                    last_doc = await db.movies.find_one({"channel_id": chat.id}, sort=[("message_id", -1)])
+                    if last_doc and last_doc.get("message_id"):
+                        max_id = int(last_doc["message_id"]) + 150
                 except Exception:
                     pass
             if not max_id or max_id < 10000:
@@ -2342,43 +2118,42 @@ async def _async_channel_indexer_task(client: Client, message: Optional[Message]
                 if messages:
                     if not isinstance(messages, list):
                         messages = [messages]
-                    with db._get_connection() as conn:
-                        cursor = conn.cursor()
-                        for msg in messages:
-                            if not msg:
-                                continue
-                            total_scanned += 1
-                            # Extract only valid media (msg.document or msg.video)
-                            media = msg.document or msg.video
-                            if media and getattr(media, "file_id", None):
-                                total_media += 1
-                                file_id = media.file_id
-                                raw_title = getattr(media, "file_name", None) or msg.caption or "Unknown"
-                                clean_title = raw_title.replace(".", " ").replace("_", " ").replace("-", " ")
-                                file_size = getattr(media, "file_size", 0)
-                                caption = msg.caption or ""
-                                cursor.execute(
-                                    "INSERT OR IGNORE INTO movies (file_id, file_name, file_size, caption) VALUES (?, ?, ?, ?)",
-                                    (file_id, clean_title, file_size, caption)
-                                )
-                                if cursor.rowcount > 0:
-                                    added += 1
-                                try:
-                                    cursor.execute(
-                                        "UPDATE movies SET title = COALESCE(title, ?), message_id = COALESCE(message_id, ?), channel_id = COALESCE(channel_id, ?) WHERE file_id = ?",
-                                        (clean_title, int(msg.id), chat.id, file_id)
-                                    )
-                                except Exception:
-                                    pass
-                        conn.commit()
+                    for msg in messages:
+                        if not msg:
+                            continue
+                        total_scanned += 1
+                        # Extract only valid media (msg.document or msg.video)
+                        media = msg.document or msg.video
+                        if media and getattr(media, "file_id", None):
+                            total_media += 1
+                            file_id = media.file_id
+                            raw_title = getattr(media, "file_name", None) or msg.caption or "Unknown"
+                            clean_title = raw_title.replace(".", " ").replace("_", " ").replace("-", " ")
+                            file_size = getattr(media, "file_size", 0)
+                            caption = msg.caption or ""
+                            movie_doc = {
+                                "file_id": file_id,
+                                "file_name": clean_title,
+                                "title": clean_title,
+                                "file_size": file_size,
+                                "caption": caption,
+                                "message_id": int(msg.id),
+                                "channel_id": chat.id
+                            }
+                            res = await db.movies.update_one(
+                                {"file_id": file_id},
+                                {"$set": movie_doc},
+                                upsert=True
+                            )
+                            if res.upserted_id is not None:
+                                added += 1
                 else:
                     total_scanned += len(batch_ids)
 
-                # Edit the status message after every 100 messages showing imported count from SELECT COUNT(*) FROM movies
+                # Edit the status message after every 100 messages showing imported count from count_documents
                 if status_msg:
                     try:
-                        with db._get_connection() as count_conn:
-                            total_in_db = count_conn.execute("SELECT COUNT(*) FROM movies;").fetchone()[0]
+                        total_in_db = await db.movies.count_documents({})
                         await status_msg.edit_text(
                             f"⏳ **Indexing in Progress (Bot API Batch Mode)...**\n\n"
                             f"• **Current Channel:** `{target_title}` (`{chat.id}`)\n"
@@ -2398,24 +2173,7 @@ async def _async_channel_indexer_task(client: Client, message: Optional[Message]
 
                 await asyncio.sleep(0.05)
 
-            # Mirror to secondary database/movies.db if present
-            movies_db_path = os.path.join(os.getcwd(), "database", "movies.db")
-            if os.path.exists(movies_db_path) and os.path.abspath(movies_db_path) != os.path.abspath(db.db_path):
-                try:
-                    with db._get_connection() as sconn, sqlite3.connect(movies_db_path, check_same_thread=False) as mconn:
-                        mcur = mconn.cursor()
-                        rows = sconn.execute("SELECT file_id, file_name, file_size, caption, title, message_id, channel_id FROM movies WHERE channel_id = ?", (chat.id,)).fetchall()
-                        for r in rows:
-                            mcur.execute(
-                                "INSERT OR IGNORE INTO movies (file_id, file_name, file_size, caption, title, message_id, channel_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                                (r[0], r[1], r[2], r[3], r[4], r[5], r[6])
-                            )
-                        mconn.commit()
-                except Exception:
-                    pass
-
-        with db._get_connection() as count_conn:
-            total_in_db = count_conn.execute("SELECT COUNT(*) FROM movies;").fetchone()[0]
+        total_in_db = await db.movies.count_documents({})
         summary_lines = [
             "✅ **Full Channel Indexing Complete!**\n",
             f"• **Channels Indexed:** {', '.join(indexed_channels) if indexed_channels else 'None'}",
@@ -2439,8 +2197,7 @@ async def _async_channel_indexer_task(client: Client, message: Optional[Message]
         logger.error(f"Error in batch indexing: {e}", exc_info=True)
         if status_msg:
             try:
-                with db._get_connection() as count_conn:
-                    total_in_db = count_conn.execute("SELECT COUNT(*) FROM movies;").fetchone()[0]
+                total_in_db = await db.movies.count_documents({})
                 await status_msg.edit_text(
                     f"⚠️ **Indexing Notice:** {e}\n\n"
                     f"• **Messages Scanned:** `{total_scanned}`\n"
@@ -2487,21 +2244,21 @@ async def auto_index_channel(client: Client, message: Message):
     file_size = getattr(media, "file_size", 0) or 0
     cid = message.chat.id
 
-    with db._get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT OR IGNORE INTO movies (file_id, file_name, file_size, caption) VALUES (?, ?, ?, ?)",
-            (file_id, clean_title, file_size, caption)
-        )
-        try:
-            cursor.execute(
-                "UPDATE movies SET title = COALESCE(title, ?), message_id = COALESCE(message_id, ?), channel_id = COALESCE(channel_id, ?) WHERE file_id = ?",
-                (clean_title, int(message.id), cid, file_id)
-            )
-        except Exception:
-            pass
-        conn.commit()
-    logger.info(f"[AUTO-INDEX] Saved '{clean_title}' from chat {cid} (ID: {message.id})")
+    movie_doc = {
+        "file_id": file_id,
+        "file_name": clean_title,
+        "title": clean_title,
+        "file_size": file_size,
+        "caption": caption,
+        "message_id": int(message.id),
+        "channel_id": cid
+    }
+    await db.movies.update_one(
+        {"file_id": file_id},
+        {"$set": movie_doc},
+        upsert=True
+    )
+    logger.info(f"[AUTO-INDEX] Saved '{clean_title}' from chat {cid} (ID: {message.id}) to MongoDB movies collection")
 
 # ---------------------------------------------------------------------------
 # STRICT GROUP ACCESS & MULTI-GROUP ANTI-SPAM MODERATOR (GROUP -2)
@@ -2749,14 +2506,12 @@ async def auto_filter_handler(client: Client, message: Message):
         return
 
     # 1. CHECK DB COUNT AT SEARCH TIME:
-    # Inside the search query handler, before querying, print/log SELECT COUNT(*) FROM movies.
+    # Inside the search query handler, before querying, print/log movies count
     db_movie_count = 0
     try:
-        with db._get_connection() as count_check_conn:
-            cnt_res = count_check_conn.execute("SELECT COUNT(*) FROM movies;").fetchone()
-            db_movie_count = int(cnt_res[0]) if cnt_res else 0
+        db_movie_count = await db.movies.count_documents({})
     except Exception as count_err:
-        logger.error(f"Error checking movies table count at search time: {count_err}")
+        logger.error(f"Error checking movies collection count at search time: {count_err}")
 
     logger.info(f"📊 [SEARCH-COUNT-CHECK] Current database movies count: {db_movie_count} | Query: '{q}' | User ID: {user_id}")
     print(f"📊 [SEARCH-COUNT-CHECK] Current database movies count: {db_movie_count} | Query: '{q}' | User ID: {user_id}")
@@ -2764,72 +2519,63 @@ async def auto_filter_handler(client: Client, message: Message):
     # If count is 0, auto-trigger a background re-index or log a critical notice so database state is clear.
     if db_movie_count == 0:
         logger.critical(
-            f"🚨 [CRITICAL NOTICE] Movies table is completely EMPTY (COUNT = 0) at search time for query '{q}'! "
+            f"🚨 [CRITICAL NOTICE] Movies collection is completely EMPTY (COUNT = 0) at search time for query '{q}'! "
             f"Auto-triggering background re-index from target channels (@database_Cineverse01, @database_Cineverse)..."
         )
         print(
-            f"🚨 [CRITICAL NOTICE] Movies table is completely EMPTY (COUNT = 0) at search time for query '{q}'! "
+            f"🚨 [CRITICAL NOTICE] Movies collection is completely EMPTY (COUNT = 0) at search time for query '{q}'! "
             f"Auto-triggering background re-index from target channels (@database_Cineverse01, @database_Cineverse)..."
         )
         asyncio.create_task(_async_channel_indexer_task(client, message, None, ["@database_Cineverse01", "@database_Cineverse"]))
 
     try:
-        # 2. Flexible case-insensitive SQL wildcard search across file_name and caption:
-        # SELECT file_id, file_name, file_size, caption FROM movies WHERE LOWER(file_name) LIKE ? OR LOWER(caption) LIKE ? LIMIT 15
-        # passing (f"%{q}%", f"%{q}%")
-        with db._get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT file_id, file_name, file_size, caption FROM movies WHERE LOWER(file_name) LIKE ? OR LOWER(caption) LIKE ? LIMIT 15",
-                (f"%{q}%", f"%{q}%")
-            )
-            raw_rows = cursor.fetchall()
+        # Regex case-insensitive search on file_name and caption:
+        query = q
+        search_filter = {"$or": [{"file_name": {"$regex": query, "$options": "i"}}, {"caption": {"$regex": query, "$options": "i"}}]}
 
-            # 2. Word-by-word fallback:
-            # If direct query returns no rows, split query into words (words = q.split()) and
-            # match records where ALL words exist in file_name or caption using AND SQL conditions.
-            if not raw_rows:
-                words = q.split()
-                if words:
-                    conditions = []
-                    params = []
-                    for w in words:
-                        conditions.append("(LOWER(file_name) LIKE ? OR LOWER(caption) LIKE ?)")
-                        params.extend([f"%{w}%", f"%{w}%"])
-                    where_sql = " AND ".join(conditions)
-                    cursor.execute(
-                        f"SELECT file_id, file_name, file_size, caption FROM movies WHERE {where_sql} LIMIT 15",
-                        params
-                    )
-                    raw_rows = cursor.fetchall()
-                    count_row = cursor.execute(
-                        f"SELECT COUNT(*) FROM movies WHERE {where_sql}",
-                        params
-                    ).fetchone()
-                    total = int(count_row[0]) if count_row else len(raw_rows)
-                else:
+        try:
+            cursor = db.movies.find(search_filter).limit(15)
+            raw_docs = await cursor.to_list(length=15)
+            total = await db.movies.count_documents(search_filter)
+        except Exception:
+            safe_query = re.escape(query)
+            search_filter = {"$or": [{"file_name": {"$regex": safe_query, "$options": "i"}}, {"caption": {"$regex": safe_query, "$options": "i"}}]}
+            cursor = db.movies.find(search_filter).limit(15)
+            raw_docs = await cursor.to_list(length=15)
+            total = await db.movies.count_documents(search_filter)
+
+        # Word-by-word fallback if direct search returns no results
+        if not raw_docs:
+            words = q.split()
+            if words:
+                word_conditions = []
+                for w in words:
+                    safe_w = re.escape(w)
+                    word_conditions.append({
+                        "$or": [
+                            {"file_name": {"$regex": safe_w, "$options": "i"}},
+                            {"caption": {"$regex": safe_w, "$options": "i"}}
+                        ]
+                    })
+                fallback_filter = {"$and": word_conditions}
+                try:
+                    cursor = db.movies.find(fallback_filter).limit(15)
+                    raw_docs = await cursor.to_list(length=15)
+                    total = await db.movies.count_documents(fallback_filter)
+                except Exception:
+                    raw_docs = []
                     total = 0
             else:
-                count_row = cursor.execute(
-                    "SELECT COUNT(*) FROM movies WHERE LOWER(file_name) LIKE ? OR LOWER(caption) LIKE ?",
-                    (f"%{q}%", f"%{q}%")
-                ).fetchone()
-                total = int(count_row[0]) if count_row else len(raw_rows)
+                total = 0
 
         files = []
-        for r in raw_rows:
-            f_id = str(r[0] or "")
-            f_name = str(r[1] or "Movie")
-            f_size = int(r[2] or 0)
-            cap = str(r[3] or "")
-            m_id = None
-            try:
-                with db._get_connection() as mconn:
-                    row_mid = mconn.execute("SELECT message_id FROM movies WHERE file_id = ? LIMIT 1;", (f_id,)).fetchone()
-                    if row_mid and row_mid[0]:
-                        m_id = row_mid[0]
-            except Exception:
-                pass
+        for d in raw_docs:
+            f_id = str(d.get("file_id") or "")
+            f_name = str(d.get("file_name") or d.get("title") or "Movie")
+            f_size = int(d.get("file_size") or 0)
+            cap = str(d.get("caption") or "")
+            m_id = d.get("message_id")
+            cid = d.get("channel_id") or DB_CHANNEL_ID
 
             files.append({
                 "file_id": f_id,
@@ -2837,7 +2583,8 @@ async def auto_filter_handler(client: Client, message: Message):
                 "file_name": f_name,
                 "file_size": f_size,
                 "caption": cap,
-                "message_id": m_id or f_id
+                "message_id": m_id or f_id,
+                "channel_id": cid
             })
 
         logger.info(f"Database search for '{q}' in chat {message.chat.id} returned {total} results")
@@ -3129,7 +2876,7 @@ async def callback_router(client: Client, query: CallbackQuery):
             "├─ 🤖 Bot: `CineVerse Auto-Filter Engine`\n"
             f"├─ 📁 Total Vault Titles: `{stats['movies']}`\n"
             f"├─ 👥 Total Registered Users: `{stats['users']}`\n"
-            "├─ ⚡ Architecture: `Ultra-Fast Async SQLite (WAL)`\n"
+            "├─ ⚡ Architecture: `Ultra-Fast Async MongoDB (Motor)`\n"
             "├─ 👑 Developer: `Banty`\n"
             "└─ ✨ Network: **CineVerse Cinematic Network**\n\n"
             "──────────────────────────────────────────\n"
@@ -3538,6 +3285,9 @@ async def _start_pyrogram_client():
             logger.info("📡 Connecting to Telegram via Pyrogram...")
             await app.start()
             logger.info("✅ Pyrogram bot client connected and authenticated successfully!")
+            await db.init_indexes()
+            await db.ensure_defaults()
+            logger.info(f"✅ Connected to MongoDB Motor at '{db.uri_masked}' | Database: '{db.db_name}'")
             await set_bot_commands(app)
             # Resolve target channels as admin on startup
             for scid in TARGET_CHANNELS:

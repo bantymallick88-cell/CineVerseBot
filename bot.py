@@ -137,16 +137,41 @@ GPLINKS_API_KEY = os.getenv("GPLINKS_API_KEY") or get_env_str("GPLINKS_API_KEY",
 AROLINKS_API_KEY = GPLINKS_API_KEY  # Backward compatibility alias
 VERIFY_BASE_URL = os.getenv("VERIFY_BASE_URL", os.getenv("RENDER_EXTERNAL_URL", "")).strip()
 
-FSUB_CHANNEL_LINK = "https://t.me/CineVerseFlimSearch"
+def sanitize_button_url(url: Optional[str], default: str = "https://t.me/CineVerseFlimSearch") -> str:
+    """
+    Ensures inline keyboard button URLs strictly conform to Telegram Bot API requirements:
+    - Must be valid HTTP/HTTPS or allowed Telegram deep links.
+    - NEVER allows 'tg://user?id=...' which causes [400 BUTTON_TYPE_INVALID] or [400 BUTTON_URL_INVALID].
+    - Normalizes '@channel' and 'channel' usernames to 'https://t.me/channel'.
+    """
+    if not url or not isinstance(url, str):
+        return default
+    url = url.strip()
+    if not url:
+        return default
+    if url.startswith("tg://user?id="):
+        return default
+    if url.startswith("@"):
+        return f"https://t.me/{url[1:]}"
+    if url.startswith("t.me/"):
+        return f"https://{url}"
+    if not (url.startswith("http://") or url.startswith("https://") or url.startswith("tg://")):
+        clean = url.lstrip("/")
+        if re.match(r"^[a-zA-Z0-9_]+$", clean):
+            return f"https://t.me/{clean}"
+        return default
+    return url
+
+FSUB_CHANNEL_LINK = sanitize_button_url(os.getenv("FSUB_CHANNEL_LINK", "https://t.me/CineVerseFlimSearch"), "https://t.me/CineVerseFlimSearch")
 FSUB_GROUP_ID = -1004427640174
 FSUB_GROUP_LINK = FSUB_CHANNEL_LINK
 
 MAIN_GROUP_ID = FSUB_GROUP_ID
 MAIN_GROUP_LINK = FSUB_CHANNEL_LINK
 REQUEST_GROUP_ID = get_env_int("REQUEST_GROUP_ID", FSUB_GROUP_ID)
-REQUEST_GROUP_LINK = get_env_str("REQUEST_GROUP_LINK", FSUB_CHANNEL_LINK)
+REQUEST_GROUP_LINK = sanitize_button_url(get_env_str("REQUEST_GROUP_LINK", FSUB_CHANNEL_LINK), FSUB_CHANNEL_LINK)
 BACKUP_GROUP_ID = get_env_int("BACKUP_GROUP_ID", FSUB_GROUP_ID)
-BACKUP_GROUP_LINK = get_env_str("BACKUP_GROUP_LINK", FSUB_CHANNEL_LINK)
+BACKUP_GROUP_LINK = sanitize_button_url(get_env_str("BACKUP_GROUP_LINK", FSUB_CHANNEL_LINK), FSUB_CHANNEL_LINK)
 
 # Strict Allowed Chat Access List: Main Group, Request Group, Backup Group, DB Channels
 ALLOWED_CHAT_IDS = [MAIN_GROUP_ID, REQUEST_GROUP_ID, BACKUP_GROUP_ID] + [cid for cid in DB_CHANNEL_IDS if isinstance(cid, int)]
@@ -159,7 +184,7 @@ BACKUP_CHANNEL_LINK = BACKUP_GROUP_LINK
 SEARCH_GROUP_ID = FSUB_GROUP_ID
 SEARCH_GROUP_LINK = FSUB_CHANNEL_LINK
 CHANNEL_LINK = FSUB_CHANNEL_LINK
-DEVELOPER_LINK = get_env_str("DEVELOPER_LINK", f"tg://user?id={OWNER_ID}")
+DEVELOPER_LINK = sanitize_button_url(os.getenv("DEVELOPER_LINK"), "https://t.me/CineVerseFlimSearch")
 WELCOME_IMAGE_URL = get_env_str(
     "WELCOME_IMAGE_URL",
     "https://images.unsplash.com/photo-1536440136628-849c177e76a1?q=80&w=1200&auto=format&fit=crop"
@@ -398,33 +423,45 @@ class Database:
         if not q:
             return []
         search_filter = {"$or": [{"file_name": {"$regex": q, "$options": "i"}}, {"caption": {"$regex": q, "$options": "i"}}]}
+        raw_docs = []
         try:
             cursor = self.movies.find(search_filter).limit(limit)
             raw_docs = await cursor.to_list(length=limit)
         except Exception:
             safe_q = re.escape(q)
             search_filter = {"$or": [{"file_name": {"$regex": safe_q, "$options": "i"}}, {"caption": {"$regex": safe_q, "$options": "i"}}]}
-            cursor = self.movies.find(search_filter).limit(limit)
-            raw_docs = await cursor.to_list(length=limit)
+            try:
+                cursor = self.movies.find(search_filter).limit(limit)
+                raw_docs = await cursor.to_list(length=limit)
+            except Exception:
+                raw_docs = []
 
-        if not raw_docs:
-            words = q.split()
-            if words:
-                word_conditions = []
-                for w in words:
-                    safe_w = re.escape(w)
-                    word_conditions.append({
-                        "$or": [
-                            {"file_name": {"$regex": safe_w, "$options": "i"}},
-                            {"caption": {"$regex": safe_w, "$options": "i"}}
-                        ]
-                    })
-                fallback_filter = {"$and": word_conditions}
-                try:
-                    cursor = self.movies.find(fallback_filter).limit(limit)
-                    raw_docs = await cursor.to_list(length=limit)
-                except Exception:
-                    raw_docs = []
+        words = q.split()
+        if not raw_docs and len(words) > 1:
+            multi_regex = ".*".join(re.escape(w) for w in words)
+            mw_filter = {"$or": [{"file_name": {"$regex": multi_regex, "$options": "i"}}, {"caption": {"$regex": multi_regex, "$options": "i"}}]}
+            try:
+                cursor = self.movies.find(mw_filter).limit(limit)
+                raw_docs = await cursor.to_list(length=limit)
+            except Exception:
+                pass
+
+        if not raw_docs and words:
+            word_conditions = []
+            for w in words:
+                safe_w = re.escape(w)
+                word_conditions.append({
+                    "$or": [
+                        {"file_name": {"$regex": safe_w, "$options": "i"}},
+                        {"caption": {"$regex": safe_w, "$options": "i"}}
+                    ]
+                })
+            fallback_filter = {"$and": word_conditions}
+            try:
+                cursor = self.movies.find(fallback_filter).limit(limit)
+                raw_docs = await cursor.to_list(length=limit)
+            except Exception:
+                raw_docs = []
 
         results = []
         for doc in raw_docs:
@@ -451,37 +488,55 @@ class Database:
                 return [], 0
 
             search_filter = {"$or": [{"file_name": {"$regex": q, "$options": "i"}}, {"caption": {"$regex": q, "$options": "i"}}]}
+            raw_docs = []
+            total = 0
             try:
                 total = await self.movies.count_documents(search_filter)
-                cursor = self.movies.find(search_filter).skip(offset).limit(limit)
-                raw_docs = await cursor.to_list(length=limit)
+                if total > 0:
+                    cursor = self.movies.find(search_filter).skip(offset).limit(limit)
+                    raw_docs = await cursor.to_list(length=limit)
             except Exception:
                 safe_q = re.escape(q)
                 search_filter = {"$or": [{"file_name": {"$regex": safe_q, "$options": "i"}}, {"caption": {"$regex": safe_q, "$options": "i"}}]}
-                total = await self.movies.count_documents(search_filter)
-                cursor = self.movies.find(search_filter).skip(offset).limit(limit)
-                raw_docs = await cursor.to_list(length=limit)
+                try:
+                    total = await self.movies.count_documents(search_filter)
+                    if total > 0:
+                        cursor = self.movies.find(search_filter).skip(offset).limit(limit)
+                        raw_docs = await cursor.to_list(length=limit)
+                except Exception:
+                    total = 0
+                    raw_docs = []
 
-            if total == 0:
-                words = q.split()
-                if words:
-                    word_conds = []
-                    for w in words:
-                        safe_w = re.escape(w)
-                        word_conds.append({
-                            "$or": [
-                                {"file_name": {"$regex": safe_w, "$options": "i"}},
-                                {"caption": {"$regex": safe_w, "$options": "i"}}
-                            ]
-                        })
-                    fallback_filter = {"$and": word_conds}
-                    try:
-                        total = await self.movies.count_documents(fallback_filter)
-                        if total > 0:
-                            cursor = self.movies.find(fallback_filter).skip(offset).limit(limit)
-                            raw_docs = await cursor.to_list(length=limit)
-                    except Exception:
-                        pass
+            words = q.split()
+            if total == 0 and len(words) > 1:
+                multi_regex = ".*".join(re.escape(w) for w in words)
+                mw_filter = {"$or": [{"file_name": {"$regex": multi_regex, "$options": "i"}}, {"caption": {"$regex": multi_regex, "$options": "i"}}]}
+                try:
+                    total = await self.movies.count_documents(mw_filter)
+                    if total > 0:
+                        cursor = self.movies.find(mw_filter).skip(offset).limit(limit)
+                        raw_docs = await cursor.to_list(length=limit)
+                except Exception:
+                    pass
+
+            if total == 0 and words:
+                word_conds = []
+                for w in words:
+                    safe_w = re.escape(w)
+                    word_conds.append({
+                        "$or": [
+                            {"file_name": {"$regex": safe_w, "$options": "i"}},
+                            {"caption": {"$regex": safe_w, "$options": "i"}}
+                        ]
+                    })
+                fallback_filter = {"$and": word_conds}
+                try:
+                    total = await self.movies.count_documents(fallback_filter)
+                    if total > 0:
+                        cursor = self.movies.find(fallback_filter).skip(offset).limit(limit)
+                        raw_docs = await cursor.to_list(length=limit)
+                except Exception:
+                    pass
 
             normalized_rows = []
             for doc in raw_docs:
@@ -917,18 +972,17 @@ async def get_file_download_short_url(file_msg_id: int) -> str:
 
 async def build_pagination_markup(files: List[Dict[str, Any]], cache_id: str, current_page: int, total_pages: int, bot_username: Optional[str] = None) -> InlineKeyboardMarkup:
     buttons = []
-    base_verify_url = get_redirect_base_url()
-    
-    # Native Telegram WebApp Popup (3.5s Animated Gateway):
+    bot_uname = (bot_username or BOT_USERNAME or os.getenv("BOT_USERNAME") or "CineVerseFilterBot").lstrip("@")
+
     for f in files:
-        name = f.get("title", "Movie")
+        name = f.get("title") or f.get("file_name") or "Movie"
         size_str = format_size(f.get("file_size", 0))
         meta = extract_movie_metadata(name)
         display_name = (meta["clean_title"][:26] + "...") if len(meta["clean_title"]) > 29 else meta["clean_title"]
-        target_btn_id = f.get('message_id') or f.get('file_id')
-        btn_url = f"{base_verify_url}/verify?file_id={target_btn_id}"
+        target_btn_id = str(f.get('message_id') or f.get('file_id') or '0')
         btn_text = f"📥 [ {meta['quality']} │ {size_str} ] ▷ {display_name}"
-        buttons.append([InlineKeyboardButton(text=btn_text, web_app=WebAppInfo(url=btn_url))])
+        file_url = f"https://t.me/{bot_uname}?start=file_{target_btn_id}"
+        buttons.append([InlineKeyboardButton(text=btn_text, url=file_url)])
 
     # Row 1: Interactive filter submenus
     filter_row = [
@@ -948,11 +1002,13 @@ async def build_pagination_markup(files: List[Dict[str, Any]], cache_id: str, cu
     buttons.append(nav_row)
 
     # Row 3: Official CineVerse Channel & Creator badge
+    clean_channel_url = sanitize_button_url(FSUB_CHANNEL_LINK, "https://t.me/CineVerseFlimSearch")
+    clean_dev_url = sanitize_button_url(DEVELOPER_LINK, "https://t.me/CineVerseFlimSearch")
     buttons.append([
-        InlineKeyboardButton("📢 Official Channel ↗", url=FSUB_CHANNEL_LINK),
-        InlineKeyboardButton("⚡ By Banty ↗", url=DEVELOPER_LINK)
+        InlineKeyboardButton("📢 Official Channel ↗", url=clean_channel_url),
+        InlineKeyboardButton("⚡ By Banty ↗", url=clean_dev_url)
     ])
-    
+
     # Row 4: Clean Close button
     buttons.append([InlineKeyboardButton("🗑️ Close & Clean Search", callback_data="cb_close")])
     return InlineKeyboardMarkup(buttons)
@@ -2523,43 +2579,61 @@ async def auto_filter_handler(client: Client, message: Message):
         asyncio.create_task(_async_channel_indexer_task(client, message, None, ["@database_Cineverse01", "@database_Cineverse"]))
 
     try:
-        # Regex case-insensitive search on file_name and caption:
+        # Multi-word regex case-insensitive search on file_name and caption:
         query = q
         search_filter = {"$or": [{"file_name": {"$regex": query, "$options": "i"}}, {"caption": {"$regex": query, "$options": "i"}}]}
 
+        raw_docs = []
+        total = 0
         try:
-            cursor = db.movies.find(search_filter).limit(15)
-            raw_docs = await cursor.to_list(length=15)
             total = await db.movies.count_documents(search_filter)
+            if total > 0:
+                cursor = db.movies.find(search_filter).limit(PAGE_SIZE)
+                raw_docs = await cursor.to_list(length=PAGE_SIZE)
         except Exception:
             safe_query = re.escape(query)
             search_filter = {"$or": [{"file_name": {"$regex": safe_query, "$options": "i"}}, {"caption": {"$regex": safe_query, "$options": "i"}}]}
-            cursor = db.movies.find(search_filter).limit(15)
-            raw_docs = await cursor.to_list(length=15)
-            total = await db.movies.count_documents(search_filter)
+            try:
+                total = await db.movies.count_documents(search_filter)
+                if total > 0:
+                    cursor = db.movies.find(search_filter).limit(PAGE_SIZE)
+                    raw_docs = await cursor.to_list(length=PAGE_SIZE)
+            except Exception:
+                total = 0
+                raw_docs = []
 
-        # Word-by-word fallback if direct search returns no results
-        if not raw_docs:
-            words = q.split()
-            if words:
-                word_conditions = []
-                for w in words:
-                    safe_w = re.escape(w)
-                    word_conditions.append({
-                        "$or": [
-                            {"file_name": {"$regex": safe_w, "$options": "i"}},
-                            {"caption": {"$regex": safe_w, "$options": "i"}}
-                        ]
-                    })
-                fallback_filter = {"$and": word_conditions}
-                try:
-                    cursor = db.movies.find(fallback_filter).limit(15)
-                    raw_docs = await cursor.to_list(length=15)
-                    total = await db.movies.count_documents(fallback_filter)
-                except Exception:
-                    raw_docs = []
-                    total = 0
-            else:
+        words = q.split()
+        # In-order multi-word regex search (matching tokens separated by dots, spaces, dashes)
+        if total == 0 and len(words) > 1:
+            multi_regex = ".*".join(re.escape(w) for w in words)
+            mw_filter = {"$or": [{"file_name": {"$regex": multi_regex, "$options": "i"}}, {"caption": {"$regex": multi_regex, "$options": "i"}}]}
+            try:
+                total = await db.movies.count_documents(mw_filter)
+                if total > 0:
+                    cursor = db.movies.find(mw_filter).limit(PAGE_SIZE)
+                    raw_docs = await cursor.to_list(length=PAGE_SIZE)
+            except Exception:
+                pass
+
+        # Word-by-word $and fallback if still no results
+        if total == 0 and words:
+            word_conditions = []
+            for w in words:
+                safe_w = re.escape(w)
+                word_conditions.append({
+                    "$or": [
+                        {"file_name": {"$regex": safe_w, "$options": "i"}},
+                        {"caption": {"$regex": safe_w, "$options": "i"}}
+                    ]
+                })
+            fallback_filter = {"$and": word_conditions}
+            try:
+                total = await db.movies.count_documents(fallback_filter)
+                if total > 0:
+                    cursor = db.movies.find(fallback_filter).limit(PAGE_SIZE)
+                    raw_docs = await cursor.to_list(length=PAGE_SIZE)
+            except Exception:
+                raw_docs = []
                 total = 0
 
         files = []

@@ -1645,6 +1645,51 @@ def build_bypass_task_card(user_id: int, added_count: int, credits: int, file_ms
         ])
     return text, InlineKeyboardMarkup(buttons)
 
+def build_main_menu_card(user_mention: str, stats: Dict[str, Any], bot_username: str) -> Tuple[str, InlineKeyboardMarkup]:
+    caption = (
+        "┌──────────────────────────────────────────┐\n"
+        "│   🍿  C I N E V E R S E   M O V I E S    │\n"
+        "│    Next-Gen Luxury Cinema Experience     │\n"
+        "└──────────────────────────────────────────┘\n\n"
+        f"👋 **Greetings, {user_mention}!**\n"
+        "Welcome to the premier destination for high-speed cinema & series discovery.\n\n"
+        "◈ **Network Overview:**\n"
+        f"├─ 🎬 Indexed Vault: `{stats['movies']} Titles`\n"
+        f"├─ 👥 Active Members: `{stats['users']} Registered`\n"
+        f"├─ ⚡ Response Time: `Sub-Second (~0.2s)`\n"
+        f"├─ 🛡️ Security: `100% Encrypted & Safe`\n"
+        f"└─ 👑 Creator: `Banty` │ **CineVerse Network**\n\n"
+        "◈ **How to Download:**\n"
+        "├─ 💬 Send movie titles in the Search Group\n"
+        "├─ 📥 Select preferred resolution (4K, 1080p, 720p, HEVC)\n"
+        "└─ ⚡ Files delivered instantly to your private chat!\n\n"
+        "💡 **Need your own custom Movie/Media Search Bot?**\n"
+        "📩 **Contact Admin:** @Banty567 (Paid Work Only)\n\n"
+        "──────────────────────────────────────────\n"
+        "⚖️ *Disclaimer: Media is indexed from public Telegram channels. Use /dmca for takedowns.*"
+    )
+    markup = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📢 Official Channel ↗", url=FSUB_CHANNEL_LINK),
+            InlineKeyboardButton("➕ Add Me to Group ↗", url=f"https://t.me/{bot_username}?startgroup=true")
+        ],
+        [
+            InlineKeyboardButton("🤖 Want a Custom Bot Like This? (Paid)", url="https://t.me/Banty567")
+        ],
+        [
+            InlineKeyboardButton("📖 Guide & Help", callback_data="cb_help"),
+            InlineKeyboardButton("📜 Community Rules", callback_data="cb_rules")
+        ],
+        [
+            InlineKeyboardButton("⚖️ Disclaimer", callback_data="cb_disclaimer"),
+            InlineKeyboardButton("📋 DMCA Takedown", callback_data="cb_dmca")
+        ],
+        [
+            InlineKeyboardButton("ℹ️ About CineVerse", callback_data="cb_about")
+        ]
+    ])
+    return caption, markup
+
 async def is_sender_chat_admin(client: Client, chat_id: int, user_id: int) -> bool:
     if user_id == 7831101047 or str(user_id) == "7831101047" or user_id in [7831101047, 783110149] or str(user_id) in ["7831101047", "783110149"]:
         return True
@@ -1958,44 +2003,8 @@ async def start_handler(client: Client, message: Message):
 
     stats = await db.get_stats()
     bot_me = await client.get_me()
-
-    caption = (
-        "┌──────────────────────────────────────────┐\n"
-        "│   🍿  C I N E V E R S E   M O V I E S    │\n"
-        "│    Next-Gen Luxury Cinema Experience     │\n"
-        "└──────────────────────────────────────────┘\n\n"
-        f"👋 **Greetings, {message.from_user.mention if message.from_user else 'Friend'}!**\n"
-        "Welcome to the premier destination for high-speed cinema & series discovery.\n\n"
-        "◈ **Network Overview:**\n"
-        f"├─ 🎬 Indexed Vault: `{stats['movies']} Titles`\n"
-        f"├─ 👥 Active Members: `{stats['users']} Registered`\n"
-        f"├─ ⚡ Response Time: `Sub-Second (~0.2s)`\n"
-        f"├─ 🛡️ Security: `100% Encrypted & Safe`\n"
-        f"└─ 👑 Creator: `Banty` │ **CineVerse Network**\n\n"
-        "◈ **How to Download:**\n"
-        "├─ 💬 Send movie titles in the Search Group\n"
-        "├─ 📥 Select preferred resolution (4K, 1080p, 720p, HEVC)\n"
-        "└─ ⚡ Files delivered instantly to your private chat!\n\n"
-        "──────────────────────────────────────────\n"
-        "⚖️ *Disclaimer: Media is indexed from public Telegram channels. Use /dmca for takedowns.*"
-    )
-    markup = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("📢 Official Channel ↗", url=FSUB_CHANNEL_LINK),
-            InlineKeyboardButton("➕ Add Me to Group ↗", url=f"https://t.me/{bot_me.username}?startgroup=true")
-        ],
-        [
-            InlineKeyboardButton("📖 Guide & Help", callback_data="cb_help"),
-            InlineKeyboardButton("📜 Community Rules", callback_data="cb_rules")
-        ],
-        [
-            InlineKeyboardButton("⚖️ Disclaimer", callback_data="cb_disclaimer"),
-            InlineKeyboardButton("📋 DMCA Takedown", callback_data="cb_dmca")
-        ],
-        [
-            InlineKeyboardButton("ℹ️ About CineVerse", callback_data="cb_about")
-        ]
-    ])
+    user_mention = message.from_user.mention if message.from_user else "Friend"
+    caption, markup = build_main_menu_card(user_mention, stats, bot_me.username)
 
     sent_msg = None
     try:
@@ -3521,43 +3530,8 @@ async def callback_router(client: Client, query: CallbackQuery):
     elif data == "cb_home":
         stats = await db.get_stats()
         bot_me = await client.get_me()
-        caption = (
-            "┌──────────────────────────────────────────┐\n"
-            "│   🍿  C I N E V E R S E   M O V I E S    │\n"
-            "│    Next-Gen Luxury Cinema Experience     │\n"
-            "└──────────────────────────────────────────┘\n\n"
-            f"👋 **Greetings, {query.from_user.mention if query.from_user else 'Friend'}!**\n"
-            "Welcome to the premier destination for high-speed cinema & series discovery.\n\n"
-            "◈ **Network Overview:**\n"
-            f"├─ 🎬 Indexed Vault: `{stats['movies']} Titles`\n"
-            f"├─ 👥 Active Members: `{stats['users']} Registered`\n"
-            f"├─ ⚡ Response Time: `Sub-Second (~0.2s)`\n"
-            f"├─ 🛡️ Security: `100% Encrypted & Safe`\n"
-            f"└─ 👑 Creator: `Banty` │ **CineVerse Network**\n\n"
-            "◈ **How to Download:**\n"
-            "├─ 💬 Send movie titles in the Search Group\n"
-            "├─ 📥 Select preferred resolution (4K, 1080p, 720p, HEVC)\n"
-            "└─ ⚡ Files delivered instantly to your private chat!\n\n"
-            "──────────────────────────────────────────\n"
-            "⚖️ *Disclaimer: Media is indexed from public Telegram channels. Use /dmca for takedowns.*"
-        )
-        markup = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("📢 Official Channel ↗", url=FSUB_CHANNEL_LINK),
-                InlineKeyboardButton("➕ Add Me to Group ↗", url=f"https://t.me/{bot_me.username}?startgroup=true")
-            ],
-            [
-                InlineKeyboardButton("📖 Guide & Help", callback_data="cb_help"),
-                InlineKeyboardButton("📜 Community Rules", callback_data="cb_rules")
-            ],
-            [
-                InlineKeyboardButton("⚖️ Disclaimer", callback_data="cb_disclaimer"),
-                InlineKeyboardButton("📋 DMCA Takedown", callback_data="cb_dmca")
-            ],
-            [
-                InlineKeyboardButton("ℹ️ About CineVerse", callback_data="cb_about")
-            ]
-        ])
+        user_mention = query.from_user.mention if query.from_user else "Friend"
+        caption, markup = build_main_menu_card(user_mention, stats, bot_me.username)
         try:
             await query.message.edit_caption(caption=caption, reply_markup=markup)
         except Exception:

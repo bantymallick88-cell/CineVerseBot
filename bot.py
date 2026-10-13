@@ -2203,6 +2203,11 @@ async def index_handler(client: Client, message: Message):
         "• Direct Bot API batch scanning in progress...",
         quote=True
     )
+
+    # 1. Non-blocking background task: Network timeouts never freeze the message handler
+    asyncio.create_task(_async_channel_indexer_task(client, message, status_msg, target_channels))
+
+async def _async_channel_indexer_task(client: Client, message: Message, status_msg: Message, target_channels: List[Any]):
     status_msg_id = status_msg.id
 
     # 1. Deduplicate Database on Index Start: clears duplicate records and rebuilds unique constraints on file_id
@@ -2217,7 +2222,6 @@ async def index_handler(client: Client, message: Message):
     total_scanned = 0
     total_media = 0
     batch_buffer: List[Any] = []
-    last_update = time.time()
     indexed_channels: List[str] = []
     skipped_channels: List[str] = []
 
@@ -2228,7 +2232,7 @@ async def index_handler(client: Client, message: Message):
             target_title = getattr(resolved_chat, "title", str(target_peer)) if resolved_chat else str(target_peer)
             indexed_channels.append(f"{target_title} (`{target_peer}`)")
 
-            # Step 1: Probe latest message ID (max_id) via dummy message or fallback
+            # Step 1: Probe latest message ID (max_id) via dummy message or fallback up to ~7388
             max_id = 0
             try:
                 dummy = await client.send_message(target_peer, ".")
@@ -2238,6 +2242,9 @@ async def index_handler(client: Client, message: Message):
                         await dummy.delete()
                     except Exception:
                         pass
+            except FloodWait as e:
+                logger.warning(f"FloodWait probing channel {target_peer}: sleeping {e.value}s")
+                await asyncio.sleep(e.value)
             except Exception as dummy_err:
                 logger.warning(f"Could not send probe message to {target_peer}: {dummy_err}")
 
@@ -2246,27 +2253,38 @@ async def index_handler(client: Client, message: Message):
                     with db._get_connection() as conn:
                         row = conn.execute("SELECT MAX(message_id) FROM movies WHERE channel_id = ?", (target_peer,)).fetchone()
                         if row and row[0]:
-                            max_id = int(row[0]) + 1000
+                            max_id = int(row[0]) + 150
                 except Exception:
                     pass
-            if not max_id:
-                max_id = 20000
+            if not max_id or max_id < 7388:
+                max_id = max(max_id or 0, 7388)
 
-            logger.info(f"Indexing channel {target_peer} from ID 1 to {max_id} in batches of 100...")
+            logger.info(f"Indexing channel {target_peer} from ID 1 to {max_id} in continuous batches of 100...")
 
-            # Step 2: Iterate message IDs in batches of 100
+            # Step 2: Iterate message IDs in batches of 100 with auto-retry
             for i in range(1, max_id + 1, 100):
                 batch_list = list(range(i, min(i + 100, max_id + 1)))
-                try:
-                    msgs = await client.get_messages(target_peer, message_ids=batch_list)
-                    if not msgs:
-                        continue
+                msgs = None
+
+                # Auto-retry batch fetch loop
+                for attempt in range(3):
+                    try:
+                        msgs = await client.get_messages(target_peer, message_ids=batch_list)
+                        break
+                    except FloodWait as e:
+                        logger.warning(f"FloodWait on batch {batch_list[0]}-{batch_list[-1]}: sleeping {e.value}s")
+                        await asyncio.sleep(e.value)
+                    except Exception as batch_err:
+                        logger.warning(f"Batch fetch attempt {attempt + 1} error on {batch_list[0]}-{batch_list[-1]}: {batch_err}")
+                        await asyncio.sleep(0.5)
+
+                if msgs:
                     if not isinstance(msgs, list):
                         msgs = [msgs]
                     for msg in msgs:
                         if not msg:
                             continue
-                        total_scanned += len(batch_list) if msg == msgs[0] else 0
+                        total_scanned += 1
                         media = msg.document or msg.video or msg.audio or msg.animation
                         if media and getattr(media, "file_id", None):
                             total_media += 1
@@ -2289,47 +2307,36 @@ async def index_handler(client: Client, message: Message):
                                     target_peer,
                                     str(caption).strip()
                                 ))
+                else:
+                    total_scanned += len(batch_list)
 
-                    if len(batch_buffer) >= 100:
-                        ins_count = await db.add_movies_batch(batch_buffer)
-                        added += ins_count
-                        batch_buffer.clear()
+                # Flush batch buffer immediately
+                if batch_buffer:
+                    ins_count = await db.add_movies_batch(batch_buffer)
+                    added += ins_count
+                    batch_buffer.clear()
 
-                    await asyncio.sleep(0.02)
-
-                except FloodWait as fw:
-                    wait_time = int(getattr(fw, "value", getattr(fw, "x", 30)))
-                    logger.warning(f"FloodWait during indexing: sleeping {wait_time}s")
-                    await asyncio.sleep(wait_time)
-                except Exception as e:
-                    logger.warning(f"⚠️ Exception during get_messages batch {batch_list[0]}-{batch_list[-1]} for channel {target_peer}: {e}")
-
-                # Live progress update every 3 seconds
-                if time.time() - last_update > 3:
-                    if batch_buffer:
-                        ins_count = await db.add_movies_batch(batch_buffer)
-                        added += ins_count
-                        batch_buffer.clear()
+                # Edit in-place status message with current progress after every batch
+                try:
                     stats = await db.get_stats()
-                    try:
-                        await status_msg.edit_text(
-                            f"⏳ **Indexing in Progress (Bot API Batch Mode)...**\n\n"
-                            f"• **Current Channel:** `{target_title}` (`{target_peer}`)\n"
-                            f"• **Scanning Range:** IDs `{batch_list[0]}` - `{batch_list[-1]}` (of `{max_id}`)\n"
-                            f"• **Messages Scanned:** `{total_scanned}`\n"
-                            f"• **Videos/Files Found:** `{total_media}`\n"
-                            f"• **Newly Added:** `{added}`\n"
-                            f"🎬 **Total Movies in DB:** `{stats['movies']}`"
-                        )
-                    except MessageNotModified:
-                        pass
-                    except FloodWait as fw:
-                        wait_time = int(getattr(fw, "value", getattr(fw, "x", 5)))
-                        logger.warning(f"FloodWait during status edit: sleeping {wait_time}s")
-                        await asyncio.sleep(wait_time)
-                    except Exception as edit_err:
-                        logger.debug(f"Could not edit status message {status_msg_id}: {edit_err}")
-                    last_update = time.time()
+                    await status_msg.edit_text(
+                        f"⏳ **Indexing in Progress (Bot API Batch Mode)...**\n\n"
+                        f"• **Current Channel:** `{target_title}` (`{target_peer}`)\n"
+                        f"• **Scanning Range:** IDs `{batch_list[0]}` - `{batch_list[-1]}` (of `{max_id}`)\n"
+                        f"• **Messages Scanned:** `{total_scanned}`\n"
+                        f"• **Videos/Files Found:** `{total_media}`\n"
+                        f"• **Newly Added:** `{added}`\n"
+                        f"🎬 **Total Movies in DB:** `{stats['movies']}`"
+                    )
+                except MessageNotModified:
+                    pass
+                except FloodWait as e:
+                    logger.warning(f"FloodWait during status edit: sleeping {e.value}s")
+                    await asyncio.sleep(e.value)
+                except Exception as edit_err:
+                    logger.debug(f"Could not edit status message {status_msg_id}: {edit_err}")
+
+                await asyncio.sleep(0.05)
 
             # Flush after each channel
             if batch_buffer:

@@ -941,46 +941,157 @@ def extract_movie_metadata(title: str) -> Dict[str, str]:
         "clean_title": clean_title,
     }
 
+PINNED_MESSAGE_CACHE: Dict[int, Tuple[Optional[int], float]] = {}
+PINNED_CACHE_TTL: float = 5.0  # Cache pinned message ID for 5 seconds to minimize Telegram API calls
+
+async def get_chat_pinned_message_id(client: Optional[Client], chat_id: int) -> Optional[int]:
+    """
+    Fetch the currently pinned message ID for a given chat_id, cached with a 5-second TTL.
+    Returns the integer message_id if a pinned message exists, otherwise None.
+    """
+    now = time.time()
+    if chat_id in PINNED_MESSAGE_CACHE:
+        pid, ts = PINNED_MESSAGE_CACHE[chat_id]
+        if now - ts < PINNED_CACHE_TTL:
+            return pid
+
+    cli = client or globals().get("app")
+    if not cli:
+        return None
+
+    try:
+        chat = await cli.get_chat(chat_id)
+        pid = None
+        if chat and getattr(chat, "pinned_message", None):
+            pid = getattr(chat.pinned_message, "id", None)
+        PINNED_MESSAGE_CACHE[chat_id] = (pid, now)
+        return pid
+    except Exception as e:
+        logger.debug(f"Could not fetch pinned message ID for chat {chat_id}: {e}")
+        if chat_id in PINNED_MESSAGE_CACHE:
+            return PINNED_MESSAGE_CACHE[chat_id][0]
+        return None
+
+async def is_message_pinned(message: Optional[Message], client: Optional[Client] = None) -> bool:
+    """
+    Check if a message is pinned (message.pinned == True) or matches the group's current pinned message ID.
+    STRICTLY EXCLUDE pinned messages from auto-deletion under any circumstances.
+    """
+    if not message:
+        return False
+
+    # 1. Direct message attribute check (message.pinned == True)
+    if getattr(message, "pinned", False) is True:
+        logger.info(f"[PIN-PROTECT] Message {getattr(message, 'id', 'unknown')} has message.pinned == True. Protected from auto-delete.")
+        return True
+
+    chat = getattr(message, "chat", None)
+    if not chat or not getattr(chat, "id", None):
+        return False
+
+    chat_id = chat.id
+    msg_id = getattr(message, "id", None)
+    if not msg_id:
+        return False
+
+    # 2. Check if chat object already has pinned_message matching this message id
+    chat_pinned = getattr(chat, "pinned_message", None)
+    if chat_pinned and getattr(chat_pinned, "id", None) == msg_id:
+        logger.info(f"[PIN-PROTECT] Message {msg_id} matches chat.pinned_message.id ({msg_id}). Protected from auto-delete.")
+        return True
+
+    # 3. Check group's current pinned message ID via client get_chat
+    cli = client or getattr(message, "_client", None) or globals().get("app")
+    if cli and chat_id:
+        try:
+            current_pinned_id = await get_chat_pinned_message_id(cli, chat_id)
+            if current_pinned_id is not None and msg_id == current_pinned_id:
+                logger.info(f"[PIN-PROTECT] Message {msg_id} matches group's current pinned message ID ({current_pinned_id}) in chat {chat_id}. Protected from auto-delete.")
+                return True
+        except Exception as e:
+            logger.debug(f"Error checking current pinned message ID for chat {chat_id}: {e}")
+
+        # 4. Fresh message check if client is available (in case message was pinned during delay)
+        try:
+            fresh_msg = await cli.get_messages(chat_id, msg_id)
+            if fresh_msg and getattr(fresh_msg, "pinned", False) is True:
+                logger.info(f"[PIN-PROTECT] Fresh check for message {msg_id} in chat {chat_id} returned pinned == True. Protected from auto-delete.")
+                return True
+        except Exception as e:
+            logger.debug(f"Error fetching fresh message {msg_id} in chat {chat_id}: {e}")
+
+    return False
+
 async def auto_delete(message: Optional[Message], delay: int = 60, reply_to_message: Optional[Message] = None):
     """
-    Global 60-Second Auto-Delete Engine:
+    Global Auto-Delete Engine with Pinned Message Protection:
     Reliably deletes the target message (bot reply or user message) after `delay` seconds.
-    If reply_to_message is supplied (or accessible via reply_to_message_id), it also
-    deletes the associated user query/command to keep group and PM history 100% clean.
+    Maintains 60s auto-delete for group messages/menus/cards and 120s for PM media files.
+    STRICTLY EXCLUDES pinned messages from auto-deletion under any circumstances.
     """
     if not message:
         return
     try:
+        # Pre-check: if already known to be pinned before sleep, abort immediately
+        if getattr(message, "pinned", False) is True:
+            logger.info(f"[PIN-PROTECT] Message {getattr(message, 'id', 'unknown')} is pinned. Auto-delete aborted.")
+            return
+
         if delay > 0:
             await asyncio.sleep(delay)
 
-        # 1. Delete primary target message
-        try:
-            await message.delete()
-        except (MessageDeleteForbidden, MessageIdInvalid, RPCError):
-            pass
-        except Exception as e:
-            logger.debug(f"Auto-delete bypassed for message {getattr(message, 'id', 'unknown')}: {e}")
+        cli = getattr(message, "_client", None) or globals().get("app")
 
-        # 2. Delete reply_to message (user query / command) if available
+        # 1. Delete primary target message (STRICTLY EXCLUDE IF PINNED)
+        if await is_message_pinned(message, client=cli):
+            logger.info(f"[PIN-PROTECT] Primary message {getattr(message, 'id', 'unknown')} is pinned. STRICTLY EXCLUDED from auto-deletion.")
+        else:
+            try:
+                await message.delete()
+            except (MessageDeleteForbidden, MessageIdInvalid, RPCError):
+                pass
+            except Exception as e:
+                logger.debug(f"Auto-delete bypassed for message {getattr(message, 'id', 'unknown')}: {e}")
+
+        # 2. Delete reply_to message (user query / command) if available (STRICTLY EXCLUDE IF PINNED)
         target_reply = reply_to_message or getattr(message, "reply_to_message", None)
         if target_reply:
+            if await is_message_pinned(target_reply, client=cli):
+                logger.info(f"[PIN-PROTECT] Reply-to message {getattr(target_reply, 'id', 'unknown')} is pinned. STRICTLY EXCLUDED from auto-deletion.")
+            else:
+                try:
+                    await target_reply.delete()
+                except (MessageDeleteForbidden, MessageIdInvalid, RPCError):
+                    pass
+                except Exception as e:
+                    logger.debug(f"Auto-delete bypassed for reply_to message {getattr(target_reply, 'id', 'unknown')}: {e}")
+        elif getattr(message, "reply_to_message_id", None) and getattr(message, "chat", None) and cli:
+            reply_mid = message.reply_to_message_id
+            chat_id = message.chat.id
+            is_reply_pinned = False
             try:
-                await target_reply.delete()
-            except (MessageDeleteForbidden, MessageIdInvalid, RPCError):
+                current_pinned = await get_chat_pinned_message_id(cli, chat_id)
+                if current_pinned is not None and reply_mid == current_pinned:
+                    is_reply_pinned = True
+                if not is_reply_pinned:
+                    fresh_reply = await cli.get_messages(chat_id, reply_mid)
+                    if fresh_reply and getattr(fresh_reply, "pinned", False) is True:
+                        is_reply_pinned = True
+            except Exception:
                 pass
-            except Exception as e:
-                logger.debug(f"Auto-delete bypassed for reply_to message {getattr(target_reply, 'id', 'unknown')}: {e}")
-        elif getattr(message, "reply_to_message_id", None) and getattr(message, "chat", None) and getattr(message, "_client", None):
-            try:
-                await message._client.delete_messages(
-                    chat_id=message.chat.id,
-                    message_ids=[message.reply_to_message_id]
-                )
-            except (MessageDeleteForbidden, MessageIdInvalid, RPCError):
-                pass
-            except Exception as e:
-                pass
+
+            if is_reply_pinned:
+                logger.info(f"[PIN-PROTECT] reply_to_message_id {reply_mid} is pinned. STRICTLY EXCLUDED from auto-deletion.")
+            else:
+                try:
+                    await cli.delete_messages(
+                        chat_id=chat_id,
+                        message_ids=[reply_mid]
+                    )
+                except (MessageDeleteForbidden, MessageIdInvalid, RPCError):
+                    pass
+                except Exception as e:
+                    pass
     except Exception as e:
         logger.debug(f"Auto-delete task encountered error: {e}")
 
@@ -3389,15 +3500,19 @@ async def callback_router(client: Client, query: CallbackQuery):
         try:
             if getattr(query.message, "reply_to_message", None):
                 try:
-                    await query.message.reply_to_message.delete()
+                    if not await is_message_pinned(query.message.reply_to_message, client=client):
+                        await query.message.reply_to_message.delete()
                 except Exception:
                     pass
             elif getattr(query.message, "reply_to_message_id", None) and query.message.chat:
                 try:
-                    await client.delete_messages(chat_id=query.message.chat.id, message_ids=[query.message.reply_to_message_id])
+                    pinned_id = await get_chat_pinned_message_id(client, query.message.chat.id)
+                    if pinned_id is None or query.message.reply_to_message_id != pinned_id:
+                        await client.delete_messages(chat_id=query.message.chat.id, message_ids=[query.message.reply_to_message_id])
                 except Exception:
                     pass
-            await query.message.delete()
+            if not await is_message_pinned(query.message, client=client):
+                await query.message.delete()
         except Exception:
             pass
         await query.answer("Search closed.")

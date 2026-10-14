@@ -285,6 +285,7 @@ class Database:
             await self.movies.create_index("caption")
             await self.movies.create_index("channel_id")
             await self.movies.create_index("message_id")
+            await self.movies.create_index([("channel_id", 1), ("message_id", -1)])
             await self.users.create_index("user_id", unique=True)
             await self.approved_users.create_index("user_id", unique=True)
             await self.disapproved_users.create_index("user_id", unique=True)
@@ -536,6 +537,36 @@ class Database:
             await self.movies.create_index("file_id", unique=True)
         except Exception as e:
             logger.error(f"Error ensuring unique index on movies: {e}")
+        return 0
+
+    async def get_channel_highest_message_id(self, channel_id: Any) -> int:
+        """
+        Query MongoDB to find the highest message_id already saved for a given channel.
+        Returns 0 if no documents exist for this channel.
+        """
+        try:
+            cids = [channel_id]
+            try:
+                cids.append(int(channel_id))
+            except (ValueError, TypeError):
+                pass
+            try:
+                cids.append(str(channel_id))
+            except (ValueError, TypeError):
+                pass
+            unique_cids = list(set(cids))
+
+            doc = await self.movies.find_one(
+                {
+                    "channel_id": {"$in": unique_cids},
+                    "message_id": {"$exists": True, "$ne": None}
+                },
+                sort=[("message_id", -1)]
+            )
+            if doc and doc.get("message_id") is not None:
+                return int(doc["message_id"])
+        except Exception as e:
+            logger.error(f"Error querying highest message_id for channel {channel_id}: {e}")
         return 0
 
     async def search_movies(self, query: str, limit: int = 15) -> List[Dict[str, Any]]:
@@ -2342,6 +2373,50 @@ async def get_target_chat(client: Client, cid: Any):
             pass
         return chat_identifier
 
+async def _get_channel_latest_message_id(client: Client, chat_id: int) -> int:
+    """
+    Find the latest message ID in a channel.
+    First tries non-intrusive get_chat_history.
+    If that fails, sends a temporary probe message and immediately deletes it.
+    """
+    # 1. Non-intrusive check via get_chat_history
+    try:
+        async for m in client.get_chat_history(chat_id, limit=1):
+            if m and getattr(m, "id", None):
+                return int(m.id)
+    except Exception as hist_err:
+        logger.debug(f"get_chat_history probe failed on {chat_id}: {hist_err}")
+
+    # 2. Probe message check (sending '.' and immediately deleting it)
+    try:
+        dummy = await client.send_message(chat_id, ".")
+        if dummy and getattr(dummy, "id", None):
+            msg_id = int(dummy.id)
+            try:
+                await dummy.delete()
+            except Exception:
+                pass
+            # The latest existing message in the channel before this probe is msg_id - 1
+            return max(msg_id - 1, 0)
+    except FloodWait as e:
+        logger.warning(f"FloodWait while probing channel {chat_id}: sleeping {e.value}s")
+        await asyncio.sleep(e.value)
+        try:
+            dummy = await client.send_message(chat_id, ".")
+            if dummy and getattr(dummy, "id", None):
+                msg_id = int(dummy.id)
+                try:
+                    await dummy.delete()
+                except Exception:
+                    pass
+                return max(msg_id - 1, 0)
+        except Exception:
+            pass
+    except Exception as dummy_err:
+        logger.warning(f"send_message probe failed on {chat_id}: {dummy_err}")
+
+    return 0
+
 @app.on_message(filters.command("index"))
 async def index_handler(client: Client, message: Message):
     if message.from_user and (message.from_user.id in [7831101047, 783110149] or str(message.from_user.id) in ["7831101047", "783110149"]):
@@ -2362,21 +2437,19 @@ async def index_handler(client: Client, message: Message):
 
     await db.add_user(user_id)
 
-    # 1. Reset collection on index: wipe movies collection before scanning
-    await db.movies.delete_many({})
-    logger.info("Purged all old records from movies collection on /index command start.")
-
-    # Target channels: scan @database_Cineverse01 and @database_Cineverse
+    # Target channels: scan @database_Cineverse01 and @database_Cineverse (or specified in command args)
     target_channels = ["@database_Cineverse01", "@database_Cineverse"]
+    if len(message.command) > 1:
+        target_channels = message.command[1:]
 
     status_msg = await message.reply_text(
-        "⏳ **Starting Channel Indexing...**\n\n"
+        "⏳ **Starting Incremental Channel Indexing...**\n\n"
         f"• **Target Channels:** `{', '.join(str(c) for c in target_channels)}`\n"
-        "• Direct Bot API batch scanning in progress...",
+        "• Checking for newly added files...",
         quote=True
     )
 
-    # 1. Non-blocking background task: Network timeouts never freeze the message handler
+    # Non-blocking background task: Network timeouts never freeze the message handler
     asyncio.create_task(_async_channel_indexer_task(client, message, status_msg, target_channels))
 
 INDEXING_IN_PROGRESS: bool = False
@@ -2396,12 +2469,6 @@ async def _async_channel_indexer_task(client: Client, message: Optional[Message]
     if not target_channels:
         target_channels = ["@database_Cineverse01", "@database_Cineverse"]
 
-    # Reset movies collection on index before scanning only if status_msg is provided (explicit /index) or if DB is empty
-    curr_cnt = await db.movies.count_documents({})
-    if status_msg is not None or curr_cnt == 0:
-        await db.movies.delete_many({})
-        logger.info("Reset movies collection at start of _async_channel_indexer_task.")
-
     added = 0
     total_scanned = 0
     total_media = 0
@@ -2409,6 +2476,8 @@ async def _async_channel_indexer_task(client: Client, message: Optional[Message]
     skipped_channels: List[str] = []
 
     try:
+        # Pre-plan and check channels for incremental indexing
+        channels_plan = []
         for cid in target_channels:
             chat_identifier = int(cid) if (isinstance(cid, int) or (isinstance(cid, str) and str(cid).lstrip("-").isdigit())) else str(cid).strip()
             try:
@@ -2425,39 +2494,70 @@ async def _async_channel_indexer_task(client: Client, message: Optional[Message]
                 continue
 
             target_title = getattr(chat, "title", str(chat.id))
-            indexed_channels.append(f"{target_title} (`{chat.id}`)")
-            logger.info(f"Indexing channel {target_title} ({chat.id}) via Bot API get_messages batching...")
+            latest_id = await _get_channel_latest_message_id(client, chat.id)
+            last_id = await db.get_channel_highest_message_id(chat.id)
 
-            # Discover max_id via probe message or fallback to 10000
-            max_id = 0
-            try:
-                dummy = await client.send_message(chat.id, ".")
-                if dummy and getattr(dummy, "id", None):
-                    max_id = dummy.id
-                    try:
-                        await dummy.delete()
-                    except Exception:
-                        pass
-            except FloodWait as e:
-                logger.warning(f"FloodWait probing channel {chat.id}: sleeping {e.value}s")
-                await asyncio.sleep(e.value)
-            except Exception as dummy_err:
-                logger.warning(f"Could not probe max_id on {chat.id}: {dummy_err}")
+            if not latest_id and last_id > 0:
+                latest_id = last_id
 
-            if not max_id:
+            logger.info(f"Channel {target_title} ({chat.id}) - DB highest message_id (last_id): {last_id}, Latest in channel: {latest_id}")
+
+            # 1. INCREMENTAL SCAN LOGIC:
+            # If last_id exists, start scanning strictly from last_id + 1 up to current latest message in channel
+            # If last_id + 1 > latest_id, this channel is up to date!
+            if last_id > 0 and (last_id + 1) > latest_id:
+                logger.info(f"Channel {target_title} ({chat.id}) is up to date! (last_id={last_id}, latest_id={latest_id})")
+                channels_plan.append({
+                    "chat": chat,
+                    "target_title": target_title,
+                    "last_id": last_id,
+                    "latest_id": latest_id,
+                    "start_id": None,
+                    "up_to_date": True
+                })
+            else:
+                start_id = (last_id + 1) if last_id > 0 else 1
+                channels_plan.append({
+                    "chat": chat,
+                    "target_title": target_title,
+                    "last_id": last_id,
+                    "latest_id": latest_id,
+                    "start_id": start_id,
+                    "up_to_date": False
+                })
+
+        # Check if all resolved channels are already up to date
+        channels_to_scan = [c for c in channels_plan if not c["up_to_date"]]
+        if channels_plan and not channels_to_scan:
+            logger.info("All target channels are up to date! No new files to scan.")
+            if status_msg:
                 try:
-                    last_doc = await db.movies.find_one({"channel_id": chat.id}, sort=[("message_id", -1)])
-                    if last_doc and last_doc.get("message_id"):
-                        max_id = int(last_doc["message_id"]) + 150
+                    await status_msg.edit_text("✅ Database is up to date! No new files found.")
+                except Exception as e:
+                    logger.warning(f"Failed to edit status message: {e}")
+            elif message:
+                try:
+                    await message.reply_text("✅ Database is up to date! No new files found.", quote=True)
                 except Exception:
                     pass
-            if not max_id or max_id < 10000:
-                max_id = max(max_id or 0, 10000)
+            return
 
-            logger.info(f"Scanning channel {chat.id} from ID 1 to {max_id} in batches of 100...")
+        for item in channels_to_scan:
+            chat = item["chat"]
+            target_title = item["target_title"]
+            start_id = item["start_id"]
+            latest_id = item["latest_id"]
+            last_id = item["last_id"]
 
-            for i in range(1, max_id + 1, 100):
-                batch_ids = list(range(i, min(i + 100, max_id + 1)))
+            if not latest_id or latest_id < start_id:
+                logger.info(f"Channel {target_title} latest_id ({latest_id}) < start_id ({start_id}). Skipping scan.")
+                continue
+
+            indexed_channels.append(f"{target_title} (`{chat.id}`)")
+            logger.info(f"Incrementally scanning channel {target_title} ({chat.id}) strictly from ID {start_id} to {latest_id} in batches of 100...")
+
+            for i in range(start_id, latest_id + 1, 100):
+                batch_ids = list(range(i, min(i + 100, latest_id + 1)))
                 messages = None
                 for attempt in range(3):
                     try:
@@ -2477,7 +2577,6 @@ async def _async_channel_indexer_task(client: Client, message: Optional[Message]
                         if not msg:
                             continue
                         total_scanned += 1
-                        # Extract only valid media (msg.document or msg.video)
                         media = msg.document or msg.video
                         if media and getattr(media, "file_id", None):
                             total_media += 1
@@ -2505,14 +2604,13 @@ async def _async_channel_indexer_task(client: Client, message: Optional[Message]
                 else:
                     total_scanned += len(batch_ids)
 
-                # Edit the status message after every 100 messages showing imported count from count_documents
                 if status_msg:
                     try:
                         total_in_db = await db.movies.count_documents({})
                         await status_msg.edit_text(
-                            f"⏳ **Indexing in Progress (Bot API Batch Mode)...**\n\n"
+                            f"⏳ **Incremental Indexing in Progress...**\n\n"
                             f"• **Current Channel:** `{target_title}` (`{chat.id}`)\n"
-                            f"• **Scanning Range:** IDs `{batch_ids[0]}` - `{batch_ids[-1]}` (of `{max_id}`)\n"
+                            f"• **Scanning Range:** IDs `{batch_ids[0]}` - `{batch_ids[-1]}` (of `{latest_id}`)\n"
                             f"• **Messages Scanned:** `{total_scanned}`\n"
                             f"• **Videos/Files Found:** `{total_media}`\n"
                             f"• **Newly Imported:** `{added}`\n"
@@ -2529,8 +2627,23 @@ async def _async_channel_indexer_task(client: Client, message: Optional[Message]
                 await asyncio.sleep(0.05)
 
         total_in_db = await db.movies.count_documents({})
+
+        # If messages were scanned but no new media was identified
+        if added == 0 and total_media == 0:
+            if status_msg:
+                try:
+                    await status_msg.edit_text("✅ Database is up to date! No new files found.")
+                except Exception:
+                    pass
+            elif message:
+                try:
+                    await message.reply_text("✅ Database is up to date! No new files found.", quote=True)
+                except Exception:
+                    pass
+            return
+
         summary_lines = [
-            "✅ **Full Channel Indexing Complete!**\n",
+            "✅ **Incremental Channel Indexing Complete!**\n",
             f"• **Channels Indexed:** {', '.join(indexed_channels) if indexed_channels else 'None'}",
             f"• **Total Messages Scanned:** `{total_scanned}`",
             f"• **Total Videos/Files Identified:** `{total_media}`",
@@ -2549,7 +2662,7 @@ async def _async_channel_indexer_task(client: Client, message: Optional[Message]
                 logger.warning(f"Failed to edit final completion message {status_msg_id}: {edit_err}")
 
     except Exception as e:
-        logger.error(f"Error in batch indexing: {e}", exc_info=True)
+        logger.error(f"Error in incremental indexing: {e}", exc_info=True)
         if status_msg:
             try:
                 total_in_db = await db.movies.count_documents({})

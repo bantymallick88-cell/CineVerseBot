@@ -972,41 +972,50 @@ OMDB_FALLBACK_KEYS = [k for k in [OMDB_API_KEY, "564727fa", "trilogy", "e7d18e80
 
 def clean_movie_title_for_search(file_name: str) -> Tuple[str, Optional[str]]:
     """
-    Strips encoding metadata, resolutions, codecs, audio info, and file extensions
-    to extract the core movie title and release year for precise IMDb/OMDb matching.
+    Strips encoding metadata, resolutions, codecs, source/quality tags, audio info,
+    and file extensions to extract the clean movie title and release year for precise IMDb/OMDb matching.
     """
     if not file_name:
         return "", None
     name = str(file_name).strip()
-    # Strip extension
-    name = re.sub(r'\.(mkv|mp4|avi|webm|mov|flv|wmv|ts|m4v)$', '', name, flags=re.IGNORECASE)
-    # Remove usernames like @database_Cineverse, @CineVerse
-    name = re.sub(r'@\w+', ' ', name)
-    # Remove bracketed tags like [CineVerse], [1080p] if no year is inside
-    name = re.sub(r'\[.*?\]|\(.*?\)', lambda m: m.group(0) if re.search(r'\b(19\d\d|20\d\d)\b', m.group(0)) else ' ', name)
 
-    # Extract year if present
+    # 1. Strip file extension
+    name = re.sub(r'\.(mkv|mp4|avi|webm|mov|flv|wmv|ts|m4v|iso)$', '', name, flags=re.IGNORECASE)
+
+    # 2. Strip Telegram channel usernames and URLs
+    name = re.sub(r'(?i)https?://\S+|t\.me/\S+|@\w+', ' ', name)
+
+    # 3. Strip bracketed promo/channel tags like [CineVerse], [Exclusive] unless a 4-digit year is inside
+    name = re.sub(r'\[.*?\]', lambda m: m.group(0) if re.search(r'\b(19\d\d|20\d\d)\b', m.group(0)) else ' ', name)
+
+    # 4. Extract 4-digit release year (1900-2099)
     year_match = re.search(r'\b(19\d\d|20\d\d)\b', name)
     year = year_match.group(1) if year_match else None
 
-    # Remove trailing content after year
+    # If release year is found, strip trailing metadata (quality, codecs, audio usually follow year)
     if year_match:
-        before = name[:year_match.start()]
-        if len(before.strip()) >= 2:
+        before = name[:year_match.start()].strip()
+        if len(re.sub(r'[^a-zA-Z0-9]', '', before)) >= 2:
             name = before
 
-    # Remove resolution, quality, codec, audio tags
+    # 5. Comprehensive quality, resolution, format, rip & audio tags stripping
     tags = [
-        r'4k', r'2160p', r'1080p', r'720p', r'480p', r'360p',
-        r'uhd', r'fhd', r'hd', r'sd', r'bluray', r'brrip', r'bdrip',
-        r'web-dl', r'webdl', r'webrip', r'hdrip', r'dvdrip', r'camrip', r'hdts', r'tc',
-        r'x264', r'x265', r'hevc', r'h264', r'h265', r'10bit', r'8bit',
-        r'aac', r'ac3', r'dts', r'ddp\d?\.?\d?', r'atmos',
-        r'hindi', r'english', r'tamil', r'telugu', r'malayalam', r'kannada', r'bengali', r'marathi', r'gujarati', r'punjabi', r'odia',
+        # Resolutions
+        r'4k', r'2160p', r'1080p', r'720p', r'480p', r'360p', r'uhd', r'fhd', r'hd', r'sd',
+        # Source & Rip tags
+        r'hq', r'hdtc', r'hdcam', r'camrip', r'cam', r'predvd', r'dvdscr', r'scr', r'tc', r'ts', r'hdts',
+        r'web-dl', r'webdl', r'webrip', r'web', r'bluray', r'brrip', r'bdrip', r'hdrip', r'dvdrip', r'hdtv', r'remux',
+        r'proper', r'repack', r'extended', r'unrated', r'imax',
+        # Video Codecs
+        r'x264', r'x265', r'hevc', r'h264', r'h265', r'avc', r'10bit', r'8bit',
+        # Audio Codecs & languages
+        r'aac', r'ac3', r'dts', r'ddp\d?\.?\d?', r'eac3', r'atmos', r'dd5\.1',
+        r'hindi', r'english', r'tamil', r'telugu', r'malayalam', r'kannada', r'bengali', r'marathi', r'gujarati', r'punjabi', r'odia', r'oriya',
         r'dual\s*audio', r'multi\s*audio', r'clean\s*audio', r'org\s*audio', r'dubbed', r'sub', r'esub', r'mkv', r'mp4'
     ]
     name = re.sub(r'(?i)\b(' + '|'.join(tags) + r')\b', ' ', name)
-    # Clean non-alphanumeric punctuation except apostrophes
+
+    # 6. Replace delimiters and symbols with space, preserving alphanumeric and core title words
     name = re.sub(r'[\(\)\[\]\{\}\._\-\+:]', ' ', name)
     clean_title = re.sub(r'\s+', ' ', name).strip()
     return clean_title, year
@@ -1667,9 +1676,10 @@ async def deliver_movie_file(client: Client, user_id: int, msg_id: int):
         file_quality = html.escape(str(meta.get("quality", "HDRip")))
 
         if imdb_rating and str(imdb_rating).strip().upper() not in ["N/A", "NONE", ""]:
-            rating_line = f"⭐ <b>IMDb Rating:</b> {imdb_rating} / 10"
+            clean_rating = html.escape(str(imdb_rating).strip())
+            rating_line = f"⭐ <b>IMDb Rating:</b> {clean_rating} / 10"
         else:
-            rating_line = "⭐ Rating: N/A"
+            rating_line = "⭐ <b>IMDb Rating:</b> N/A"
 
         caption = (
             f"🎬 <a href='https://t.me/CineVerseFlimSearch'><b>{file_display_name}</b></a>\n\n"

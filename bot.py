@@ -9,6 +9,7 @@ import json
 import logging
 import threading
 import html
+import difflib
 import urllib.request
 import urllib.parse
 from typing import List, Tuple, Dict, Any, Optional, Union
@@ -1124,6 +1125,221 @@ async def fetch_imdb_rating(file_name: str) -> Optional[str]:
 
     IMDB_RATING_CACHE[norm_key] = (None, now)
     return None
+
+# ---------------------------------------------------------------------------
+# AUTO-SPELLING CORRECTION ENGINE (DIFFLIB FUZZY SEARCH)
+# ---------------------------------------------------------------------------
+SPELLING_CACHE: Dict[str, str] = {}
+SPELLING_TITLES_CACHE: List[str] = []
+SPELLING_CACHE_TIMESTAMP: float = 0.0
+SPELLING_CACHE_TTL: float = 300.0  # 5 minutes in-memory cache for candidate titles
+
+async def get_spelling_suggestions(user_query: str, limit: int = 5, cutoff: float = 0.5) -> List[str]:
+    """
+    Fuzzy Search Engine for movie titles using difflib:
+    If a query returns 0 exact matches, searches MongoDB/database
+    for top 3-5 closest movie title matches (cutoff >= 0.5).
+    """
+    global SPELLING_TITLES_CACHE, SPELLING_CACHE_TIMESTAMP
+    if not user_query:
+        return []
+
+    q_clean = user_query.strip().lower()
+    if len(q_clean) < 2:
+        return []
+
+    now = time.time()
+    # Refresh cache of known clean movie titles from MongoDB if empty or expired
+    if not SPELLING_TITLES_CACHE or (now - SPELLING_CACHE_TIMESTAMP) > SPELLING_CACHE_TTL:
+        try:
+            raw_titles = []
+            try:
+                raw_titles = await db.movies.distinct("file_name")
+            except Exception:
+                raw_titles = []
+
+            if not raw_titles:
+                try:
+                    cursor = db.movies.find({}, {"file_name": 1, "title": 1, "_id": 0}).limit(3000)
+                    docs = await cursor.to_list(length=3000)
+                    raw_titles = [d.get("file_name") or d.get("title") for d in docs if d.get("file_name") or d.get("title")]
+                except Exception:
+                    raw_titles = []
+
+            unique_clean = set()
+            for r in raw_titles:
+                if not r:
+                    continue
+                c_title, _ = clean_movie_title_for_search(str(r))
+                if c_title and len(c_title) >= 2:
+                    unique_clean.add(c_title)
+
+            if unique_clean:
+                SPELLING_TITLES_CACHE = list(unique_clean)
+                SPELLING_CACHE_TIMESTAMP = now
+        except Exception as err:
+            logger.warning(f"Error refreshing spelling titles cache: {err}")
+
+    if not SPELLING_TITLES_CACHE:
+        return []
+
+    candidate_map = {c.lower(): c for c in SPELLING_TITLES_CACHE}
+    scored_matches: Dict[str, float] = {}
+
+    for c_low, c_orig in candidate_map.items():
+        # 1. Whole title SequenceMatcher ratio
+        best_ratio = difflib.SequenceMatcher(None, q_clean, c_low).ratio()
+
+        # 2. Token-level SequenceMatcher ratio
+        for w in c_low.split():
+            w_ratio = difflib.SequenceMatcher(None, q_clean, w).ratio()
+            if w_ratio > best_ratio:
+                best_ratio = w_ratio
+
+        # 3. Prefix matching ratio
+        if len(c_low) >= len(q_clean):
+            prefix_ratio = difflib.SequenceMatcher(None, q_clean, c_low[:len(q_clean)]).ratio()
+            if prefix_ratio > best_ratio:
+                best_ratio = prefix_ratio
+
+        if best_ratio >= cutoff:
+            scored_matches[c_orig] = max(scored_matches.get(c_orig, 0.0), best_ratio)
+
+    sorted_candidates = sorted(scored_matches.items(), key=lambda item: item[1], reverse=True)
+    return [title for title, score in sorted_candidates[:limit]]
+
+def build_spelling_suggestion_card(user_query: str, suggestions: List[str]) -> Tuple[str, InlineKeyboardMarkup]:
+    """
+    Builds the aesthetic HTML suggestion card with buttons for closest movie matches.
+    """
+    escaped_query = html.escape(user_query)
+    text = (
+        "🤖 <b>Did you mean one of these?</b>\n\n"
+        f"No exact match for <code>{escaped_query}</code>. Select a movie below:"
+    )
+    buttons = []
+    for title in suggestions[:5]:
+        cb_key = f"spelling_search_{title}"
+        if len(cb_key.encode("utf-8")) <= 64:
+            cb_data = cb_key
+        else:
+            cid = uuid.uuid4().hex[:8]
+            SPELLING_CACHE[cid] = title
+            cb_data = f"spelling_search_{cid}"
+        buttons.append([InlineKeyboardButton(f"🎬 {title}", callback_data=cb_data)])
+
+    # Quick request button option
+    buttons.append([InlineKeyboardButton("📝 Request This Movie", url=REQUEST_CHANNEL_LINK)])
+    return text, InlineKeyboardMarkup(buttons)
+
+async def query_movie_files(query_text: str, limit: int = PAGE_SIZE) -> Tuple[List[Dict[str, Any]], int]:
+    """
+    Searches the MongoDB database for movie files matching query_text with multi-word regex fallbacks.
+    """
+    q = query_text.strip().lower()
+    if not q:
+        return [], 0
+
+    search_filter = {"$or": [{"file_name": {"$regex": q, "$options": "i"}}, {"caption": {"$regex": q, "$options": "i"}}]}
+    raw_docs = []
+    total = 0
+    try:
+        total = await db.movies.count_documents(search_filter)
+        if total > 0:
+            cursor = db.movies.find(search_filter).limit(limit)
+            raw_docs = await cursor.to_list(length=limit)
+    except Exception:
+        safe_query = re.escape(q)
+        search_filter = {"$or": [{"file_name": {"$regex": safe_query, "$options": "i"}}, {"caption": {"$regex": safe_query, "$options": "i"}}]}
+        try:
+            total = await db.movies.count_documents(search_filter)
+            if total > 0:
+                cursor = db.movies.find(search_filter).limit(limit)
+                raw_docs = await cursor.to_list(length=limit)
+        except Exception:
+            total = 0
+            raw_docs = []
+
+    words = q.split()
+    if total == 0 and len(words) > 1:
+        multi_regex = ".*".join(re.escape(w) for w in words)
+        mw_filter = {"$or": [{"file_name": {"$regex": multi_regex, "$options": "i"}}, {"caption": {"$regex": multi_regex, "$options": "i"}}]}
+        try:
+            total = await db.movies.count_documents(mw_filter)
+            if total > 0:
+                cursor = db.movies.find(mw_filter).limit(limit)
+                raw_docs = await cursor.to_list(length=limit)
+        except Exception:
+            pass
+
+    if total == 0 and words:
+        word_conditions = []
+        for w in words:
+            safe_w = re.escape(w)
+            word_conditions.append({
+                "$or": [
+                    {"file_name": {"$regex": safe_w, "$options": "i"}},
+                    {"caption": {"$regex": safe_w, "$options": "i"}}
+                ]
+            })
+        fallback_filter = {"$and": word_conditions}
+        try:
+            total = await db.movies.count_documents(fallback_filter)
+            if total > 0:
+                cursor = db.movies.find(fallback_filter).limit(limit)
+                raw_docs = await cursor.to_list(length=limit)
+        except Exception:
+            raw_docs = []
+            total = 0
+
+    files = []
+    for d in raw_docs:
+        f_id = str(d.get("file_id") or "")
+        f_name = str(d.get("file_name") or d.get("title") or "Movie")
+        f_size = int(d.get("file_size") or 0)
+        cap = str(d.get("caption") or "")
+        m_id = d.get("message_id")
+        cid = d.get("channel_id") or DB_CHANNEL_ID
+
+        files.append({
+            "file_id": f_id,
+            "title": f_name,
+            "file_name": f_name,
+            "file_size": f_size,
+            "caption": cap,
+            "message_id": m_id or f_id,
+            "channel_id": cid
+        })
+
+    return files, total
+
+async def execute_movie_search_from_callback(client: Client, query: CallbackQuery, clean_title: str):
+    """
+    Executes movie search immediately when a user clicks a spelling correction suggestion button.
+    """
+    files, total = await query_movie_files(clean_title, limit=PAGE_SIZE)
+    if total == 0 or not files:
+        await query.answer(f"⚠️ No exact files found for '{clean_title}'.", show_alert=True)
+        return
+
+    cache_id = uuid.uuid4().hex[:8]
+    SEARCH_CACHE[cache_id] = clean_title
+    total_pages = math.ceil(total / PAGE_SIZE) if total > PAGE_SIZE else 1
+    bot_uname = await get_bot_username(client)
+    markup = await build_pagination_markup(files, cache_id, 1, total_pages, bot_username=bot_uname)
+    response_text = format_search_text(clean_title, total, 1, total_pages)
+
+    try:
+        await query.message.edit_text(response_text, reply_markup=markup)
+        asyncio.create_task(auto_delete(query.message, 60))
+    except Exception as e:
+        logger.warning(f"Error editing message from spelling callback: {e}")
+        try:
+            sent_msg = await query.message.reply_text(response_text, reply_markup=markup)
+            if sent_msg:
+                asyncio.create_task(auto_delete(sent_msg, 60))
+        except Exception:
+            pass
 
 PINNED_MESSAGE_CACHE: Dict[int, Tuple[Optional[int], float]] = {}
 PINNED_CACHE_TTL: float = 5.0  # Cache pinned message ID for 5 seconds to minimize Telegram API calls
@@ -3513,85 +3729,26 @@ async def auto_filter_handler(client: Client, message: Message):
         asyncio.create_task(_async_channel_indexer_task(client, message, None, ["@database_Cineverse01", "@database_Cineverse"]))
 
     try:
-        # Multi-word regex case-insensitive search on file_name and caption:
-        query = q
-        search_filter = {"$or": [{"file_name": {"$regex": query, "$options": "i"}}, {"caption": {"$regex": query, "$options": "i"}}]}
-
-        raw_docs = []
-        total = 0
-        try:
-            total = await db.movies.count_documents(search_filter)
-            if total > 0:
-                cursor = db.movies.find(search_filter).limit(PAGE_SIZE)
-                raw_docs = await cursor.to_list(length=PAGE_SIZE)
-        except Exception:
-            safe_query = re.escape(query)
-            search_filter = {"$or": [{"file_name": {"$regex": safe_query, "$options": "i"}}, {"caption": {"$regex": safe_query, "$options": "i"}}]}
-            try:
-                total = await db.movies.count_documents(search_filter)
-                if total > 0:
-                    cursor = db.movies.find(search_filter).limit(PAGE_SIZE)
-                    raw_docs = await cursor.to_list(length=PAGE_SIZE)
-            except Exception:
-                total = 0
-                raw_docs = []
-
-        words = q.split()
-        # In-order multi-word regex search (matching tokens separated by dots, spaces, dashes)
-        if total == 0 and len(words) > 1:
-            multi_regex = ".*".join(re.escape(w) for w in words)
-            mw_filter = {"$or": [{"file_name": {"$regex": multi_regex, "$options": "i"}}, {"caption": {"$regex": multi_regex, "$options": "i"}}]}
-            try:
-                total = await db.movies.count_documents(mw_filter)
-                if total > 0:
-                    cursor = db.movies.find(mw_filter).limit(PAGE_SIZE)
-                    raw_docs = await cursor.to_list(length=PAGE_SIZE)
-            except Exception:
-                pass
-
-        # Word-by-word $and fallback if still no results
-        if total == 0 and words:
-            word_conditions = []
-            for w in words:
-                safe_w = re.escape(w)
-                word_conditions.append({
-                    "$or": [
-                        {"file_name": {"$regex": safe_w, "$options": "i"}},
-                        {"caption": {"$regex": safe_w, "$options": "i"}}
-                    ]
-                })
-            fallback_filter = {"$and": word_conditions}
-            try:
-                total = await db.movies.count_documents(fallback_filter)
-                if total > 0:
-                    cursor = db.movies.find(fallback_filter).limit(PAGE_SIZE)
-                    raw_docs = await cursor.to_list(length=PAGE_SIZE)
-            except Exception:
-                raw_docs = []
-                total = 0
-
-        files = []
-        for d in raw_docs:
-            f_id = str(d.get("file_id") or "")
-            f_name = str(d.get("file_name") or d.get("title") or "Movie")
-            f_size = int(d.get("file_size") or 0)
-            cap = str(d.get("caption") or "")
-            m_id = d.get("message_id")
-            cid = d.get("channel_id") or DB_CHANNEL_ID
-
-            files.append({
-                "file_id": f_id,
-                "title": f_name,
-                "file_name": f_name,
-                "file_size": f_size,
-                "caption": cap,
-                "message_id": m_id or f_id,
-                "channel_id": cid
-            })
+        files, total = await query_movie_files(q, limit=PAGE_SIZE)
 
         logger.info(f"Database search for '{q}' in chat {message.chat.id} returned {total} results")
         if total == 0 or not files:
-            # On zero search results, send request alert directly to @FlimRequest_01
+            # 1. Fuzzy Search: Check MongoDB/database using difflib for top 3-5 closest movie matches (cutoff >= 0.5)
+            suggestions = await get_spelling_suggestions(text, limit=5, cutoff=0.5)
+            if suggestions:
+                sug_text, sug_markup = build_spelling_suggestion_card(text, suggestions)
+                sug_msg = await message.reply_text(
+                    sug_text,
+                    reply_markup=sug_markup,
+                    quote=True,
+                    parse_mode=enums.ParseMode.HTML
+                )
+                if sug_msg:
+                    # 1-Minute Auto-Delete: Delete suggestion message and user query after 60s
+                    asyncio.create_task(auto_delete(sug_msg, 60, reply_to_message=message))
+                return
+
+            # On zero search results and no close spelling matches, send request alert directly to @FlimRequest_01
             try:
                 user_first = message.from_user.first_name if (message.from_user and message.from_user.first_name) else "User"
                 user_uname = f"@{message.from_user.username}" if (message.from_user and message.from_user.username) else "No Username"
@@ -4235,6 +4392,19 @@ async def callback_router(client: Client, query: CallbackQuery):
                 asyncio.create_task(auto_delete(guide_msg, 180, reply_to_message=query.message))
         except Exception as e:
             logger.debug(f"Guide reply error: {e}")
+        return
+
+    elif data.startswith("spelling_search_"):
+        target_title = data[len("spelling_search_"):].strip()
+        if target_title in SPELLING_CACHE:
+            target_title = SPELLING_CACHE[target_title]
+
+        if not target_title:
+            await query.answer("⚠️ Invalid movie selection.", show_alert=True)
+            return
+
+        await query.answer(f"🔍 Searching for: {target_title[:20]}...", show_alert=False)
+        await execute_movie_search_from_callback(client, query, target_title)
         return
 
     elif data.startswith("nav_"):

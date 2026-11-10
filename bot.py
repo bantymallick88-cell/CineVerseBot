@@ -8,9 +8,12 @@ import uuid
 import json
 import logging
 import threading
+import html
 import urllib.request
 import urllib.parse
 from typing import List, Tuple, Dict, Any, Optional, Union
+
+import aiohttp
 
 import pymongo
 from pymongo import UpdateOne, ReturnDocument
@@ -941,6 +944,178 @@ def extract_movie_metadata(title: str) -> Dict[str, str]:
         "clean_title": clean_title,
     }
 
+# ---------------------------------------------------------------------------
+# DYNAMIC REAL IMDB RATING FETCHING & CACHE
+# ---------------------------------------------------------------------------
+IMDB_RATING_CACHE: Dict[str, Tuple[Optional[str], float]] = {}
+IMDB_CACHE_TTL: float = 86400.0  # 24 hours cache for movie ratings
+
+try:
+    import imdb
+    logging.getLogger('imdbpy').setLevel(logging.CRITICAL)
+    logging.getLogger('imdbpy.parser.s3').setLevel(logging.CRITICAL)
+    _cinemagoer_instance = imdb.Cinemagoer()
+    _cinemagoer_supported = False
+    try:
+        # Verify if Cinemagoer local s3 SQLite database tables are present
+        if hasattr(_cinemagoer_instance, '_adapter') and hasattr(_cinemagoer_instance._adapter, '_connection'):
+            _cinemagoer_instance._adapter._connection.execute("SELECT 1 FROM title_basics LIMIT 1")
+            _cinemagoer_supported = True
+    except Exception:
+        _cinemagoer_supported = False
+except Exception:
+    _cinemagoer_instance = None
+    _cinemagoer_supported = False
+
+OMDB_API_KEY = os.getenv("OMDB_API_KEY", "564727fa").strip()
+OMDB_FALLBACK_KEYS = [k for k in [OMDB_API_KEY, "564727fa", "trilogy", "e7d18e80", "thewdb"] if k]
+
+def clean_movie_title_for_search(file_name: str) -> Tuple[str, Optional[str]]:
+    """
+    Strips encoding metadata, resolutions, codecs, audio info, and file extensions
+    to extract the core movie title and release year for precise IMDb/OMDb matching.
+    """
+    if not file_name:
+        return "", None
+    name = str(file_name).strip()
+    # Strip extension
+    name = re.sub(r'\.(mkv|mp4|avi|webm|mov|flv|wmv|ts|m4v)$', '', name, flags=re.IGNORECASE)
+    # Remove usernames like @database_Cineverse, @CineVerse
+    name = re.sub(r'@\w+', ' ', name)
+    # Remove bracketed tags like [CineVerse], [1080p] if no year is inside
+    name = re.sub(r'\[.*?\]|\(.*?\)', lambda m: m.group(0) if re.search(r'\b(19\d\d|20\d\d)\b', m.group(0)) else ' ', name)
+
+    # Extract year if present
+    year_match = re.search(r'\b(19\d\d|20\d\d)\b', name)
+    year = year_match.group(1) if year_match else None
+
+    # Remove trailing content after year
+    if year_match:
+        before = name[:year_match.start()]
+        if len(before.strip()) >= 2:
+            name = before
+
+    # Remove resolution, quality, codec, audio tags
+    tags = [
+        r'4k', r'2160p', r'1080p', r'720p', r'480p', r'360p',
+        r'uhd', r'fhd', r'hd', r'sd', r'bluray', r'brrip', r'bdrip',
+        r'web-dl', r'webdl', r'webrip', r'hdrip', r'dvdrip', r'camrip', r'hdts', r'tc',
+        r'x264', r'x265', r'hevc', r'h264', r'h265', r'10bit', r'8bit',
+        r'aac', r'ac3', r'dts', r'ddp\d?\.?\d?', r'atmos',
+        r'hindi', r'english', r'tamil', r'telugu', r'malayalam', r'kannada', r'bengali', r'marathi', r'gujarati', r'punjabi', r'odia',
+        r'dual\s*audio', r'multi\s*audio', r'clean\s*audio', r'org\s*audio', r'dubbed', r'sub', r'esub', r'mkv', r'mp4'
+    ]
+    name = re.sub(r'(?i)\b(' + '|'.join(tags) + r')\b', ' ', name)
+    # Clean non-alphanumeric punctuation except apostrophes
+    name = re.sub(r'[\(\)\[\]\{\}\._\-\+:]', ' ', name)
+    clean_title = re.sub(r'\s+', ' ', name).strip()
+    return clean_title, year
+
+async def fetch_imdb_rating(file_name: str) -> Optional[str]:
+    """
+    Dynamically fetches the ACTUAL real IMDb rating for a movie file name:
+    1. Checks fast in-memory cache (24h TTL).
+    2. Searches Cinemagoer (if supported/available).
+    3. Searches OMDb API with clean title and release year.
+    4. Falls back to IMDb suggestions API (JSON) + OMDb / IMDb scraper.
+    5. Returns exact rating string (e.g., '8.1', '7.4') or None if not found (for graceful N/A fallback).
+    """
+    if not file_name:
+        return None
+
+    norm_key = str(file_name).strip().lower()
+    now = time.time()
+    if norm_key in IMDB_RATING_CACHE:
+        val, ts = IMDB_RATING_CACHE[norm_key]
+        if now - ts < IMDB_CACHE_TTL:
+            return val
+
+    clean_title, year = clean_movie_title_for_search(file_name)
+    if not clean_title:
+        clean_title = str(file_name).strip()
+
+    # Attempt Cinemagoer if available and functional
+    global _cinemagoer_supported
+    if _cinemagoer_instance and _cinemagoer_supported:
+        try:
+            loop = asyncio.get_running_loop()
+            def _cinemagoer_search():
+                results = _cinemagoer_instance.search_movie(clean_title)
+                if results:
+                    top_m = results[0]
+                    _cinemagoer_instance.update(top_m)
+                    rating = top_m.get('rating')
+                    return str(rating) if rating is not None else None
+                return None
+            c_rating = await loop.run_in_executor(None, _cinemagoer_search)
+            if c_rating and str(c_rating).strip().upper() not in ["N/A", "NONE", ""]:
+                IMDB_RATING_CACHE[norm_key] = (str(c_rating).strip(), now)
+                return str(c_rating).strip()
+        except Exception:
+            _cinemagoer_supported = False
+
+    # Async HTTP OMDb & IMDb Scraper
+    try:
+        timeout = aiohttp.ClientTimeout(total=4.5)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            # 1. Search OMDb by clean title & year
+            params_list = []
+            if year:
+                params_list.append({"t": clean_title, "y": year})
+            params_list.append({"t": clean_title})
+
+            for q_params in params_list:
+                for key in OMDB_FALLBACK_KEYS:
+                    try:
+                        p = dict(q_params)
+                        p["apikey"] = key
+                        async with session.get("https://www.omdbapi.com/", params=p) as resp:
+                            if resp.status == 200:
+                                data = await resp.json(content_type=None)
+                                rating = data.get("imdbRating")
+                                if data.get("Response") == "True" and rating and str(rating).strip().upper() not in ["N/A", "NONE", ""]:
+                                    res_str = str(rating).strip()
+                                    IMDB_RATING_CACHE[norm_key] = (res_str, now)
+                                    return res_str
+                    except Exception:
+                        pass
+
+            # 2. Fallback to IMDb suggestion JSON lookup to find IMDb ID (tt...)
+            try:
+                slug = re.sub(r'[^a-zA-Z0-9 ]', '', clean_title).strip().lower().replace(" ", "_")
+                if slug:
+                    first_char = slug[0]
+                    s_url = f"https://v3.sg.media-imdb.com/suggestion/{first_char}/{slug}.json"
+                    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+                    async with session.get(s_url, headers=headers) as s_resp:
+                        if s_resp.status == 200:
+                            s_data = await s_resp.json(content_type=None)
+                            items = s_data.get("d", [])
+                            for item in items:
+                                tt_id = item.get("id", "")
+                                if tt_id.startswith("tt"):
+                                    for key in OMDB_FALLBACK_KEYS:
+                                        try:
+                                            async with session.get("https://www.omdbapi.com/", params={"i": tt_id, "apikey": key}) as r2:
+                                                if r2.status == 200:
+                                                    d2 = await r2.json(content_type=None)
+                                                    rating = d2.get("imdbRating")
+                                                    if d2.get("Response") == "True" and rating and str(rating).strip().upper() not in ["N/A", "NONE", ""]:
+                                                        res_str = str(rating).strip()
+                                                        IMDB_RATING_CACHE[norm_key] = (res_str, now)
+                                                        return res_str
+                                        except Exception:
+                                            pass
+                                    break
+            except Exception as se:
+                logger.debug(f"IMDb suggestion lookup error: {se}")
+
+    except Exception as e:
+        logger.warning(f"Error fetching IMDb rating for '{file_name}': {e}")
+
+    IMDB_RATING_CACHE[norm_key] = (None, now)
+    return None
+
 PINNED_MESSAGE_CACHE: Dict[int, Tuple[Optional[int], float]] = {}
 PINNED_CACHE_TTL: float = 5.0  # Cache pinned message ID for 5 seconds to minimize Telegram API calls
 
@@ -1428,6 +1603,7 @@ async def deliver_movie_file(client: Client, user_id: int, msg_id: int):
     try:
         file_info = await db.get_file_by_msg_id(msg_id)
         title = file_info.get("title", "Movie File") if file_info else "Movie File"
+        raw_file_name = file_info.get("file_name") or file_info.get("title") or title
         size_str = format_size(file_info.get("file_size", 0)) if file_info else "N/A"
 
         meta = extract_movie_metadata(title)
@@ -1441,6 +1617,9 @@ async def deliver_movie_file(client: Client, user_id: int, msg_id: int):
             )
         except Exception as e:
             logger.warning(f"Could not send timer message: {e}")
+
+        # Start dynamic real IMDb rating fetch concurrently during countdown
+        imdb_task = asyncio.create_task(fetch_imdb_rating(raw_file_name))
 
         # Second 2: ⏳ Encrypting high-speed link... [ 2s ]
         await asyncio.sleep(1)
@@ -1478,18 +1657,35 @@ async def deliver_movie_file(client: Client, user_id: int, msg_id: int):
             except Exception as e:
                 logger.debug(f"Timer step 4 edit error: {e}")
 
+        # Await real IMDb rating result
+        try:
+            imdb_rating = await asyncio.wait_for(imdb_task, timeout=2.5)
+        except Exception:
+            imdb_rating = None
+
+        file_display_name = html.escape(str(raw_file_name))
+        file_quality = html.escape(str(meta.get("quality", "HDRip")))
+
+        if imdb_rating and str(imdb_rating).strip().upper() not in ["N/A", "NONE", ""]:
+            rating_line = f"⭐ <b>IMDb Rating:</b> {imdb_rating} / 10"
+        else:
+            rating_line = "⭐ Rating: N/A"
+
         caption = (
-            "┌──────────────────────────────────────────┐\n"
-            "│    🍿  C I N E V E R S E   V A U L T     │\n"
-            "│       Verified Cinematic Delivery        │\n"
-            "└──────────────────────────────────────────┘\n\n"
-            f"◈ **Title:** `{meta['clean_title']}`\n"
-            f"├─ 🌟 **Rating:** `8.5/10 ★` │ 🎬 **Quality:** `{meta['quality']}`\n"
-            f"├─ 🔊 **Audio:** `{meta['audio']}` │ 💾 **Size:** `{size_str}`\n"
-            "└─ ⚡ **Powered by CineVerse Network**\n\n"
-            "⏱️ *This movie file will auto-delete in 2 minutes to prevent copyright issues. Forward/save it now!*\n\n"
-            "🧹 *Dhanyawad! Help us keep our bot & CineVerse Main Group clean & active!*"
+            f"🎬 <a href='https://t.me/CineVerseFlimSearch'><b>{file_display_name}</b></a>\n\n"
+            "<b>─── 📑 CINEVERSE VAULT 📑 ───</b>\n"
+            f"{rating_line}\n"
+            f"🎥 <b>Quality:</b> {file_quality}\n"
+            "🔊 <b>Audio:</b> Hindi / Multi\n"
+            "⚡ <b>Powered By:</b> <a href='https://t.me/CineVerseFlimSearch'>CINEVERSE MOVIE ZONE</a>\n"
+            "───────────────────────\n"
+            "⏳ <b>WARNING:</b> This file will automatically delete in <b>1 MINUTE</b> to prevent copyright issues! Save it to your <b>Saved Messages</b> or forward it now! 📥\n"
+            "───────────────────────"
         )
+
+        movie_delivery_markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🚀 FAST DOWNLOAD / WATCH ONLINE 📺", url="https://t.me/CineVerseFlimSearch")]
+        ])
 
         sent_file = None
         if file_info and file_info.get("file_id"):
@@ -1497,11 +1693,35 @@ async def deliver_movie_file(client: Client, user_id: int, msg_id: int):
                 sent_file = await client.send_cached_media(
                     chat_id=user_id,
                     file_id=file_info["file_id"],
-                    caption=caption
+                    caption=caption,
+                    parse_mode=enums.ParseMode.HTML,
+                    reply_markup=movie_delivery_markup
                 )
             except Exception as e:
                 logger.warning(f"send_cached_media failed for {msg_id}: {e}")
                 sent_file = None
+
+        if not sent_file and file_info and file_info.get("file_id"):
+            try:
+                sent_file = await client.send_document(
+                    chat_id=user_id,
+                    document=file_info["file_id"],
+                    caption=caption,
+                    parse_mode=enums.ParseMode.HTML,
+                    reply_markup=movie_delivery_markup
+                )
+            except Exception:
+                try:
+                    sent_file = await client.send_video(
+                        chat_id=user_id,
+                        video=file_info["file_id"],
+                        caption=caption,
+                        parse_mode=enums.ParseMode.HTML,
+                        reply_markup=movie_delivery_markup
+                    )
+                except Exception as media_err:
+                    logger.warning(f"send_document / send_video fallback failed for {msg_id}: {media_err}")
+                    sent_file = None
 
         if not sent_file:
             target_msg_id = file_info.get("message_id") if file_info else None
@@ -1515,7 +1735,9 @@ async def deliver_movie_file(client: Client, user_id: int, msg_id: int):
                         chat_id=user_id,
                         from_chat_id=peer,
                         message_id=target_msg_id,
-                        caption=caption
+                        caption=caption,
+                        parse_mode=enums.ParseMode.HTML,
+                        reply_markup=movie_delivery_markup
                     )
                 except Exception as copy_err:
                     logger.warning(f"copy_message failed for {target_msg_id}: {copy_err}")
@@ -1530,7 +1752,7 @@ async def deliver_movie_file(client: Client, user_id: int, msg_id: int):
                 logger.debug(f"Timer message cleanup error: {del_err}")
 
         if sent_file:
-            asyncio.create_task(auto_delete(sent_file, 120))
+            asyncio.create_task(auto_delete(sent_file, 60))
     except UserIsBlocked:
         logger.warning(f"User {user_id} has blocked the bot.")
     except Exception as e:
@@ -1575,13 +1797,16 @@ async def send_gplinks_verification_card(client: Client, target_chat: Any, user_
 
     short_url = await get_file_download_short_url(file_msg_id)
 
+    dyn_rating = await fetch_imdb_rating(title)
+    rating_display = f"`{dyn_rating}/10 ★`" if dyn_rating else "`N/A`"
+
     verify_text = (
         "┌──────────────────────────────────────────┐\n"
         "│   🍿  C I N E V E R S E   V A U L T      │\n"
         "│     ⚡ 1-STEP QUICK VERIFICATION         │\n"
         "└──────────────────────────────────────────┘\n\n"
         f"◈ **Title:** `{meta['clean_title']}`\n"
-        f"├─ 🌟 **Rating:** `8.5/10 ★` │ 🎬 **Quality:** `{meta['quality']}`\n"
+        f"├─ 🌟 **Rating:** {rating_display} │ 🎬 **Quality:** `{meta['quality']}`\n"
         f"├─ 🔊 **Audio:** `{meta['audio']}` │ 💾 **Size:** `{size_str}`\n"
         "└─ ⚡ **Powered by CineVerse Network**\n\n"
         "┌──────────────────────────────────────────┐\n"

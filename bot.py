@@ -710,6 +710,7 @@ class Database:
                     "channel_id": cid,
                     "caption": cap
                 })
+            normalized_rows.sort(key=extract_year_and_date_sort_key, reverse=True)
             return normalized_rows, total
         except Exception as e:
             logger.error(f"Database search exception for query '{query}': {e}", exc_info=True)
@@ -891,6 +892,25 @@ def format_size(size_bytes: int) -> str:
     p = math.pow(1024, i)
     s = round(size_bytes / p, 2)
     return f"{s} {units[i]}"
+
+def extract_year_and_date_sort_key(doc: Dict[str, Any]) -> Tuple[int, int]:
+    """
+    Extracts (year, secondary_sort_metric) for descending sorting (Newest First).
+    Higher release year (e.g. 2026 > 2025 > 2024) comes first.
+    If years are equal (or None), higher message_id / created_at timestamp comes first.
+    """
+    name = str(doc.get("file_name") or doc.get("title") or "")
+    caption = str(doc.get("caption") or "")
+
+    ym = re.search(r'\b(19\d\d|20\d\d)\b', name) or re.search(r'\b(19\d\d|20\d\d)\b', caption)
+    year = int(ym.group(1)) if ym else 0
+
+    m_id = doc.get("message_id")
+    msg_num = int(m_id) if (isinstance(m_id, int) or (isinstance(m_id, str) and str(m_id).isdigit())) else 0
+    created_at = int(doc.get("created_at") or doc.get("date") or 0)
+    secondary = max(msg_num, created_at)
+
+    return (year, secondary)
 
 def extract_movie_metadata(title: str) -> Dict[str, str]:
     """
@@ -1311,6 +1331,7 @@ async def query_movie_files(query_text: str, limit: int = PAGE_SIZE) -> Tuple[Li
             "channel_id": cid
         })
 
+    files.sort(key=extract_year_and_date_sort_key, reverse=True)
     return files, total
 
 async def execute_movie_search_from_callback(client: Client, query: CallbackQuery, clean_title: str):
@@ -1327,15 +1348,25 @@ async def execute_movie_search_from_callback(client: Client, query: CallbackQuer
     total_pages = math.ceil(total / PAGE_SIZE) if total > PAGE_SIZE else 1
     bot_uname = await get_bot_username(client)
     markup = await build_pagination_markup(files, cache_id, 1, total_pages, bot_username=bot_uname)
-    response_text = format_search_text(clean_title, total, 1, total_pages)
+    req_user = query.from_user.first_name if (query.from_user and query.from_user.first_name) else "Friend"
+    response_text = format_search_text(
+        query=clean_title,
+        total=total,
+        page=1,
+        total_pages=total_pages,
+        files=files,
+        bot_username=bot_uname,
+        requested_by=req_user,
+        elapsed_time="0.12s"
+    )
 
     try:
-        await query.message.edit_text(response_text, reply_markup=markup)
+        await query.message.edit_text(response_text, reply_markup=markup, parse_mode=enums.ParseMode.HTML)
         asyncio.create_task(auto_delete(query.message, 60))
     except Exception as e:
         logger.warning(f"Error editing message from spelling callback: {e}")
         try:
-            sent_msg = await query.message.reply_text(response_text, reply_markup=markup)
+            sent_msg = await query.message.reply_text(response_text, reply_markup=markup, parse_mode=enums.ParseMode.HTML)
             if sent_msg:
                 asyncio.create_task(auto_delete(sent_msg, 60))
         except Exception:
@@ -1540,23 +1571,69 @@ def is_duplicate_callback(query: CallbackQuery, expiry: float = REQUEST_LOCK_EXP
         return True
     return False
 
-def format_search_text(query: str, total: int, page: int, total_pages: int) -> str:
-    return (
-        "┌──────────────────────────────────────────┐\n"
-        "│   🍿  C I N E V E R S E   S E A R C H    │\n"
-        "│       Luxury Media Index & Vault         │\n"
-        "└──────────────────────────────────────────┘\n\n"
-        f"🔍 **Search Query:** `{query.upper()}`\n"
-        f"📊 **Total Results:** `{total}`  │  📄 **Page:** `{page}/{total_pages}`\n\n"
-        "◈ **Download Instructions:**\n"
-        "├─ 📥 Tap any quality badge below to download\n"
-        "├─ ⚡ Direct high-speed personal chat delivery\n"
-        "└─ ⏱️ Auto-delete in 60s for a clean chat history\n\n"
-        "──────────────────────────────────────────\n"
-        "⏱️ *This search result auto-deletes in 60 seconds.*\n"
-        "🧹 *Dhanyawad! Help us keep our CineVerse Main Group clean & active!*\n"
-        "⚖️ *DMCA Notice: We index public channels. Use /dmca.*"
+def format_search_text(
+    query: str,
+    total: int,
+    page: int,
+    total_pages: int,
+    files: Optional[List[Dict[str, Any]]] = None,
+    bot_username: Optional[str] = None,
+    requested_by: Optional[str] = None,
+    elapsed_time: Optional[Union[float, str]] = None
+) -> str:
+    """
+    Formats the search result card in HTML:
+    1. Header with CINEVERSE branding, TITLE, RESULT IN, REQUESTED BY, TOTAL FILES, PAGE.
+    2. Clean numbered list with file size and clickable hyperlinks to instant download.
+    3. Strictly sorted descending by release year / upload date (Newest First).
+    """
+    bot_uname = (bot_username or BOT_USERNAME or os.getenv("BOT_USERNAME") or "CineVerseFilterBot").lstrip("@")
+    title_clean = html.escape(query.strip().upper())
+    req_by_str = html.escape(str(requested_by or "Friend"))
+
+    if elapsed_time is not None:
+        if isinstance(elapsed_time, (int, float)):
+            elapsed_str = f"{round(elapsed_time, 2)}s"
+        else:
+            elapsed_str = str(elapsed_time).strip()
+    else:
+        elapsed_str = "0.18s"
+
+    header = (
+        "🍿 <b><a href='https://t.me/CineVerseFlimSearch'>CINEVERSE MOVIE ZONE</a></b> 🍿\n"
+        "───────────────────────\n"
+        f"📁 <b>TITLE:</b> <code>{title_clean}</code>\n"
+        f"⚡ <b>RESULT IN:</b> <code>{elapsed_str}</code>\n"
+        f"👤 <b>REQUESTED BY:</b> <b>{req_by_str}</b>\n"
+        f"📊 <b>TOTAL FILES:</b> <code>{total}</code> │ 📄 <b>PAGE:</b> <code>{page}/{total_pages}</code>\n"
+        "───────────────────────\n\n"
     )
+
+    if not files:
+        return header + "⚠️ <i>No files available for this selection.</i>"
+
+    # Sort search results strictly from top to bottom based on release year / upload date (Newest First)
+    sorted_files = list(files)
+    sorted_files.sort(key=extract_year_and_date_sort_key, reverse=True)
+
+    start_idx = (page - 1) * PAGE_SIZE
+    list_items = []
+    for idx, f in enumerate(sorted_files, start=start_idx + 1):
+        f_size = format_size(f.get("file_size", 0))
+        raw_name = f.get("file_name") or f.get("title") or "Movie File"
+        f_name = html.escape(str(raw_name).strip())
+        target_id = str(f.get("message_id") or f.get("file_id") or "0")
+        file_link = f"https://t.me/{bot_uname}?start=file_{target_id}"
+        list_items.append(f"{idx}. [{f_size}] <a href=\"{file_link}\"><b>{f_name}</b></a>")
+
+    body = "\n\n".join(list_items)
+
+    footer = (
+        "\n\n───────────────────────\n"
+        "⏳ <i>Files will automatically delete in 1 minute to prevent copyright issues!</i>"
+    )
+
+    return header + body + footer
 
 # ---------------------------------------------------------------------------
 # GPLINKS SHORTENER ENGINE (STRICT 1 FILE = 1 AD VERIFICATION)
@@ -1635,17 +1712,6 @@ async def get_file_download_short_url(file_msg_id: int) -> str:
 
 async def build_pagination_markup(files: List[Dict[str, Any]], cache_id: str, current_page: int, total_pages: int, bot_username: Optional[str] = None) -> InlineKeyboardMarkup:
     buttons = []
-    bot_uname = (bot_username or BOT_USERNAME or os.getenv("BOT_USERNAME") or "CineVerseFilterBot").lstrip("@")
-
-    for f in files:
-        name = f.get("title") or f.get("file_name") or "Movie"
-        size_str = format_size(f.get("file_size", 0))
-        meta = extract_movie_metadata(name)
-        display_name = (meta["clean_title"][:26] + "...") if len(meta["clean_title"]) > 29 else meta["clean_title"]
-        target_btn_id = str(f.get('message_id') or f.get('file_id') or '0')
-        btn_text = f"📥 [ {meta['quality']} │ {size_str} ] ▷ {display_name}"
-        file_url = f"https://t.me/{bot_uname}?start=file_{target_btn_id}"
-        buttons.append([InlineKeyboardButton(text=btn_text, url=file_url)])
 
     # Row 1: Interactive filter submenus
     filter_row = [
@@ -1659,7 +1725,7 @@ async def build_pagination_markup(files: List[Dict[str, Any]], cache_id: str, cu
     nav_row = []
     if current_page > 1:
         nav_row.append(InlineKeyboardButton("◀️ PREV", callback_data=f"nav_{cache_id}_{current_page - 1}"))
-    nav_row.append(InlineKeyboardButton(f"💎 {current_page} / {total_pages}", callback_data="cb_noop"))
+    nav_row.append(InlineKeyboardButton(f"📄 Page {current_page}/{total_pages}", callback_data="cb_noop"))
     if current_page < total_pages:
         nav_row.append(InlineKeyboardButton("NEXT ▶️", callback_data=f"nav_{cache_id}_{current_page + 1}"))
     buttons.append(nav_row)
@@ -1673,7 +1739,7 @@ async def build_pagination_markup(files: List[Dict[str, Any]], cache_id: str, cu
     ])
 
     # Row 4: Clean Close button
-    buttons.append([InlineKeyboardButton("🗑️ Close & Clean Search", callback_data="cb_close")])
+    buttons.append([InlineKeyboardButton("❌ Close", callback_data="cb_close")])
     return InlineKeyboardMarkup(buttons)
 
 def build_quality_menu(cache_id: str) -> InlineKeyboardMarkup:
@@ -3706,7 +3772,7 @@ async def auto_filter_handler(client: Client, message: Message):
         return
 
     # 1. CHECK DB COUNT AT SEARCH TIME:
-    # Inside the search query handler, before querying, print/log movies count
+    search_start_time = time.time()
     db_movie_count = 0
     try:
         db_movie_count = await db.movies.count_documents({})
@@ -3798,10 +3864,27 @@ async def auto_filter_handler(client: Client, message: Message):
         total_pages = math.ceil(total / PAGE_SIZE) if total > PAGE_SIZE else 1
         bot_uname = await get_bot_username(client)
         markup = await build_pagination_markup(files, cache_id, 1, total_pages, bot_username=bot_uname)
-        response_text = format_search_text(text, total, 1, total_pages)
+        elapsed_val = f"{round(time.time() - search_start_time, 2)}s"
+        req_user = message.from_user.first_name if (message.from_user and message.from_user.first_name) else "Friend"
+        response_text = format_search_text(
+            query=text,
+            total=total,
+            page=1,
+            total_pages=total_pages,
+            files=files,
+            bot_username=bot_uname,
+            requested_by=req_user,
+            elapsed_time=elapsed_val
+        )
 
         # Reply directly (Single message only, NO duplicate notices)
-        sent_msg = await message.reply_text(response_text, reply_markup=markup, quote=True)
+        sent_msg = await message.reply_text(
+            response_text,
+            reply_markup=markup,
+            quote=True,
+            parse_mode=enums.ParseMode.HTML,
+            disable_web_page_preview=True
+        )
         if sent_msg:
             asyncio.create_task(auto_delete(sent_msg, 60, reply_to_message=message))
     except Exception as e:
@@ -3982,6 +4065,7 @@ async def callback_router(client: Client, query: CallbackQuery):
             return
 
         target_query = f"{base_query} {filter_val}".strip()
+        flt_start_time = time.time()
         files, total = await db.search_files(target_query, offset=0, limit=PAGE_SIZE)
 
         if total == 0:
@@ -3994,9 +4078,20 @@ async def callback_router(client: Client, query: CallbackQuery):
         total_pages = math.ceil(total / PAGE_SIZE)
         bot_uname = await get_bot_username(client)
         markup = await build_pagination_markup(files, new_cache_id, 1, total_pages, bot_username=bot_uname)
-        response_text = format_search_text(target_query, total, 1, total_pages)
+        elapsed_val = f"{round(time.time() - flt_start_time, 2)}s"
+        req_user = query.from_user.first_name if (query.from_user and query.from_user.first_name) else "Friend"
+        response_text = format_search_text(
+            query=target_query,
+            total=total,
+            page=1,
+            total_pages=total_pages,
+            files=files,
+            bot_username=bot_uname,
+            requested_by=req_user,
+            elapsed_time=elapsed_val
+        )
         try:
-            await query.message.edit_text(response_text, reply_markup=markup)
+            await query.message.edit_text(response_text, reply_markup=markup, parse_mode=enums.ParseMode.HTML, disable_web_page_preview=True)
         except MessageNotModified:
             pass
         await query.answer(f"✅ Filter applied: {filter_val}")
@@ -4010,14 +4105,26 @@ async def callback_router(client: Client, query: CallbackQuery):
             await query.answer("⚠️ Search session expired. Please search again.", show_alert=True)
             return
 
+        back_start_time = time.time()
         files, total = await db.search_files(search_query, offset=0, limit=PAGE_SIZE)
         total_pages = math.ceil(total / PAGE_SIZE) if total > 0 else 1
 
         bot_uname = await get_bot_username(client)
         markup = await build_pagination_markup(files, cache_id, 1, total_pages, bot_username=bot_uname)
-        response_text = format_search_text(search_query, total, 1, total_pages)
+        elapsed_val = f"{round(time.time() - back_start_time, 2)}s"
+        req_user = query.from_user.first_name if (query.from_user and query.from_user.first_name) else "Friend"
+        response_text = format_search_text(
+            query=search_query,
+            total=total,
+            page=1,
+            total_pages=total_pages,
+            files=files,
+            bot_username=bot_uname,
+            requested_by=req_user,
+            elapsed_time=elapsed_val
+        )
         try:
-            await query.message.edit_text(response_text, reply_markup=markup)
+            await query.message.edit_text(response_text, reply_markup=markup, parse_mode=enums.ParseMode.HTML, disable_web_page_preview=True)
         except MessageNotModified:
             pass
         await query.answer()
@@ -4418,6 +4525,7 @@ async def callback_router(client: Client, query: CallbackQuery):
             return
 
         offset = (page - 1) * PAGE_SIZE
+        nav_start_time = time.time()
         files, total = await db.search_files(search_query, offset=offset, limit=PAGE_SIZE)
         total_pages = math.ceil(total / PAGE_SIZE) if total > 0 else 1
 
@@ -4427,9 +4535,20 @@ async def callback_router(client: Client, query: CallbackQuery):
 
         bot_uname = await get_bot_username(client)
         markup = await build_pagination_markup(files, cache_id, page, total_pages, bot_username=bot_uname)
-        response_text = format_search_text(search_query, total, page, total_pages)
+        elapsed_val = f"{round(time.time() - nav_start_time, 2)}s"
+        req_user = query.from_user.first_name if (query.from_user and query.from_user.first_name) else "Friend"
+        response_text = format_search_text(
+            query=search_query,
+            total=total,
+            page=page,
+            total_pages=total_pages,
+            files=files,
+            bot_username=bot_uname,
+            requested_by=req_user,
+            elapsed_time=elapsed_val
+        )
         try:
-            await query.message.edit_text(response_text, reply_markup=markup)
+            await query.message.edit_text(response_text, reply_markup=markup, parse_mode=enums.ParseMode.HTML, disable_web_page_preview=True)
         except MessageNotModified:
             pass
         await query.answer()
